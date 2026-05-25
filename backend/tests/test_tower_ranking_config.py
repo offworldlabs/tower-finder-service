@@ -1,12 +1,8 @@
 """Additional tower_ranking tests — reload_config + parse_geom edge cases."""
 
 import json
-import os
 
-os.environ.setdefault("RETINA_ENV", "test")
-os.environ.setdefault("RADAR_API_KEY", "test-key-abc123")
-
-from services import tower_ranking  # noqa: E402
+from services import tower_ranking
 
 
 class TestReloadConfig:
@@ -36,11 +32,13 @@ class TestReloadConfig:
             },
         }
 
+        original_path = tower_ranking._CONFIG_PATH
+        original_gain = tower_ranking.RX_ANTENNA_GAIN_DBI
+
         fake_path = tmp_path / "tower_config.json"
         fake_path.write_text(json.dumps(cfg))
         monkeypatch.setattr(tower_ranking, "_CONFIG_PATH", fake_path)
 
-        original_gain = tower_ranking.RX_ANTENNA_GAIN_DBI
         try:
             tower_ranking.reload_config()
             assert tower_ranking.RX_ANTENNA_GAIN_DBI == 12.5
@@ -52,8 +50,7 @@ class TestReloadConfig:
             assert far[2] == float("inf")
         finally:
             # Restore real config so downstream tests aren't broken
-            from core.runtime_config import runtime_path
-            monkeypatch.setattr(tower_ranking, "_CONFIG_PATH", runtime_path("tower_config.json"))
+            monkeypatch.setattr(tower_ranking, "_CONFIG_PATH", original_path)
             tower_ranking.reload_config()
             assert original_gain == tower_ranking.RX_ANTENNA_GAIN_DBI
 

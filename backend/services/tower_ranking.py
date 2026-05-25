@@ -1,8 +1,9 @@
 import json
 import math
+import os
 import re
-
-from core.runtime_config import migrate_defaults_into_runtime, runtime_path
+import shutil
+from pathlib import Path
 
 EARTH_RADIUS_KM = 6371.0
 
@@ -19,15 +20,31 @@ MEASUREMENT_TOLERANCE_MHZ: dict[str, float] = {
 }
 
 # ── Load configurable settings from tower_config.json ────────────────────
-_CONFIG_PATH = runtime_path("tower_config.json")
+# Image-shipped default lives next to this module (config/ is image-only); the
+# runtime overlay holds whatever PUT /api/config writes back, so the source
+# tree never gets mutated at runtime. Override the overlay location with
+# TOWER_FINDER_RUNTIME_DIR.
+_SOURCE_DEFAULT_DIR = Path(__file__).resolve().parent.parent / "config"
+_RUNTIME_DIR = Path(os.environ.get("TOWER_FINDER_RUNTIME_DIR", "data/runtime"))
+_CONFIG_PATH = _RUNTIME_DIR / "tower_config.json"
+
+
+def _seed_defaults() -> None:
+    """Copy source defaults into the runtime overlay on first use. Idempotent."""
+    _RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    if _CONFIG_PATH.exists():
+        return
+    src = _SOURCE_DEFAULT_DIR / "tower_config.json"
+    if src.exists():
+        shutil.copy2(src, _CONFIG_PATH)
 
 
 def _load_config() -> dict:
-    # Self-heal: this module is imported at app startup BEFORE the lifespan
-    # hook runs, and also imported standalone by tests. If the runtime overlay
-    # hasn't been seeded yet, seed it now so the open() below finds a file.
+    # Self-heal: this module is imported at app startup AND standalone by
+    # tests. If the runtime overlay hasn't been seeded yet, seed it now so
+    # the open() below finds a file.
     if not _CONFIG_PATH.exists():
-        migrate_defaults_into_runtime()
+        _seed_defaults()
     with _CONFIG_PATH.open() as f:
         return json.load(f)
 
