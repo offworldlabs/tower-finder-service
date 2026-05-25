@@ -13,13 +13,13 @@ class Measurement(BaseModel):
     """A single signal detected by the spectrum analyser."""
 
     freq_mhz: float = Field(..., gt=0, lt=10_000, description="Centre frequency in MHz")
-    snr_db: float = Field(..., description="Signal-to-noise ratio in dB")
-    obw_fraction: float = Field(
-        ..., ge=0.0, le=1.0,
-        description="Occupied bandwidth as a fraction of the channel bandwidth",
+    snr_db: float | None = Field(None, description="Signal-to-noise ratio in dB. None for TV channels.")
+    obw_fraction: float | None = Field(
+        None, ge=0.0, le=1.0,
+        description="Occupied bandwidth as a fraction of the channel bandwidth. None for TV channels.",
     )
     score: float = Field(..., description="Composite passive-radar suitability score")
-    power_db: float = Field(..., description="Measured signal power in dBFS or dBm")
+    power_db: float | None = Field(None, description="Measured signal power in dBFS or dBm. None for FM channels.")
     band: str = Field(..., description="Band reported by the analyser: FM, VHF, or UHF")
 
 
