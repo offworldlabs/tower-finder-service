@@ -5,7 +5,18 @@ import re
 from core.runtime_config import migrate_defaults_into_runtime, runtime_path
 
 EARTH_RADIUS_KM = 6371.0
-FREQUENCY_MATCH_TOLERANCE_MHZ = 5.0  # ±5 MHz for user-measured frequency matching
+
+# Band-specific tolerances for matching spectrum-analyser measurements to database towers.
+# The analyser gives sub-kHz precision so the tolerance only needs to cover database
+# inaccuracies, not human measurement error.
+#   FM:      stations are 200 kHz apart — ±150 kHz avoids cross-station matches.
+#   VHF/UHF: DVB-T channels are 7–8 MHz wide — ±4 MHz catches the right channel
+#            without bleeding into an adjacent one.
+MEASUREMENT_TOLERANCE_MHZ: dict[str, float] = {
+    "FM": 0.15,
+    "VHF": 4.0,
+    "UHF": 4.0,
+}
 
 # ── Load configurable settings from tower_config.json ────────────────────
 _CONFIG_PATH = runtime_path("tower_config.json")
@@ -229,35 +240,39 @@ def _polygon_centroid(wkt: str) -> tuple[float, float] | None:
     return sum(lats) / len(lats), sum(lngs) / len(lngs)
 
 
-def parse_user_frequencies(raw: str, max_count: int = 10) -> list[float]:
-    """Parse a comma-separated string of frequencies in MHz. Returns up to max_count valid values."""
-    if not raw or not raw.strip():
-        return []
-    freqs = []
-    for part in raw.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        try:
-            val = float(part)
-            if 0 < val < 10000:  # reasonable MHz range
-                freqs.append(val)
-        except ValueError:
-            continue
-        if len(freqs) >= max_count:
-            break
-    return freqs
 
+def _match_measurement(freq_mhz: float, band: str, measurements: list[dict]) -> dict | None:
+    """Return the closest measurement to freq_mhz within the band-specific tolerance.
 
-def process_and_rank(raw_systems: list, user_lat: float, user_lon: float, limit: int = 0, user_frequencies: list[float] | None = None, radius_km: float = 0) -> list:
+    If multiple measurements fall within tolerance, the one with the smallest
+    frequency difference wins. Returns None when no measurement matches.
     """
-    Takes raw system records from Maprad, filters and ranks them
+    tolerance = MEASUREMENT_TOLERANCE_MHZ.get(band, 1.0)
+    best: dict | None = None
+    best_diff = float("inf")
+    for m in measurements:
+        diff = abs(m["freq_mhz"] - freq_mhz)
+        if diff <= tolerance and diff < best_diff:
+            best = m
+            best_diff = diff
+    return best
+
+
+def process_and_rank(raw_systems: list, user_lat: float, user_lon: float, limit: int = 0, radius_km: float = 0, measurements: list[dict] | None = None) -> list:
+    """
+    Takes raw system records from Maprad/FCC, filters and ranks them
     for passive radar suitability.
 
     Args:
         limit: Max towers to return. 0 means use DEFAULT_LIMIT from config.
         radius_km: Search radius in km. Towers beyond this are excluded.
                    0 means use DEFAULT_RADIUS_KM.
+        measurements: Optional list of spectrum-analyser measurement dicts
+            (see models.measurements.Measurement).  Each tower that matches
+            a measurement gains ``measured=True`` plus the analyser quality
+            fields (``snr_db``, ``score``, ``power_db``, ``obw_fraction``)
+            and ``frequency_matched=True``.  Unmatched towers carry
+            ``measured=False`` and None for those fields.
     """
     effective_radius = radius_km if radius_km > 0 else DEFAULT_RADIUS_KM
     effective_limit = limit if limit > 0 else DEFAULT_LIMIT
@@ -298,13 +313,9 @@ def process_and_rank(raw_systems: list, user_lat: float, user_lon: float, limit:
             brg = initial_bearing(user_lat, user_lon, tower_lat, tower_lon)
             dist_class = classify_distance(dist)
 
-            # Check if tower frequency matches any user-measured frequency (±5 MHz)
-            freq_matched = False
-            if user_frequencies:
-                for uf in user_frequencies:
-                    if abs(freq_val - uf) <= FREQUENCY_MATCH_TOLERANCE_MHZ:
-                        freq_matched = True
-                        break
+            # Match against spectrum-analyser measurements (band-specific tolerance).
+            measurement = _match_measurement(freq_val, band, measurements) if measurements else None
+            freq_matched = measurement is not None
 
             towers.append({
                 "callsign": device.get("callsign") or "",
@@ -324,6 +335,14 @@ def process_and_rank(raw_systems: list, user_lat: float, user_lon: float, limit:
                 "licence_type": licence.get("type") or "",
                 "licence_subtype": licence.get("subtype") or "",
                 "frequency_matched": freq_matched,
+                # Spectrum-analyser fields — populated when a measurement matched,
+                # None otherwise.  Ranking uses these fields only after integration
+                # is discussed; for now they are carried through for the caller.
+                "measured": measurement is not None,
+                "snr_db": measurement["snr_db"] if measurement else None,
+                "score": measurement["score"] if measurement else None,
+                "power_db": measurement["power_db"] if measurement else None,
+                "obw_fraction": measurement["obw_fraction"] if measurement else None,
             })
 
     # Deduplicate by (callsign, frequency) — keep the strongest
@@ -335,14 +354,8 @@ def process_and_rank(raw_systems: list, user_lat: float, user_lon: float, limit:
     towers = list(seen.values())
 
     # Sort using configurable sort order
-    # If user frequencies provided, frequency-matched towers sort first
-    has_user_freqs = bool(user_frequencies)
-
     def _sort_key(t):
         parts = []
-        # Frequency match is highest priority when user provided frequencies
-        if has_user_freqs:
-            parts.append(0 if t.get("frequency_matched") else 1)
         for rule in SORT_ORDER:
             field = rule["field"]
             asc = rule.get("ascending", True)

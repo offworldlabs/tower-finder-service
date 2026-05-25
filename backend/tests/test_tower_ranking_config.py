@@ -99,18 +99,3 @@ class TestParseGeomEdgeCases:
         assert result is not None
 
 
-class TestParseUserFrequenciesEdgeCases:
-    def test_out_of_range_filtered(self):
-        # 0 and >=10000 MHz are invalid; 100 is valid.
-        result = tower_ranking.parse_user_frequencies("0, 100, 99999")
-        assert result == [100.0]
-
-    def test_max_count_enforced(self):
-        raw = ",".join(str(i) for i in range(1, 20))
-        result = tower_ranking.parse_user_frequencies(raw, max_count=3)
-        assert len(result) == 3
-
-    def test_whitespace_and_empty(self):
-        assert tower_ranking.parse_user_frequencies("  ") == []
-        assert tower_ranking.parse_user_frequencies(None) == []
-        assert tower_ranking.parse_user_frequencies("abc, 88.5, xyz") == [88.5]
