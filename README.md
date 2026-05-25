@@ -1,26 +1,52 @@
 # tower-finder-service
 
-Tower-finding logic split out from the `Tower-Finder` monorepo (full history preserved via `git filter-repo`). Hand-off home for ongoing work on tower selection / node tuning.
+FastAPI service that ranks broadcast towers near a node from FCC and Maprad data. Split out from the `Tower-Finder` monorepo with full git history (`git filter-repo`).
 
-## Contents
+## Run
 
-| Path | Purpose |
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+uvicorn app:app --reload
+```
+
+Optional env vars:
+- `MAPRAD_API_KEY` — required for non-US queries; US can fall back to FCC only.
+- `TOWER_FINDER_RUNTIME_DIR` — where `tower_config.json` is read/written (default `./data/runtime/`). On first start the runtime overlay is seeded from `backend/config/tower_config.json`.
+
+## API
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/towers?lat&lon&altitude&radius_km&limit&source&frequencies` | Ranked towers near (lat, lon). `frequencies` is a comma-separated list of MHz peaks (up to 10), matched within ±5 MHz of transmitter frequency. |
+| GET | `/api/config` | Current ranking config (bands, distance classes, defaults). |
+| PUT | `/api/config` | Replace ranking config; sanity-capped at 1 MB. No auth — gate this behind a reverse proxy if it's reachable externally. |
+
+## Layout
+
+| Path | What's there |
 | --- | --- |
-| `backend/services/tower_ranking.py` | Distance / band / EIRP ranking algorithm |
-| `backend/routes/towers.py` | FastAPI endpoints (tower search, config, elevation, health — to be trimmed) |
+| `app.py` | FastAPI entry point |
+| `backend/routes/towers.py` | HTTP routes |
+| `backend/services/tower_ranking.py` | Ranking algorithm + config loader |
 | `backend/clients/fcc.py` | FCC TV/FM Query CGI client |
 | `backend/clients/maprad.py` | Maprad.io broadcast-systems client |
-| `backend/config/tower_config.json` | Default ranking config (bands, distance classes, defaults) |
-| `backend/tests/test_tower_*.py`, `test_towers_*.py` | Unit + route tests |
-| `frontend/src/components/SearchForm.tsx` | Search UI |
-| `frontend/e2e/tower-finder.spec.ts` | Playwright e2e |
+| `backend/config/tower_config.json` | Default ranking config (image-shipped) |
+| `backend/tests/` | pytest suite (141 tests) |
+| `frontend/` | Reference React/Playwright snippets from the parent monorepo's UI — not part of the service runtime |
+| `pyproject.toml` | Package + tooling config |
 
-## Known follow-ups
+## Tests
 
-- `tower_ranking.py` still imports `core.runtime_config` from the parent project — needs to be vendored or replaced for this repo to install standalone.
-- `routes/towers.py` bundles tower endpoints with elevation/health/config endpoints — trim down to tower-only when convenient.
-- No `pyproject.toml` / build wiring yet — add when packaging is needed.
+```bash
+pytest -q
+```
 
 ## Origin
 
-Extracted from `offworldlabs/Tower-Finder` on 2026-05-20 with `git filter-repo --path …` over the 11 paths above; the parent repo still contains the same code for now.
+Extracted from `offworldlabs/Tower-Finder` on 2026-05-20 with `git filter-repo --path ...` over the 11 tower-finder paths, then made standalone:
+- `tower_ranking.py` no longer imports `core.runtime_config`; the runtime overlay is inlined.
+- `routes/towers.py` trimmed to tower endpoints only (dropped `/api/health`, `/api/elevation`, and the `core.users.require_admin` auth dep).
+- Tests rewired to a local `app` entry point.
+
+The parent repo still contains the same code for now; deduplication can come later.
