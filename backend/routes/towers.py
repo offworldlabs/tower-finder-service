@@ -1,17 +1,14 @@
-"""Tower-finding, config, elevation, and health endpoints."""
+"""Tower-finding and tower-config endpoints."""
 
 import json
 import logging
 import os
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, HTTPException, Query
 
 from clients.fcc import fetch_fcc_broadcast_systems
 from clients.maprad import fetch_broadcast_systems
-from core.users import require_admin
-from services.health import compute_health_issues
 from services.tower_ranking import (
     _CONFIG_PATH,
     DEFAULT_LIMIT,
@@ -151,27 +148,6 @@ async def find_towers(
     }
 
 
-@router.get("/api/health")
-async def health(strict: bool = Query(False)):
-    """Report server health.
-
-    Always 200 by default (liveness — used by the Docker healthcheck, which
-    must not restart the container on transient degradation). Pass ``strict=1``
-    for a readiness probe that returns 503 when degraded — use this for the
-    external uptime monitor. Alerting is owned by the health-monitor task, not
-    this endpoint, so health stays observable even when nothing polls it.
-    """
-    issues = compute_health_issues()
-    if issues:
-        # Details are logged (and alerted on by the monitor), never exposed on
-        # this unauthenticated endpoint.
-        logging.warning("Health check degraded: %s", ", ".join(i["type"] for i in issues))
-        if strict:
-            return JSONResponse({"status": "degraded"}, status_code=503)
-        return {"status": "degraded"}
-    return {"status": "ok"}
-
-
 @router.get("/api/config")
 async def get_config():
     with open(_CONFIG_PATH) as f:
@@ -179,7 +155,7 @@ async def get_config():
 
 
 @router.put("/api/config")
-async def update_config(body: dict, _admin=Depends(require_admin)):
+async def update_config(body: dict):
     # Sanity check: config should be a reasonable size
     raw = json.dumps(body)
     if len(raw) > 1_000_000:
@@ -188,14 +164,3 @@ async def update_config(body: dict, _admin=Depends(require_admin)):
         f.write(json.dumps(body, indent=2))
     reload_config()
     return {"status": "updated"}
-
-
-@router.get("/api/elevation")
-async def get_elevation(
-    lat: float = Query(..., ge=-90, le=90),
-    lon: float = Query(..., ge=-180, le=180),
-):
-    elev = await _lookup_elevation(lat, lon)
-    if elev is None:
-        raise HTTPException(status_code=502, detail="Elevation lookup failed")
-    return {"latitude": lat, "longitude": lon, "elevation_m": elev}
