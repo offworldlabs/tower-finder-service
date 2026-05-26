@@ -18,7 +18,8 @@ Optional env vars:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/towers?lat&lon&altitude&radius_km&limit&source&frequencies` | Ranked towers near (lat, lon). `frequencies` is a comma-separated list of MHz peaks (up to 10), matched within ±5 MHz of transmitter frequency. |
+| GET | `/api/towers?lat&lon&altitude&radius_km&limit&source` | Ranked towers near (lat, lon) using model-based scoring (EIRP, FSPL, distance class). |
+| POST | `/api/towers` | Same tower search, enriched with spectrum-analyser measurements. Body: `MeasurementPayload` (see `backend/models/measurements.py`). Matched towers carry real measured fields (`snr_db`, `score`, `obw_fraction`, `power_db`, `measured=true`); unmatched towers carry nulls. |
 | GET | `/api/config` | Current ranking config (bands, distance classes, defaults). |
 | PUT | `/api/config` | Replace ranking config; sanity-capped at 1 MB. No auth — gate this behind a reverse proxy if it's reachable externally. |
 
