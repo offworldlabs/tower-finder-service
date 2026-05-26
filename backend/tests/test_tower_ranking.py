@@ -632,23 +632,28 @@ class TestProcessAndRankMeasurements:
                                   measurements=[m])
         assert result[0]["frequency_matched"] is True
 
-    def test_unmatched_tower_has_measured_false(self):
-        # Measurement is on 101.1 MHz; tower is on 95.5 MHz — outside FM tolerance
+    def test_unmatched_tower_excluded_when_measurements_provided(self):
+        # Measurement is on 101.1 MHz; tower is on 95.5 MHz — outside FM tolerance.
+        # The SDR can't see this tower, so it must be dropped from the results entirely.
         m = _make_measurement(101.1, band="FM")
         result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON,
                                   measurements=[m])
-        t = result[0]
-        assert t["measured"] is False
-        assert t["snr_db"] is None
-        assert t["score"] is None
-        assert t["power_db"] is None
-        assert t["obw_fraction"] is None
+        assert result == [], (
+            "A tower with no matching measurement should be excluded — "
+            "the SDR cannot see it"
+        )
 
-    def test_unmatched_tower_frequency_matched_false(self):
-        m = _make_measurement(101.1, band="FM")
-        result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON,
+    def test_only_matched_towers_returned_when_measurements_provided(self):
+        # Two towers: one on the measured frequency, one not.
+        # Only the matched tower should appear in results.
+        m = _make_measurement(95.5, band="FM")
+        other_device = _device(freq_mhz=101.1, lat=33.93, lon=-84.388, callsign="KOTHER")
+        other_system = _system([other_device])
+        result = process_and_rank([_FM_SYSTEM, other_system], _USER_LAT, _USER_LON,
                                   measurements=[m])
-        assert result[0]["frequency_matched"] is False
+        assert len(result) == 1
+        assert result[0]["callsign"] == "WXYZ"
+        assert result[0]["measured"] is True
 
     def test_empty_measurements_list_behaves_as_no_measurements(self):
         result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON,

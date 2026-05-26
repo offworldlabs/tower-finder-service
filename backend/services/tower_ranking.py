@@ -370,6 +370,12 @@ def process_and_rank(raw_systems: list, user_lat: float, user_lon: float, limit:
             seen[key] = t
     towers = list(seen.values())
 
+    # When the SDR has provided measurements, only rank towers it can actually see.
+    # Towers with no matching measurement are invisible to the radar — drop them.
+    # (An empty measurements list means no scan data was sent; treat as no filter.)
+    if measurements:
+        towers = [t for t in towers if t["frequency_matched"]]
+
     # Sort using configurable sort order
     def _sort_key(t):
         parts = []
