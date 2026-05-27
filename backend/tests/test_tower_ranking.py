@@ -597,10 +597,10 @@ class TestMatchMeasurement:
         assert _match_measurement(95.5, "FM", []) is None
 
     def test_closest_wins_when_multiple_in_tolerance(self):
-        m_close = _make_measurement(95.5, band="FM")
-        m_far = _make_measurement(95.4, band="FM")
-        # Both within ±0.15 of 95.45; 95.5 is closer
-        result = _match_measurement(95.45, "FM", [m_far, m_close])
+        m_close = _make_measurement(95.5, band="FM")   # 0.02 MHz from query
+        m_far   = _make_measurement(95.4, band="FM")   # 0.12 MHz from query
+        # Query at 95.48 — both within ±0.15 but 95.5 is genuinely closer
+        result = _match_measurement(95.48, "FM", [m_far, m_close])
         assert result is m_close
 
     def test_fm_tolerance_tighter_than_vhf(self):

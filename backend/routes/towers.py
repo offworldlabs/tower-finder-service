@@ -151,12 +151,9 @@ async def find_towers_with_measurements(payload: MeasurementPayload):
 
     Fetches the same FCC/Maprad tower database as GET /api/towers, then matches
     each tower against the provided measurements using band-specific frequency
-    tolerances.  Matched towers carry real measured quality fields (``snr_db``,
-    ``score``, ``power_db``, ``obw_fraction``, ``measured=True``); unmatched
-    towers carry ``measured=False`` and null for those fields.
-
-    The existing sort order is preserved — ranking integration will be addressed
-    separately once the payload is confirmed end-to-end.
+    tolerances.  Only towers the SDR can actually see are returned — unmatched
+    towers are excluded entirely.  Matched towers carry real measured quality
+    fields (``snr_db``, ``score``, ``power_db``, ``obw_fraction``, ``measured=True``).
     """
     source = payload.source.lower()
     if source == "auto":

@@ -352,9 +352,7 @@ def process_and_rank(raw_systems: list, user_lat: float, user_lon: float, limit:
                 "licence_type": licence.get("type") or "",
                 "licence_subtype": licence.get("subtype") or "",
                 "frequency_matched": freq_matched,
-                # Spectrum-analyser fields — populated when a measurement matched,
-                # None otherwise.  Ranking uses these fields only after integration
-                # is discussed; for now they are carried through for the caller.
+                # Spectrum-analyser fields — populated when a measurement matched, None otherwise.
                 "measured": measurement is not None,
                 "snr_db": measurement["snr_db"] if measurement else None,
                 "score": measurement["score"] if measurement else None,
