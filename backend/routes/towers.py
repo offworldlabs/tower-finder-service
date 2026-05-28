@@ -9,11 +9,11 @@ from fastapi import APIRouter, HTTPException, Query
 
 from clients.fcc import fetch_fcc_broadcast_systems
 from clients.maprad import fetch_broadcast_systems
+from models.measurements import MeasurementPayload
 from services.tower_ranking import (
     _CONFIG_PATH,
     DEFAULT_LIMIT,
     DEFAULT_RADIUS_KM,
-    parse_user_frequencies,
     process_and_rank,
     reload_config,
 )
@@ -79,7 +79,6 @@ async def find_towers(
     radius_km: int = Query(0, ge=0, le=300),
     limit: int = Query(0, ge=0, le=200),
     source: str = Query("auto"),
-    frequencies: str = Query(""),
 ):
     source = source.lower()
     if source == "auto":
@@ -89,7 +88,6 @@ async def find_towers(
 
     effective_radius = radius_km if radius_km > 0 else DEFAULT_RADIUS_KM
     effective_limit = limit if limit > 0 else DEFAULT_LIMIT
-    user_freqs = parse_user_frequencies(frequencies)
 
     try:
         if source == "us":
@@ -120,7 +118,7 @@ async def find_towers(
         if elev is not None:
             resolved_altitude = elev
 
-    towers = process_and_rank(raw, lat, lon, limit=effective_limit, user_frequencies=user_freqs, radius_km=effective_radius)
+    towers = process_and_rank(raw, lat, lon, limit=effective_limit, radius_km=effective_radius)
 
     tower_coords = [(t["latitude"], t["longitude"]) for t in towers]
     elevations = await _batch_lookup_elevations(tower_coords)
@@ -142,7 +140,90 @@ async def find_towers(
             "altitude_m": resolved_altitude,
             "radius_km": effective_radius,
             "source": source,
-            "user_frequencies_mhz": user_freqs,
+        },
+        "count": len(towers),
+    }
+
+
+@router.post("/api/towers")
+async def find_towers_with_measurements(payload: MeasurementPayload):
+    """Tower search enriched with spectrum-analyser measurements from retina-spectrum.
+
+    Fetches the same FCC/Maprad tower database as GET /api/towers, then matches
+    each tower against the provided measurements using band-specific frequency
+    tolerances.  Only towers the SDR can actually see are returned — unmatched
+    towers are excluded entirely.  Matched towers carry real measured quality
+    fields (``snr_db``, ``score``, ``power_db``, ``obw_fraction``, ``measured=True``).
+    """
+    source = payload.source.lower()
+    if source == "auto":
+        source = _detect_source(payload.lat, payload.lon)
+    if source not in ("us", "au", "ca"):
+        raise HTTPException(status_code=400, detail="Invalid source. Use: us, au, ca, auto")
+
+    effective_radius = payload.radius_km if payload.radius_km > 0 else DEFAULT_RADIUS_KM
+    effective_limit = payload.limit if payload.limit > 0 else DEFAULT_LIMIT
+    measurements = [m.model_dump() for m in payload.measurements]
+
+    try:
+        if source == "us":
+            raw = await fetch_fcc_broadcast_systems(
+                payload.lat, payload.lon, radius_km=effective_radius,
+            )
+            if API_KEY:
+                try:
+                    maprad_raw = await fetch_broadcast_systems(
+                        API_KEY, payload.lat, payload.lon,
+                        radius_km=effective_radius, source=source,
+                    )
+                    raw.extend(maprad_raw)
+                except Exception:
+                    logging.warning("Maprad supplement failed, using FCC data only")
+        else:
+            if not API_KEY:
+                raise HTTPException(status_code=500, detail="MAPRAD_API_KEY not configured")
+            raw = await fetch_broadcast_systems(
+                API_KEY, payload.lat, payload.lon,
+                radius_km=effective_radius, source=source,
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        logging.exception("Tower data fetch failed")
+        raise HTTPException(
+            status_code=502, detail="External service unavailable. Please try again.",
+        ) from None
+
+    towers = process_and_rank(
+        raw,
+        payload.lat,
+        payload.lon,
+        limit=effective_limit,
+        radius_km=effective_radius,
+        measurements=measurements,
+    )
+
+    tower_coords = [(t["latitude"], t["longitude"]) for t in towers]
+    elevations = await _batch_lookup_elevations(tower_coords)
+    for t in towers:
+        key = (round(t["latitude"], 6), round(t["longitude"], 6))
+        elev = elevations.get(key)
+        t["elevation_m"] = round(elev, 1) if elev is not None else None
+        if elev is not None and t.get("antenna_height_m") is not None:
+            t["altitude_m"] = round(elev + t["antenna_height_m"], 1)
+        elif elev is not None:
+            t["altitude_m"] = round(elev, 1)
+        else:
+            t["altitude_m"] = None
+
+    return {
+        "towers": towers,
+        "query": {
+            "latitude": payload.lat,
+            "longitude": payload.lon,
+            "radius_km": effective_radius,
+            "source": source,
+            "measurement_count": len(measurements),
         },
         "count": len(towers),
     }

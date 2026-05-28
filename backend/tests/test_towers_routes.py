@@ -224,3 +224,113 @@ class TestFindTowersServiceErrors:
                 r = c.get("/api/towers?lat=33.9&lon=-84.6&source=au")
 
         assert r.status_code == 502
+
+
+# ── POST /api/towers (measurement payload) ───────────────────────────────────
+
+_VALID_MEASUREMENT = {
+    "freq_mhz": 95.5,
+    "snr_db": 30.0,
+    "obw_fraction": 0.03,
+    "score": 0.75,
+    "power_db": -62.0,
+    "band": "FM",
+}
+
+_VALID_PAYLOAD = {
+    "lat": 33.9,
+    "lon": -84.6,
+    "source": "us",
+    "measurements": [_VALID_MEASUREMENT],
+}
+
+
+class TestFindTowersWithMeasurements:
+    def test_missing_lat_lon_returns_422(self, client):
+        r = client.post("/api/towers", json={"measurements": []})
+        assert r.status_code == 422
+
+    def test_invalid_source_returns_400(self, client):
+        payload = {**_VALID_PAYLOAD, "source": "invalid"}
+        r = client.post("/api/towers", json=payload)
+        assert r.status_code == 400
+        assert "Invalid source" in r.json()["detail"]
+
+    def test_empty_measurements_accepted(self, client):
+        payload = {**_VALID_PAYLOAD, "measurements": []}
+        with (
+            unittest.mock.patch("routes.towers.API_KEY", ""),
+            unittest.mock.patch(
+                "routes.towers.fetch_fcc_broadcast_systems",
+                new=unittest.mock.AsyncMock(return_value=[]),
+            ),
+            unittest.mock.patch(
+                "routes.towers._batch_lookup_elevations",
+                new=unittest.mock.AsyncMock(return_value={}),
+            ),
+        ):
+            r = client.post("/api/towers", json=payload)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["count"] == 0
+        assert body["query"]["measurement_count"] == 0
+
+    def test_valid_payload_returns_200_with_measurement_count(self, client):
+        with (
+            unittest.mock.patch("routes.towers.API_KEY", ""),
+            unittest.mock.patch(
+                "routes.towers.fetch_fcc_broadcast_systems",
+                new=unittest.mock.AsyncMock(return_value=[]),
+            ),
+            unittest.mock.patch(
+                "routes.towers._batch_lookup_elevations",
+                new=unittest.mock.AsyncMock(return_value={}),
+            ),
+        ):
+            r = client.post("/api/towers", json=_VALID_PAYLOAD)
+        assert r.status_code == 200
+        body = r.json()
+        assert "towers" in body
+        assert body["query"]["measurement_count"] == 1
+
+    def test_measurement_obw_fraction_out_of_range_returns_422(self, client):
+        bad_measurement = {**_VALID_MEASUREMENT, "obw_fraction": 1.5}
+        payload = {**_VALID_PAYLOAD, "measurements": [bad_measurement]}
+        r = client.post("/api/towers", json=payload)
+        assert r.status_code == 422
+
+    def test_measurement_negative_freq_returns_422(self, client):
+        bad_measurement = {**_VALID_MEASUREMENT, "freq_mhz": -1.0}
+        payload = {**_VALID_PAYLOAD, "measurements": [bad_measurement]}
+        r = client.post("/api/towers", json=payload)
+        assert r.status_code == 422
+
+    def test_non_us_no_api_key_returns_500(self, client):
+        payload = {**_VALID_PAYLOAD, "lat": -33.87, "lon": 151.21, "source": "au"}
+        with unittest.mock.patch("routes.towers.API_KEY", ""):
+            r = client.post("/api/towers", json=payload)
+        assert r.status_code == 500
+        assert "MAPRAD_API_KEY not configured" in r.json()["detail"]
+
+    def test_source_auto_detected_from_coordinates(self, client):
+        """Auto source detection should pick 'au' for Sydney coordinates."""
+        payload = {
+            **_VALID_PAYLOAD,
+            "lat": -33.87,
+            "lon": 151.21,
+            "source": "auto",
+        }
+        with (
+            unittest.mock.patch("routes.towers.API_KEY", "fake-key"),
+            unittest.mock.patch(
+                "routes.towers.fetch_broadcast_systems",
+                new=unittest.mock.AsyncMock(return_value=[]),
+            ),
+            unittest.mock.patch(
+                "routes.towers._batch_lookup_elevations",
+                new=unittest.mock.AsyncMock(return_value={}),
+            ),
+        ):
+            r = client.post("/api/towers", json=payload)
+        assert r.status_code == 200
+        assert r.json()["query"]["source"] == "au"

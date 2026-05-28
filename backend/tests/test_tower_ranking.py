@@ -5,9 +5,10 @@ import pytest
 from routes.towers import _detect_source
 from services.tower_ranking import (
     DEFAULT_LIMIT,
-    FREQUENCY_MATCH_TOLERANCE_MHZ,
+    MEASUREMENT_TOLERANCE_MHZ,
     SENSITIVITY_DBM,
     _as_float,
+    _match_measurement,
     bearing_to_cardinal,
     classify_band,
     classify_distance,
@@ -16,7 +17,6 @@ from services.tower_ranking import (
     haversine,
     initial_bearing,
     parse_geom,
-    parse_user_frequencies,
     process_and_rank,
     watts_to_dbm,
 )
@@ -83,35 +83,6 @@ class TestClassifyBand:
 
     def test_above_uhf(self):
         assert classify_band(609) is None
-
-
-# ── User frequency parsing ───────────────────────────────────────────────────
-
-
-class TestParseUserFrequencies:
-    def test_empty_string(self):
-        assert parse_user_frequencies("") == []
-
-    def test_single_freq(self):
-        assert parse_user_frequencies("95.5") == [95.5]
-
-    def test_multiple_freqs(self):
-        assert parse_user_frequencies("95.5, 177.5, 500") == [95.5, 177.5, 500]
-
-    def test_trailing_comma(self):
-        assert parse_user_frequencies("95.5,") == [95.5]
-
-    def test_invalid_values_skipped(self):
-        assert parse_user_frequencies("abc, 95.5, xyz") == [95.5]
-
-    def test_max_10_enforced(self):
-        assert len(parse_user_frequencies(",".join(str(i) for i in range(1, 20)))) == 10
-
-    def test_zero_skipped(self):
-        assert parse_user_frequencies("0, 95.5") == [95.5]
-
-    def test_negative_skipped(self):
-        assert parse_user_frequencies("-5, 95.5") == [95.5]
 
 
 # ── Haversine ────────────────────────────────────────────────────────────────
@@ -401,56 +372,9 @@ class TestProcessAndRank:
 
     # ── frequency_matched flag ───────────────────────────────────────────────
 
-    def test_frequency_matched_exact(self):
-        result = process_and_rank(
-            [_FM_SYSTEM], _USER_LAT, _USER_LON, user_frequencies=[95.5]
-        )
-        assert result[0]["frequency_matched"] is True
-
-    def test_frequency_matched_within_tolerance(self):
-        # 95.5 - 4.9 = 90.6 MHz, still within ±5 MHz
-        result = process_and_rank(
-            [_FM_SYSTEM], _USER_LAT, _USER_LON, user_frequencies=[90.6]
-        )
-        assert result[0]["frequency_matched"] is True
-
-        # Boundary check: exactly ±FREQUENCY_MATCH_TOLERANCE_MHZ is inclusive (uses <=)
-        # Tower at 95.5 MHz, user_freq = 95.5 - 5.0 = 90.5 → diff == 5.0 → matched
-        result_boundary = process_and_rank(
-            [_FM_SYSTEM], _USER_LAT, _USER_LON,
-            user_frequencies=[95.5 - FREQUENCY_MATCH_TOLERANCE_MHZ],
-        )
-        assert result_boundary[0]["frequency_matched"] is True, (
-            "Exact boundary (diff == FREQUENCY_MATCH_TOLERANCE_MHZ) should be matched (<=)"
-        )
-
-    def test_frequency_not_matched_outside_tolerance(self):
-        # 95.5 - 6 = 89.5, outside ±5 MHz
-        result = process_and_rank(
-            [_FM_SYSTEM], _USER_LAT, _USER_LON, user_frequencies=[89.5]
-        )
-        assert result[0]["frequency_matched"] is False
-
-    def test_frequency_matched_false_when_no_user_frequencies(self):
+    def test_frequency_matched_false_when_no_measurements(self):
         result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON)
         assert result[0]["frequency_matched"] is False
-
-    # ── Frequency-match sorting ──────────────────────────────────────────────
-
-    def test_frequency_matched_towers_sort_first(self):
-        # Two towers at the same distance with the same EIRP: one matches user frequency,
-        # one does not. The only sorting difference is frequency_matched, so the matched
-        # tower must sort first regardless of other attributes.
-        matched_device = _device(95.5, 33.85, -84.388, callsign="KMATCH", eirp_dbm=60.0)
-        unmatched_device = _device(97.1, 33.85, -84.388, callsign="KOTHER", eirp_dbm=60.0)
-        result = process_and_rank(
-            [_system([matched_device, unmatched_device])],
-            _USER_LAT,
-            _USER_LON,
-            user_frequencies=[95.5],
-        )
-        assert result[0]["callsign"] == "KMATCH"
-        assert result[0]["frequency_matched"] is True
 
     # ── Default EIRP fallback ────────────────────────────────────────────────
 
@@ -534,8 +458,20 @@ class TestProcessAndRank:
             "bearing_deg", "bearing_cardinal", "received_power_dbm",
             "distance_class", "eirp_dbm", "licence_type", "licence_subtype",
             "frequency_matched", "rank",
+            # Spectrum-analyser fields always present (None when no measurement)
+            "measured", "snr_db", "score", "power_db", "obw_fraction",
         }
         assert expected_fields.issubset(t.keys())
+
+    def test_no_measurements_fields_are_none(self):
+        """When no measurements provided, analyser fields should all be None/False."""
+        result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON)
+        t = result[0]
+        assert t["measured"] is False
+        assert t["snr_db"] is None
+        assert t["score"] is None
+        assert t["power_db"] is None
+        assert t["obw_fraction"] is None
 
     # ── Multiple systems ─────────────────────────────────────────────────────
 
@@ -616,3 +552,112 @@ class TestParseGeomEdgeCases:
     def test_polygon_all_invalid_coords_returns_none(self):
         """POLYGON where all coord pairs have bare '-' → empty lats list → None."""
         assert parse_geom("POLYGON((- -, - -))") is None
+
+
+# ── _match_measurement ────────────────────────────────────────────────────────
+
+def _make_measurement(freq_mhz: float, band: str = "FM", snr_db: float = 30.0,
+                      obw_fraction: float = 0.5, score: float = 0.8,
+                      power_db: float = -60.0) -> dict:
+    return {
+        "freq_mhz": freq_mhz, "band": band, "snr_db": snr_db,
+        "obw_fraction": obw_fraction, "score": score, "power_db": power_db,
+    }
+
+
+class TestMatchMeasurement:
+    def test_exact_match_fm(self):
+        m = _make_measurement(95.5, band="FM")
+        assert _match_measurement(95.5, "FM", [m]) is m
+
+    def test_within_fm_tolerance(self):
+        m = _make_measurement(95.5, band="FM")
+        # 0.10 MHz offset — safely within ±0.15 MHz, avoids float rounding edge
+        assert _match_measurement(95.60, "FM", [m]) is m
+
+    def test_outside_fm_tolerance(self):
+        m = _make_measurement(95.5, band="FM")
+        # 0.20 MHz offset — safely outside ±0.15 MHz
+        assert _match_measurement(95.70, "FM", [m]) is None
+
+    def test_within_uhf_tolerance(self):
+        m = _make_measurement(546.0, band="UHF")
+        # ±4 MHz tolerance for UHF
+        assert _match_measurement(549.9, "UHF", [m]) is m
+
+    def test_outside_uhf_tolerance(self):
+        m = _make_measurement(546.0, band="UHF")
+        assert _match_measurement(550.5, "UHF", [m]) is None
+
+    def test_within_vhf_tolerance(self):
+        m = _make_measurement(194.0, band="VHF")
+        assert _match_measurement(197.9, "VHF", [m]) is m
+
+    def test_empty_measurements_returns_none(self):
+        assert _match_measurement(95.5, "FM", []) is None
+
+    def test_closest_wins_when_multiple_in_tolerance(self):
+        m_close = _make_measurement(95.5, band="FM")   # 0.02 MHz from query
+        m_far   = _make_measurement(95.4, band="FM")   # 0.12 MHz from query
+        # Query at 95.48 — both within ±0.15 but 95.5 is genuinely closer
+        result = _match_measurement(95.48, "FM", [m_far, m_close])
+        assert result is m_close
+
+    def test_fm_tolerance_tighter_than_vhf(self):
+        """FM tolerance (0.15 MHz) must be tighter than VHF/UHF tolerance (4 MHz)."""
+        assert MEASUREMENT_TOLERANCE_MHZ["FM"] < MEASUREMENT_TOLERANCE_MHZ["VHF"]
+        assert MEASUREMENT_TOLERANCE_MHZ["FM"] < MEASUREMENT_TOLERANCE_MHZ["UHF"]
+
+
+# ── process_and_rank with measurements ───────────────────────────────────────
+
+
+class TestProcessAndRankMeasurements:
+    def test_matched_tower_has_measured_true(self):
+        m = _make_measurement(95.5, band="FM", snr_db=28.5, score=0.75,
+                              power_db=-62.0, obw_fraction=0.03)
+        result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON,
+                                  measurements=[m])
+        t = result[0]
+        assert t["measured"] is True
+        assert t["snr_db"] == pytest.approx(28.5)
+        assert t["score"] == pytest.approx(0.75)
+        assert t["power_db"] == pytest.approx(-62.0)
+        assert t["obw_fraction"] == pytest.approx(0.03)
+
+    def test_matched_tower_sets_frequency_matched(self):
+        """A measurement match should also set frequency_matched=True."""
+        m = _make_measurement(95.5, band="FM")
+        result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON,
+                                  measurements=[m])
+        assert result[0]["frequency_matched"] is True
+
+    def test_unmatched_tower_excluded_when_measurements_provided(self):
+        # Measurement is on 101.1 MHz; tower is on 95.5 MHz — outside FM tolerance.
+        # The SDR can't see this tower, so it must be dropped from the results entirely.
+        m = _make_measurement(101.1, band="FM")
+        result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON,
+                                  measurements=[m])
+        assert result == [], (
+            "A tower with no matching measurement should be excluded — "
+            "the SDR cannot see it"
+        )
+
+    def test_only_matched_towers_returned_when_measurements_provided(self):
+        # Two towers: one on the measured frequency, one not.
+        # Only the matched tower should appear in results.
+        m = _make_measurement(95.5, band="FM")
+        other_device = _device(freq_mhz=101.1, lat=33.93, lon=-84.388, callsign="KOTHER")
+        other_system = _system([other_device])
+        result = process_and_rank([_FM_SYSTEM, other_system], _USER_LAT, _USER_LON,
+                                  measurements=[m])
+        assert len(result) == 1
+        assert result[0]["callsign"] == "WXYZ"
+        assert result[0]["measured"] is True
+
+    def test_empty_measurements_list_behaves_as_no_measurements(self):
+        result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON,
+                                  measurements=[])
+        t = result[0]
+        assert t["measured"] is False
+        assert t["snr_db"] is None

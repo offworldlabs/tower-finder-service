@@ -31,6 +31,9 @@ include = ["clients*", "routes*", "services*"]
 pythonpath = [".", "backend"]
 testpaths = ["backend/tests"]
 asyncio_mode = "auto"
+markers = [
+    "integration: requires the tower fixture (run capture_fixture.py first)",
+]
 
 [tool.ruff]
 line-length = 120
