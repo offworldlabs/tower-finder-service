@@ -39,11 +39,7 @@
         "ascending": true
       },
       {
-        "field": "distance_priority",
-        "ascending": true
-      },
-      {
-        "field": "received_power_dbm",
+        "field": "score",
         "ascending": false
       }
     ]

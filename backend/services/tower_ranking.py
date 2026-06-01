@@ -385,7 +385,7 @@ def process_and_rank(raw_systems: list, user_lat: float, user_lon: float, limit:
             elif field == "distance_priority":
                 val = DISTANCE_PRIORITY.get(t["distance_class"], 99)
             else:
-                val = t.get(field, 0)
+                val = t.get(field) or 0
             parts.append(val if asc else -val)
         return tuple(parts)
 
