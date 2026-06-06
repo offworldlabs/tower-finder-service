@@ -17,6 +17,7 @@ def client():
 
 # ── _detect_source ───────────────────────────────────────────────────────────
 
+
 class TestDetectSource:
     def test_us_mainland(self):
         from routes.towers import _detect_source
@@ -51,6 +52,7 @@ class TestDetectSource:
 
 # ── Tower search validation ──────────────────────────────────────────────────
 
+
 class TestTowerSearch:
     def test_missing_lat_lon(self, client):
         r = client.get("/api/towers")
@@ -68,6 +70,7 @@ class TestTowerSearch:
 
 # ── Config endpoints ─────────────────────────────────────────────────────────
 
+
 class TestTowerConfig:
     def test_get_config(self, client):
         r = client.get("/api/config")
@@ -83,12 +86,11 @@ class TestTowerConfig:
 
 # ── _batch_lookup_elevations ─────────────────────────────────────────────────
 
+
 def _make_httpx_mock(get_return=None, get_side_effect=None):
     """Return a patch context manager that intercepts httpx.AsyncClient."""
     mock_client = unittest.mock.AsyncMock()
-    mock_client.get = unittest.mock.AsyncMock(
-        return_value=get_return, side_effect=get_side_effect
-    )
+    mock_client.get = unittest.mock.AsyncMock(return_value=get_return, side_effect=get_side_effect)
     mock_ctx = unittest.mock.MagicMock()
     mock_ctx.__aenter__ = unittest.mock.AsyncMock(return_value=mock_client)
     mock_ctx.__aexit__ = unittest.mock.AsyncMock(return_value=False)
@@ -149,6 +151,7 @@ class TestBatchLookupElevations:
 
 
 # ── find_towers service-error paths ─────────────────────────────────────────
+
 
 class TestFindTowersServiceErrors:
     def test_fcc_succeeds_maprad_fails_returns_200(self):

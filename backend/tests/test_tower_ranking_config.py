@@ -94,5 +94,3 @@ class TestParseGeomEdgeCases:
         wkt = "MULTIPOLYGON(((0 0, 2 0, 2 2, 0 2, 0 0)))"
         result = tower_ranking.parse_geom(wkt)
         assert result is not None
-
-

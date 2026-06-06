@@ -27,7 +27,6 @@ Layer 3 — Integration regression test (marked ``integration``)
 from __future__ import annotations
 
 import json
-import math
 from pathlib import Path
 
 import pytest
@@ -51,6 +50,7 @@ TOWER_FIXTURE = FIXTURES_DIR / "towers_raw.json"
 # Layer 1 — Parser unit tests
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestSweepParser:
     """Validate that parse_sweep_events() produces well-formed Measurement dicts."""
 
@@ -68,9 +68,7 @@ class TestSweepParser:
 
     def test_expected_total_count(self, measurements):
         # 27 FM + 22 UHF (ch14-36, ch35 gated out) + 6 VHF pass the score > 0 gate
-        assert len(measurements) == 55, (
-            f"Expected 55 measurements (27 FM, 22 UHF, 6 VHF), got {len(measurements)}"
-        )
+        assert len(measurements) == 55, f"Expected 55 measurements (27 FM, 22 UHF, 6 VHF), got {len(measurements)}"
 
     def test_all_required_fields_present(self, measurements):
         required = {"freq_mhz", "band", "snr_db", "obw_fraction", "score", "power_db"}
@@ -92,10 +90,11 @@ class TestSweepParser:
 
     def test_band_counts(self, measurements):
         from collections import Counter
+
         counts = Counter(m["band"] for m in measurements)
         assert counts["FM"] == 27, f"Expected 27 FM, got {counts['FM']}"
         assert counts["UHF"] == 22, f"Expected 22 UHF (ch14–36, ch35 gated out), got {counts['UHF']}"
-        assert counts["VHF"] == 6,  f"Expected 6 VHF, got {counts['VHF']}"
+        assert counts["VHF"] == 6, f"Expected 6 VHF, got {counts['VHF']}"
 
     # ── Score gate ────────────────────────────────────────────────────────────
 
@@ -131,21 +130,15 @@ class TestSweepParser:
 
     def test_fm_freqs_in_band(self, measurements):
         for m in [m for m in measurements if m["band"] == "FM"]:
-            assert classify_band(m["freq_mhz"]) == "FM", (
-                f"FM measurement freq {m['freq_mhz']} MHz not in FM band"
-            )
+            assert classify_band(m["freq_mhz"]) == "FM", f"FM measurement freq {m['freq_mhz']} MHz not in FM band"
 
     def test_uhf_freqs_in_band(self, measurements):
         for m in [m for m in measurements if m["band"] == "UHF"]:
-            assert classify_band(m["freq_mhz"]) == "UHF", (
-                f"UHF measurement freq {m['freq_mhz']} MHz not in UHF band"
-            )
+            assert classify_band(m["freq_mhz"]) == "UHF", f"UHF measurement freq {m['freq_mhz']} MHz not in UHF band"
 
     def test_vhf_freqs_in_band(self, measurements):
         for m in [m for m in measurements if m["band"] == "VHF"]:
-            assert classify_band(m["freq_mhz"]) == "VHF", (
-                f"VHF measurement freq {m['freq_mhz']} MHz not in VHF band"
-            )
+            assert classify_band(m["freq_mhz"]) == "VHF", f"VHF measurement freq {m['freq_mhz']} MHz not in VHF band"
 
     # ── Known strong signals ──────────────────────────────────────────────────
 
@@ -227,6 +220,7 @@ class TestSweepParser:
 # Needs: python backend/tests/capture_fixture.py  (run once, saves towers_raw.json)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _load_tower_fixture() -> list[dict] | None:
     """Return the saved FCC raw-systems fixture, or None if not yet captured."""
     if not TOWER_FIXTURE.exists():
@@ -240,9 +234,7 @@ def ranked_with_measurements():
     """process_and_rank() result using the real recording + saved tower fixture."""
     raw_systems = _load_tower_fixture()
     if raw_systems is None:
-        pytest.skip(
-            "Tower fixture not found. Run:  python backend/tests/capture_fixture.py"
-        )
+        pytest.skip("Tower fixture not found. Run:  python backend/tests/capture_fixture.py")
     measurements = parse_sweep_events(DEFAULT_NDJSON)
     return process_and_rank(
         raw_systems,
@@ -257,9 +249,7 @@ def ranked_without_measurements():
     """Baseline: same towers without any measurement enrichment."""
     raw_systems = _load_tower_fixture()
     if raw_systems is None:
-        pytest.skip(
-            "Tower fixture not found. Run:  python backend/tests/capture_fixture.py"
-        )
+        pytest.skip("Tower fixture not found. Run:  python backend/tests/capture_fixture.py")
     return process_and_rank(raw_systems, RECORDING_LAT, RECORDING_LON)
 
 
@@ -271,50 +261,45 @@ class TestMatchRecall:
         """FM 89.3 MHz (score=1.0) must match at least one tower with measured=True."""
         tol = MEASUREMENT_TOLERANCE_MHZ["FM"]
         matched = [
-            t for t in ranked_with_measurements
-            if t["band"] == "FM"
-            and abs(t["frequency_mhz"] - 89.3) <= tol
-            and t["measured"]
+            t
+            for t in ranked_with_measurements
+            if t["band"] == "FM" and abs(t["frequency_mhz"] - 89.3) <= tol and t["measured"]
         ]
         assert matched, "No tower matched FM 89.3 MHz — check FCC data or tolerance"
 
     def test_fm_94_5_matched(self, ranked_with_measurements):
         tol = MEASUREMENT_TOLERANCE_MHZ["FM"]
         matched = [
-            t for t in ranked_with_measurements
-            if t["band"] == "FM"
-            and abs(t["frequency_mhz"] - 94.5) <= tol
-            and t["measured"]
+            t
+            for t in ranked_with_measurements
+            if t["band"] == "FM" and abs(t["frequency_mhz"] - 94.5) <= tol and t["measured"]
         ]
         assert matched, "No tower matched FM 94.5 MHz"
 
     def test_fm_104_9_matched(self, ranked_with_measurements):
         tol = MEASUREMENT_TOLERANCE_MHZ["FM"]
         matched = [
-            t for t in ranked_with_measurements
-            if t["band"] == "FM"
-            and abs(t["frequency_mhz"] - 104.9) <= tol
-            and t["measured"]
+            t
+            for t in ranked_with_measurements
+            if t["band"] == "FM" and abs(t["frequency_mhz"] - 104.9) <= tol and t["measured"]
         ]
         assert matched, "No tower matched FM 104.9 MHz"
 
     def test_vhf_ch8_183_matched(self, ranked_with_measurements):
         tol = MEASUREMENT_TOLERANCE_MHZ["VHF"]
         matched = [
-            t for t in ranked_with_measurements
-            if t["band"] == "VHF"
-            and abs(t["frequency_mhz"] - 183.0) <= tol
-            and t["measured"]
+            t
+            for t in ranked_with_measurements
+            if t["band"] == "VHF" and abs(t["frequency_mhz"] - 183.0) <= tol and t["measured"]
         ]
         assert matched, "No tower matched VHF ch8 (183 MHz)"
 
     def test_uhf_ch26_545_matched(self, ranked_with_measurements):
         tol = MEASUREMENT_TOLERANCE_MHZ["UHF"]
         matched = [
-            t for t in ranked_with_measurements
-            if t["band"] == "UHF"
-            and abs(t["frequency_mhz"] - 545.0) <= tol
-            and t["measured"]
+            t
+            for t in ranked_with_measurements
+            if t["band"] == "UHF" and abs(t["frequency_mhz"] - 545.0) <= tol and t["measured"]
         ]
         assert matched, "No tower matched UHF ch26 (545 MHz)"
 
@@ -338,10 +323,7 @@ class TestMeasurementFieldPropagation:
             assert t["snr_db"] > 0
 
     def test_tv_matched_towers_have_power(self, ranked_with_measurements):
-        tv_matched = [
-            t for t in self._matched(ranked_with_measurements)
-            if t["band"] in ("UHF", "VHF")
-        ]
+        tv_matched = [t for t in self._matched(ranked_with_measurements) if t["band"] in ("UHF", "VHF")]
         for t in tv_matched:
             assert t["power_db"] is not None, f"TV tower {t['callsign']} missing power_db"
 
@@ -349,9 +331,8 @@ class TestMeasurementFieldPropagation:
         """When measurements are provided, every tower in the output must be matched.
         Unmatched towers are invisible to the SDR and must be excluded entirely."""
         unmatched = [t for t in ranked_with_measurements if not t["measured"]]
-        assert unmatched == [], (
-            f"{len(unmatched)} unmatched tower(s) leaked into results: "
-            + ", ".join(f"{t['callsign']} @ {t['frequency_mhz']} MHz" for t in unmatched)
+        assert unmatched == [], f"{len(unmatched)} unmatched tower(s) leaked into results: " + ", ".join(
+            f"{t['callsign']} @ {t['frequency_mhz']} MHz" for t in unmatched
         )
 
     def test_all_output_towers_have_analyser_fields(self, ranked_with_measurements):
@@ -377,8 +358,7 @@ class TestMatchCoverage:
         total_detected = len(measurements)
         recall = matched_count / total_detected if total_detected else 0
         assert recall >= 0.80, (
-            f"Match recall {recall:.0%} is below 80% "
-            f"({matched_count}/{total_detected} signals matched a DB tower)"
+            f"Match recall {recall:.0%} is below 80% ({matched_count}/{total_detected} signals matched a DB tower)"
         )
 
     def test_each_output_tower_has_a_measurement_within_tolerance(self, ranked_with_measurements):
@@ -389,9 +369,7 @@ class TestMatchCoverage:
         for t in ranked_with_measurements:
             tol = MEASUREMENT_TOLERANCE_MHZ.get(t["band"], 1.0)
             supporting = [
-                m for m in measurements
-                if m["band"] == t["band"]
-                and abs(m["freq_mhz"] - t["frequency_mhz"]) <= tol
+                m for m in measurements if m["band"] == t["band"] and abs(m["freq_mhz"] - t["frequency_mhz"]) <= tol
             ]
             assert supporting, (
                 f"Tower {t['callsign']} @ {t['frequency_mhz']} MHz ({t['band']}) "
@@ -404,6 +382,7 @@ class TestMatchCoverage:
         measurements = parse_sweep_events(DEFAULT_NDJSON)
 
         from collections import Counter
+
         band_counts = Counter(t["band"] for t in ranked_with_measurements)
 
         print("\n── Match coverage report ────────────────────────────────")
@@ -424,10 +403,10 @@ class TestMatchCoverage:
         # Signals that didn't match any DB tower
         tols = MEASUREMENT_TOLERANCE_MHZ
         unmatched_signals = [
-            m for m in measurements
+            m
+            for m in measurements
             if not any(
-                m["band"] == t["band"]
-                and abs(m["freq_mhz"] - t["frequency_mhz"]) <= tols.get(m["band"], 1.0)
+                m["band"] == t["band"] and abs(m["freq_mhz"] - t["frequency_mhz"]) <= tols.get(m["band"], 1.0)
                 for t in ranked_with_measurements
             )
         ]

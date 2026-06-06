@@ -326,7 +326,7 @@ class TestProcessAndRank:
     def test_deduplication_keeps_stronger_signal(self):
         # Two devices with the same callsign+frequency but different distances
         # The closer one (stronger signal) should win
-        closer = _device(95.5, 33.85, -84.388, callsign="KDUP", eirp_dbm=60.0)   # ~11 km
+        closer = _device(95.5, 33.85, -84.388, callsign="KDUP", eirp_dbm=60.0)  # ~11 km
         farther = _device(95.5, 33.99, -84.388, callsign="KDUP", eirp_dbm=60.0)  # ~27 km
         result = process_and_rank([_system([closer, farther])], _USER_LAT, _USER_LON)
         assert len(result) == 1
@@ -364,9 +364,7 @@ class TestProcessAndRank:
             for i in range(DEFAULT_LIMIT + 1)
         ]
         result_default = process_and_rank([_system(devices)], _USER_LAT, _USER_LON, limit=0)
-        assert len(result_default) == DEFAULT_LIMIT, (
-            f"limit=0 should fall back to DEFAULT_LIMIT ({DEFAULT_LIMIT})"
-        )
+        assert len(result_default) == DEFAULT_LIMIT, f"limit=0 should fall back to DEFAULT_LIMIT ({DEFAULT_LIMIT})"
         result_one = process_and_rank([_system(devices)], _USER_LAT, _USER_LON, limit=1)
         assert len(result_one) == 1
 
@@ -453,13 +451,30 @@ class TestProcessAndRank:
         result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON)
         t = result[0]
         expected_fields = {
-            "callsign", "name", "state", "frequency_mhz", "band",
-            "latitude", "longitude", "antenna_height_m", "distance_km",
-            "bearing_deg", "bearing_cardinal", "received_power_dbm",
-            "distance_class", "eirp_dbm", "licence_type", "licence_subtype",
-            "frequency_matched", "rank",
+            "callsign",
+            "name",
+            "state",
+            "frequency_mhz",
+            "band",
+            "latitude",
+            "longitude",
+            "antenna_height_m",
+            "distance_km",
+            "bearing_deg",
+            "bearing_cardinal",
+            "received_power_dbm",
+            "distance_class",
+            "eirp_dbm",
+            "licence_type",
+            "licence_subtype",
+            "frequency_matched",
+            "rank",
             # Spectrum-analyser fields always present (None when no measurement)
-            "measured", "snr_db", "score", "power_db", "obw_fraction",
+            "measured",
+            "snr_db",
+            "score",
+            "power_db",
+            "obw_fraction",
         }
         assert expected_fields.issubset(t.keys())
 
@@ -556,12 +571,22 @@ class TestParseGeomEdgeCases:
 
 # ── _match_measurement ────────────────────────────────────────────────────────
 
-def _make_measurement(freq_mhz: float, band: str = "FM", snr_db: float = 30.0,
-                      obw_fraction: float = 0.5, score: float = 0.8,
-                      power_db: float = -60.0) -> dict:
+
+def _make_measurement(
+    freq_mhz: float,
+    band: str = "FM",
+    snr_db: float = 30.0,
+    obw_fraction: float = 0.5,
+    score: float = 0.8,
+    power_db: float = -60.0,
+) -> dict:
     return {
-        "freq_mhz": freq_mhz, "band": band, "snr_db": snr_db,
-        "obw_fraction": obw_fraction, "score": score, "power_db": power_db,
+        "freq_mhz": freq_mhz,
+        "band": band,
+        "snr_db": snr_db,
+        "obw_fraction": obw_fraction,
+        "score": score,
+        "power_db": power_db,
     }
 
 
@@ -597,8 +622,8 @@ class TestMatchMeasurement:
         assert _match_measurement(95.5, "FM", []) is None
 
     def test_closest_wins_when_multiple_in_tolerance(self):
-        m_close = _make_measurement(95.5, band="FM")   # 0.02 MHz from query
-        m_far   = _make_measurement(95.4, band="FM")   # 0.12 MHz from query
+        m_close = _make_measurement(95.5, band="FM")  # 0.02 MHz from query
+        m_far = _make_measurement(95.4, band="FM")  # 0.12 MHz from query
         # Query at 95.48 — both within ±0.15 but 95.5 is genuinely closer
         result = _match_measurement(95.48, "FM", [m_far, m_close])
         assert result is m_close
@@ -614,10 +639,8 @@ class TestMatchMeasurement:
 
 class TestProcessAndRankMeasurements:
     def test_matched_tower_has_measured_true(self):
-        m = _make_measurement(95.5, band="FM", snr_db=28.5, score=0.75,
-                              power_db=-62.0, obw_fraction=0.03)
-        result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON,
-                                  measurements=[m])
+        m = _make_measurement(95.5, band="FM", snr_db=28.5, score=0.75, power_db=-62.0, obw_fraction=0.03)
+        result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON, measurements=[m])
         t = result[0]
         assert t["measured"] is True
         assert t["snr_db"] == pytest.approx(28.5)
@@ -628,20 +651,15 @@ class TestProcessAndRankMeasurements:
     def test_matched_tower_sets_frequency_matched(self):
         """A measurement match should also set frequency_matched=True."""
         m = _make_measurement(95.5, band="FM")
-        result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON,
-                                  measurements=[m])
+        result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON, measurements=[m])
         assert result[0]["frequency_matched"] is True
 
     def test_unmatched_tower_excluded_when_measurements_provided(self):
         # Measurement is on 101.1 MHz; tower is on 95.5 MHz — outside FM tolerance.
         # The SDR can't see this tower, so it must be dropped from the results entirely.
         m = _make_measurement(101.1, band="FM")
-        result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON,
-                                  measurements=[m])
-        assert result == [], (
-            "A tower with no matching measurement should be excluded — "
-            "the SDR cannot see it"
-        )
+        result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON, measurements=[m])
+        assert result == [], "A tower with no matching measurement should be excluded — the SDR cannot see it"
 
     def test_only_matched_towers_returned_when_measurements_provided(self):
         # Two towers: one on the measured frequency, one not.
@@ -649,15 +667,13 @@ class TestProcessAndRankMeasurements:
         m = _make_measurement(95.5, band="FM")
         other_device = _device(freq_mhz=101.1, lat=33.93, lon=-84.388, callsign="KOTHER")
         other_system = _system([other_device])
-        result = process_and_rank([_FM_SYSTEM, other_system], _USER_LAT, _USER_LON,
-                                  measurements=[m])
+        result = process_and_rank([_FM_SYSTEM, other_system], _USER_LAT, _USER_LON, measurements=[m])
         assert len(result) == 1
         assert result[0]["callsign"] == "WXYZ"
         assert result[0]["measured"] is True
 
     def test_empty_measurements_list_behaves_as_no_measurements(self):
-        result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON,
-                                  measurements=[])
+        result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON, measurements=[])
         t = result[0]
         assert t["measured"] is False
         assert t["snr_db"] is None
