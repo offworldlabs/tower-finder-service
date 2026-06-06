@@ -20,6 +20,12 @@ from services.tower_ranking import (
 
 router = APIRouter()
 
+
+@router.get("/api/health")
+async def health():
+    return {"status": "ok"}
+
+
 API_KEY = os.getenv("MAPRAD_API_KEY", "")
 
 
