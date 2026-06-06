@@ -51,3 +51,61 @@ Extracted from `offworldlabs/Tower-Finder` on 2026-05-20 with `git filter-repo -
 - Tests rewired to a local `app` entry point.
 
 The parent repo still contains the same code for now; deduplication can come later.
+
+## Deployment
+
+CI/CD runs via GitHub Actions (`.github/workflows/ci.yml`):
+
+- **Every PR / push to `main`**: `ruff check`, `ruff format --check`, and
+  `pytest -m "not integration"`.
+- **Push to `main`**: after tests pass, SSHes to the production droplet,
+  hard-resets to `origin/main`, rebuilds the stack, waits for health, then
+  smoke-tests `https://tower-finder.retina.fm`.
+
+The service runs as its own Docker Compose stack at `/opt/tower-finder-service`,
+exposed at `tower-finder.retina.fm` through a Cloudflare Tunnel (`cloudflared`
+sidecar) — no host port is published and the existing `tower-finder` stack is
+untouched.
+
+### One-time setup
+
+**1. Deploy SSH key (run locally):**
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/tower_finder_service_deploy -C "tfs-deploy" -N ""
+ssh root@157.245.214.30 "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys" \
+  < ~/.ssh/tower_finder_service_deploy.pub
+```
+
+Then add GitHub Actions repository secrets (Settings → Secrets and variables → Actions):
+- `DEPLOY_HOST` = `157.245.214.30`
+- `DEPLOY_SSH_KEY` = contents of `~/.ssh/tower_finder_service_deploy` (the private key)
+
+**2. Cloudflare Tunnel (Zero Trust dashboard):**
+
+- Networks → Tunnels → Create a tunnel (type `cloudflared`); copy the token.
+- Add a public hostname: `tower-finder.retina.fm` → service
+  `http://tower-finder-service:8000` (this auto-creates the DNS record).
+
+**3. Droplet bootstrap (run on the droplet as root):**
+
+```bash
+git clone https://github.com/offworldlabs/tower-finder-service.git /opt/tower-finder-service
+cd /opt/tower-finder-service
+cp .env.example .env
+# Edit .env: set TUNNEL_TOKEN (required) and MAPRAD_API_KEY (optional, non-US only).
+docker compose up -d --build
+```
+
+After this, every push to `main` redeploys automatically.
+
+### Rollback (manual)
+
+No automated rollback in v1. To roll back, SSH to the droplet and reset to a
+known-good commit:
+
+```bash
+cd /opt/tower-finder-service
+git reset --hard <good-commit-sha>
+docker compose up -d --build
+```
