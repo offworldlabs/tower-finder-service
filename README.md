@@ -62,10 +62,17 @@ CI/CD runs via GitHub Actions (`.github/workflows/ci.yml`):
   hard-resets to `origin/main`, rebuilds the stack, waits for health, then
   smoke-tests `https://tower-finder.retina.fm`.
 
-The service runs as its own Docker Compose stack at `/opt/tower-finder-service`,
-exposed at `tower-finder.retina.fm` through a Cloudflare Tunnel (`cloudflared`
-sidecar) — no host port is published and the existing `tower-finder` stack is
-untouched.
+The service runs as its own Docker Compose stack at `/opt/tower-finder-service`.
+It publishes no host port; instead it joins a shared Docker network
+(`retina-edge`) and is fronted by the existing `tower-finder` container's nginx,
+which terminates TLS (Cloudflare Origin cert) and proxies
+`tower-finder.retina.fm` → `http://tower-finder-service:8000`. This mirrors how
+`api.retina.fm`, `dash.retina.fm`, etc. are served. DNS for the subdomain is a
+Cloudflare-proxied A-record pointing at the droplet.
+
+The nginx vhost itself lives in the `tower-finder` repo (`deploy/nginx.conf`) and
+ships through that repo's own deploy pipeline — see "tower-finder nginx vhost"
+below.
 
 ### One-time setup
 
@@ -81,23 +88,36 @@ Then add GitHub Actions repository secrets (Settings → Secrets and variables �
 - `DEPLOY_HOST` = `157.245.214.30`
 - `DEPLOY_SSH_KEY` = contents of `~/.ssh/tower_finder_service_deploy` (the private key)
 
-**2. Cloudflare Tunnel (Zero Trust dashboard):**
+**2. Shared network + DNS:**
 
-- Networks → Tunnels → Create a tunnel (type `cloudflared`); copy the token.
-- Add a public hostname: `tower-finder.retina.fm` → service
-  `http://tower-finder-service:8000` (this auto-creates the DNS record).
+```bash
+# On the droplet — create the shared network both stacks attach to (idempotent).
+docker network create retina-edge 2>/dev/null || true
+```
 
-**3. Droplet bootstrap (run on the droplet as root):**
+In the Cloudflare dashboard, add a **proxied** DNS A-record:
+`tower-finder` → `157.245.214.30` (orange cloud on). The `*.retina.fm` Origin
+cert already covers this hostname, so no certificate work is needed.
+
+**3. tower-finder nginx vhost:**
+
+Add a `tower-finder.retina.fm` server block to the `tower-finder` repo's
+`deploy/nginx.conf` (proxying to `http://tower-finder-service:8000` over
+`retina-edge`), and attach the `tower-finder` service to the `retina-edge`
+network in its compose file. Deploy that change through tower-finder's pipeline
+so its image is rebuilt and the container restarted.
+
+**4. Droplet bootstrap (run on the droplet as root):**
 
 ```bash
 git clone https://github.com/offworldlabs/tower-finder-service.git /opt/tower-finder-service
 cd /opt/tower-finder-service
 cp .env.example .env
-# Edit .env: set TUNNEL_TOKEN (required) and MAPRAD_API_KEY (optional, non-US only).
+# Edit .env: set MAPRAD_API_KEY (optional, non-US only).
 docker compose up -d --build
 ```
 
-After this, every push to `main` redeploys automatically.
+After this, every push to `main` redeploys the service automatically.
 
 ### Rollback (manual)
 

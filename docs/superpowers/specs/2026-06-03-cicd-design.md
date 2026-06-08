@@ -13,12 +13,21 @@ droplet** that runs `tower-finder` — without disturbing that existing stack.
 
 | Decision | Choice |
 |---|---|
-| Public exposure | **Cloudflare Tunnel** (`cloudflared` sidecar) |
-| Public hostname | **`tower-finder.retina.fm`** |
+| Public exposure | **Reverse-proxy vhost behind tower-finder's existing nginx** (matches `api.`/`dash.` subdomains) |
+| Shared networking | **External Docker network `retina-edge`** joined by both stacks; nginx `resolver 127.0.0.11` + variable `proxy_pass` to defer DNS |
+| Public hostname | **`tower-finder.retina.fm`** (Cloudflare-proxied A-record → droplet) |
 | Deploy target | **Production droplet `157.245.214.30`**, dir `/opt/tower-finder-service` |
 | Pipeline weight | **Lightweight**: test on PR/push; deploy + smoke on push to `main` |
 | Deploy auth | **New dedicated SSH key** (not reused from tower-finder) |
 | Health check | **Hybrid**: cheap `/api/health` liveness; smoke test hits real `/api/towers` |
+| TLS | **Reuses tower-finder's `*.retina.fm` Cloudflare Origin cert** at `/etc/ssl/cloudflare` (already covers the subdomain) |
+
+> **Note:** an earlier revision of this spec proposed a Cloudflare Tunnel
+> (`cloudflared` sidecar). That was superseded on 2026-06-08 in favour of the
+> nginx-vhost approach, to keep the droplet consistent with how every other
+> `*.retina.fm` service is exposed. The trade-off accepted: exposing this
+> service now requires a change to the production `tower-finder` stack (a vhost
+> added to its baked-in nginx config, shipped via that repo's deploy pipeline).
 
 ## Context / constraints discovered
 
@@ -34,25 +43,50 @@ droplet** that runs `tower-finder` — without disturbing that existing stack.
 - Integration tests are marked `integration` and require running
   `capture_fixture.py` first, so they are excluded in CI.
 
-The Cloudflare Tunnel approach was chosen precisely because it sidesteps the
-443-is-taken constraint: `cloudflared` dials *outbound* to Cloudflare, so no
-inbound port, no UFW change, and no contact with tower-finder's nginx.
+The 443-is-taken constraint is resolved not by avoiding tower-finder's nginx but
+by *joining* it: tower-finder-service publishes no host port and is reached over
+a shared Docker network, exactly as the FastAPI backend behind `api.retina.fm`
+is. Only one process binds 443 (tower-finder's nginx), and it fans out to
+backends by `server_name`.
 
 ## Runtime architecture
 
-Own Docker Compose stack at `/opt/tower-finder-service`, independent of
-`tower-finder`. Two containers:
+Own Docker Compose stack at `/opt/tower-finder-service`. A single container,
+attached to the shared external network `retina-edge`:
 
 - **`tower-finder-service`** — `uvicorn app:app --host 0.0.0.0 --port 8000`.
-  Not published to any host port; reachable only on the internal compose
-  network. Named volume for `data/runtime/`. Healthcheck hits
-  `http://localhost:8000/api/health`.
-- **`cloudflared`** — official `cloudflare/cloudflared` image running
-  `tunnel run` with `TUNNEL_TOKEN`. Forwards `tower-finder.retina.fm` →
-  `http://tower-finder-service:8000`.
+  Not published to any host port; reachable only on `retina-edge` via its
+  network alias `tower-finder-service`. Named volume for `data/runtime/`.
+  Healthcheck hits `http://localhost:8000/api/health`.
+
+The public edge is provided by the **existing `tower-finder` container's
+nginx** (separate repo/stack), which gains a new vhost:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name tower-finder.retina.fm;
+    ssl_certificate     /etc/ssl/cloudflare/cert.pem;
+    ssl_certificate_key /etc/ssl/cloudflare/key.pem;
+    location / {
+        resolver 127.0.0.11 valid=10s;          # Docker embedded DNS
+        set $tfs_upstream tower-finder-service;  # variable defers resolution
+        proxy_pass http://$tfs_upstream:8000;    # full request URI passed as-is
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+The `resolver` + variable form is deliberate: a literal `proxy_pass` resolves
+the upstream name once at nginx startup and **fails to boot** if it's
+unresolvable, which would couple tower-finder's whole nginx to this service
+being up. The variable defers resolution to request time, so an absent upstream
+degrades to a 502 instead.
 
 **Request data flow:**
-`client → Cloudflare edge (TLS) → outbound tunnel → cloudflared → tower-finder-service:8000 → FCC/Maprad upstreams`.
+`client → Cloudflare edge (TLS) → droplet :443 → tower-finder nginx (TLS via Origin cert, routes by server_name) → retina-edge → tower-finder-service:8000 → FCC/Maprad upstreams`.
 
 ## Files added to the repo
 
@@ -60,8 +94,8 @@ Own Docker Compose stack at `/opt/tower-finder-service`, independent of
 |---|---|
 | `Dockerfile` | `python:3.12-slim`, `pip install .`, run uvicorn on 8000, non-root user. |
 | `.dockerignore` | Exclude `.venv`, caches, `frontend/`, tests, `data/runtime/`. |
-| `docker-compose.yml` | `tower-finder-service` + `cloudflared`; named volume; healthcheck; `env_file: .env`. |
-| `.env.example` | Documents `TUNNEL_TOKEN`, `MAPRAD_API_KEY` (optional; US works FCC-only), `TOWER_FINDER_RUNTIME_DIR`. |
+| `docker-compose.yml` | `tower-finder-service` only; joins external `retina-edge`; named volume; healthcheck; `env_file: .env`. |
+| `.env.example` | Documents `MAPRAD_API_KEY` (optional; US works FCC-only), `TOWER_FINDER_RUNTIME_DIR`. |
 | `.github/workflows/ci.yml` | The pipeline (below). |
 | `deploy/smoke-test.sh` | Post-deploy curl checks against the public URL. |
 | `GET /api/health` added to `backend/routes/towers.py` | New health route on the existing router (avoids touching `app.py`, which only includes `routes.towers.router`). |
@@ -102,13 +136,18 @@ afford one real upstream-touching request.
 - **New deploy SSH key**: generate a dedicated `ed25519` keypair; add the public
   key to the droplet's `root` `authorized_keys`; store the private key as GitHub
   secret **`DEPLOY_SSH_KEY`** and **`DEPLOY_HOST=157.245.214.30`**.
+- **Shared network**: `docker network create retina-edge` on the droplet
+  (idempotent; both stacks declare it `external: true`).
+- **Cloudflare DNS**: add a proxied A-record `tower-finder` → `157.245.214.30`.
+  No cert work — the `*.retina.fm` Origin cert already covers it.
+- **tower-finder nginx vhost** (separate PR against the `tower-finder` repo):
+  add the `tower-finder.retina.fm` server block to `deploy/nginx.conf` and
+  attach the `tower-finder` service to `retina-edge` in its compose; deploy via
+  tower-finder's own pipeline (rebuilds the image, restarts the container).
 - **Droplet bootstrap**: `git clone` the repo to `/opt/tower-finder-service`;
-  create `/opt/tower-finder-service/.env` with `TUNNEL_TOKEN=…` and
-  `MAPRAD_API_KEY=…` (kept on the droplet, never in CI — same pattern as
-  tower-finder's `backend/.env`).
-- **Cloudflare**: create a tunnel; add public hostname
-  `tower-finder.retina.fm` → `http://tower-finder-service:8000` (auto-creates
-  the DNS record); copy the token into the droplet `.env`.
+  create `/opt/tower-finder-service/.env` with `MAPRAD_API_KEY=…` (optional;
+  kept on the droplet, never in CI — same pattern as tower-finder's
+  `backend/.env`).
 
 ## Error handling & scope
 
