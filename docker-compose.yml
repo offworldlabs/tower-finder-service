@@ -1,0 +1,29 @@
+services:
+  tower-finder-service:
+    build: .
+    env_file:
+      - .env
+    volumes:
+      - runtime-data:/app/data/runtime
+    networks:
+      retina-edge:
+        aliases:
+          - tower-finder-service
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+networks:
+  retina-edge:
+    external: true
+
+volumes:
+  runtime-data:

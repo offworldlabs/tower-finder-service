@@ -20,10 +20,17 @@ from services.tower_ranking import (
 
 router = APIRouter()
 
+
+@router.get("/api/health")
+async def health():
+    return {"status": "ok"}
+
+
 API_KEY = os.getenv("MAPRAD_API_KEY", "")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _detect_source(lat: float, lon: float) -> str:
     if -45 <= lat <= -10 and 112 <= lon <= 155:
@@ -71,6 +78,7 @@ async def _batch_lookup_elevations(
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
+
 @router.get("/api/towers")
 async def find_towers(
     lat: float = Query(..., ge=-90, le=90),
@@ -95,7 +103,11 @@ async def find_towers(
             if API_KEY:
                 try:
                     maprad_raw = await fetch_broadcast_systems(
-                        API_KEY, lat, lon, radius_km=effective_radius, source=source,
+                        API_KEY,
+                        lat,
+                        lon,
+                        radius_km=effective_radius,
+                        source=source,
                     )
                     raw.extend(maprad_raw)
                 except Exception:
@@ -104,7 +116,11 @@ async def find_towers(
             if not API_KEY:
                 raise HTTPException(status_code=500, detail="MAPRAD_API_KEY not configured")
             raw = await fetch_broadcast_systems(
-                API_KEY, lat, lon, radius_km=effective_radius, source=source,
+                API_KEY,
+                lat,
+                lon,
+                radius_km=effective_radius,
+                source=source,
             )
     except HTTPException:
         raise
@@ -136,7 +152,8 @@ async def find_towers(
     return {
         "towers": towers,
         "query": {
-            "latitude": lat, "longitude": lon,
+            "latitude": lat,
+            "longitude": lon,
             "altitude_m": resolved_altitude,
             "radius_km": effective_radius,
             "source": source,
@@ -168,13 +185,18 @@ async def find_towers_with_measurements(payload: MeasurementPayload):
     try:
         if source == "us":
             raw = await fetch_fcc_broadcast_systems(
-                payload.lat, payload.lon, radius_km=effective_radius,
+                payload.lat,
+                payload.lon,
+                radius_km=effective_radius,
             )
             if API_KEY:
                 try:
                     maprad_raw = await fetch_broadcast_systems(
-                        API_KEY, payload.lat, payload.lon,
-                        radius_km=effective_radius, source=source,
+                        API_KEY,
+                        payload.lat,
+                        payload.lon,
+                        radius_km=effective_radius,
+                        source=source,
                     )
                     raw.extend(maprad_raw)
                 except Exception:
@@ -183,15 +205,19 @@ async def find_towers_with_measurements(payload: MeasurementPayload):
             if not API_KEY:
                 raise HTTPException(status_code=500, detail="MAPRAD_API_KEY not configured")
             raw = await fetch_broadcast_systems(
-                API_KEY, payload.lat, payload.lon,
-                radius_km=effective_radius, source=source,
+                API_KEY,
+                payload.lat,
+                payload.lon,
+                radius_km=effective_radius,
+                source=source,
             )
     except HTTPException:
         raise
     except Exception:
         logging.exception("Tower data fetch failed")
         raise HTTPException(
-            status_code=502, detail="External service unavailable. Please try again.",
+            status_code=502,
+            detail="External service unavailable. Please try again.",
         ) from None
 
     towers = process_and_rank(

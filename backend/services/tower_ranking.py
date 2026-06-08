@@ -62,10 +62,7 @@ def reload_config():
     RX_ANTENNA_GAIN_DBI = rx.get("rx_antenna_gain_dbi", 6.0)
     SENSITIVITY_DBM = rx.get("sensitivity_dbm", -95.0)
 
-    BROADCAST_BANDS = {
-        band: [tuple(r) for r in ranges]
-        for band, ranges in cfg.get("broadcast_bands", {}).items()
-    }
+    BROADCAST_BANDS = {band: [tuple(r) for r in ranges] for band, ranges in cfg.get("broadcast_bands", {}).items()}
 
     ranking = cfg.get("ranking", {})
     BAND_PRIORITY = ranking.get("band_priority", {"VHF": 0, "UHF": 1, "FM": 2})
@@ -76,11 +73,14 @@ def reload_config():
         DISTANCE_CLASSES.append((dc["label"], dc["min_km"], max_km))
 
     DISTANCE_PRIORITY = ranking.get("distance_priority", {})
-    SORT_ORDER = ranking.get("sort_order", [
-        {"field": "band_priority", "ascending": True},
-        {"field": "distance_priority", "ascending": True},
-        {"field": "received_power_dbm", "ascending": False},
-    ])
+    SORT_ORDER = ranking.get(
+        "sort_order",
+        [
+            {"field": "band_priority", "ascending": True},
+            {"field": "distance_priority", "ascending": True},
+            {"field": "received_power_dbm", "ascending": False},
+        ],
+    )
 
     search = cfg.get("search", {})
     DEFAULT_RADIUS_KM = search.get("default_radius_km", 80)
@@ -112,8 +112,7 @@ def initial_bearing(lat1: float, lon1: float, lat2: float, lon2: float) -> float
 
 
 def bearing_to_cardinal(deg: float) -> str:
-    dirs = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
-            "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+    dirs = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
     ix = round(deg / 22.5) % 16
     return dirs[ix]
 
@@ -257,7 +256,6 @@ def _polygon_centroid(wkt: str) -> tuple[float, float] | None:
     return sum(lats) / len(lats), sum(lngs) / len(lngs)
 
 
-
 def _match_measurement(freq_mhz: float, band: str, measurements: list[dict]) -> dict | None:
     """Return the closest measurement to freq_mhz within the band-specific tolerance.
 
@@ -275,7 +273,14 @@ def _match_measurement(freq_mhz: float, band: str, measurements: list[dict]) -> 
     return best
 
 
-def process_and_rank(raw_systems: list, user_lat: float, user_lon: float, limit: int = 0, radius_km: float = 0, measurements: list[dict] | None = None) -> list:
+def process_and_rank(
+    raw_systems: list,
+    user_lat: float,
+    user_lon: float,
+    limit: int = 0,
+    radius_km: float = 0,
+    measurements: list[dict] | None = None,
+) -> list:
     """
     Takes raw system records from Maprad/FCC, filters and ranks them
     for passive radar suitability.
@@ -334,31 +339,33 @@ def process_and_rank(raw_systems: list, user_lat: float, user_lon: float, limit:
             measurement = _match_measurement(freq_val, band, measurements) if measurements else None
             freq_matched = measurement is not None
 
-            towers.append({
-                "callsign": device.get("callsign") or "",
-                "name": loc.get("name") or "",
-                "state": loc.get("state") or "",
-                "frequency_mhz": round(freq_val, 3),
-                "band": band,
-                "latitude": round(tower_lat, 6),
-                "longitude": round(tower_lon, 6),
-                "antenna_height_m": device.get("antennaHeight"),
-                "distance_km": round(dist, 1),
-                "bearing_deg": round(brg, 1),
-                "bearing_cardinal": bearing_to_cardinal(brg),
-                "received_power_dbm": round(pwr, 1),
-                "distance_class": dist_class,
-                "eirp_dbm": round(eirp, 1),
-                "licence_type": licence.get("type") or "",
-                "licence_subtype": licence.get("subtype") or "",
-                "frequency_matched": freq_matched,
-                # Spectrum-analyser fields — populated when a measurement matched, None otherwise.
-                "measured": measurement is not None,
-                "snr_db": measurement["snr_db"] if measurement else None,
-                "score": measurement["score"] if measurement else None,
-                "power_db": measurement["power_db"] if measurement else None,
-                "obw_fraction": measurement["obw_fraction"] if measurement else None,
-            })
+            towers.append(
+                {
+                    "callsign": device.get("callsign") or "",
+                    "name": loc.get("name") or "",
+                    "state": loc.get("state") or "",
+                    "frequency_mhz": round(freq_val, 3),
+                    "band": band,
+                    "latitude": round(tower_lat, 6),
+                    "longitude": round(tower_lon, 6),
+                    "antenna_height_m": device.get("antennaHeight"),
+                    "distance_km": round(dist, 1),
+                    "bearing_deg": round(brg, 1),
+                    "bearing_cardinal": bearing_to_cardinal(brg),
+                    "received_power_dbm": round(pwr, 1),
+                    "distance_class": dist_class,
+                    "eirp_dbm": round(eirp, 1),
+                    "licence_type": licence.get("type") or "",
+                    "licence_subtype": licence.get("subtype") or "",
+                    "frequency_matched": freq_matched,
+                    # Spectrum-analyser fields — populated when a measurement matched, None otherwise.
+                    "measured": measurement is not None,
+                    "snr_db": measurement["snr_db"] if measurement else None,
+                    "score": measurement["score"] if measurement else None,
+                    "power_db": measurement["power_db"] if measurement else None,
+                    "obw_fraction": measurement["obw_fraction"] if measurement else None,
+                }
+            )
 
     # Deduplicate by (callsign, frequency) — keep the strongest
     seen = {}

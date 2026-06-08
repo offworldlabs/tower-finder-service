@@ -15,7 +15,9 @@ class Measurement(BaseModel):
     freq_mhz: float = Field(..., gt=0, lt=10_000, description="Centre frequency in MHz")
     snr_db: float | None = Field(None, description="Signal-to-noise ratio in dB. None for TV channels.")
     obw_fraction: float | None = Field(
-        None, ge=0.0, le=1.0,
+        None,
+        ge=0.0,
+        le=1.0,
         description="Occupied bandwidth as a fraction of the channel bandwidth. None for TV channels.",
     )
     score: float = Field(..., description="Composite passive-radar suitability score")

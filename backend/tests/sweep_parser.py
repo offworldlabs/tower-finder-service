@@ -123,8 +123,5 @@ def summarise(measurements: list[dict]) -> str:
         if count:
             band_m = [m for m in measurements if m["band"] == band]
             top = max(band_m, key=lambda m: m["score"])
-            lines.append(
-                f"  {band}: {count} signals — "
-                f"strongest {top['freq_mhz']} MHz (score={top['score']:.3f})"
-            )
+            lines.append(f"  {band}: {count} signals — strongest {top['freq_mhz']} MHz (score={top['score']:.3f})")
     return "\n".join(lines)

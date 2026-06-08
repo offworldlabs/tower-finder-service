@@ -35,4 +35,3 @@ class TestDetectSource:
     def test_fallback_south_america(self):
         """São Paulo (outside defined regions) falls back to 'us'."""
         assert _detect_source(-23.5, -46.6) == "us"
-
