@@ -34,6 +34,34 @@ class TestDetectSource:
 
         assert _detect_source(45.42, -75.69) == "ca"
 
+    def test_us_northern_tier_not_misclassified_as_canada(self):
+        """Amherst, MA (42.2687, -72.6713) — same longitude band as Canada
+        but south of the real border; previously misclassified as 'ca'."""
+        from routes.towers import _detect_source
+
+        assert _detect_source(42.2687, -72.6713) == "us"
+
+    def test_toronto_is_canada(self):
+        """Toronto (43.6532, -79.3832) sits south of a flat 45°N cutoff but
+        is still Canada — the real border dips around the Great Lakes."""
+        from routes.towers import _detect_source
+
+        assert _detect_source(43.6532, -79.3832) == "ca"
+
+    def test_windsor_is_canada(self):
+        """Windsor, ON (42.3149, -83.0364) is south of Detroit, MI — a flat
+        latitude threshold can't separate them; polygon lookup can."""
+        from routes.towers import _detect_source
+
+        assert _detect_source(42.3149, -83.0364) == "ca"
+
+    def test_northern_maine_is_us(self):
+        """Fort Kent, ME (47.2380, -68.5905) sits north of 45°N but is US —
+        the border bulges north around the Maine/Quebec line."""
+        from routes.towers import _detect_source
+
+        assert _detect_source(47.2380, -68.5905) == "us"
+
     def test_hawaii(self):
         from routes.towers import _detect_source
 

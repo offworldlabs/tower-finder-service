@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Query
 from clients.fcc import fetch_fcc_broadcast_systems
 from clients.maprad import fetch_broadcast_systems
 from models.measurements import MeasurementPayload
+from services.region_lookup import classify_region
 from services.tower_ranking import (
     _CONFIG_PATH,
     DEFAULT_LIMIT,
@@ -33,16 +34,9 @@ API_KEY = os.getenv("MAPRAD_API_KEY", "")
 
 
 def _detect_source(lat: float, lon: float) -> str:
-    if -45 <= lat <= -10 and 112 <= lon <= 155:
-        return "au"
-    if 42 <= lat <= 84 and -141 <= lon <= -52:
-        return "ca"
-    if 24 <= lat < 49 and -125 <= lon <= -66:
-        return "us"
-    if 51 <= lat <= 72 and -180 <= lon <= -129:
-        return "us"
-    if 18 <= lat <= 23 and -161 <= lon <= -154:
-        return "us"
+    region = classify_region(lat, lon)
+    if region is not None:
+        return region
     return "us"
 
 
