@@ -5,6 +5,7 @@ that dips and bulges (e.g. the Great Lakes, the Maine/Quebec line).
 """
 
 import json
+import threading
 from pathlib import Path
 
 from shapely.geometry import Point, shape
@@ -19,18 +20,22 @@ _ADMIN_TO_SOURCE = {
 }
 
 _geoms: dict[str, BaseGeometry] = {}
+_load_lock = threading.Lock()
 
 
 def _load_borders() -> None:
-    if _geoms:
+    if _geoms:  # fast path after warm-up
         return
-    with open(_BORDERS_PATH) as f:
-        data = json.load(f)
-    for feature in data["features"]:
-        admin = feature["properties"].get("ADMIN")
-        source = _ADMIN_TO_SOURCE.get(admin)
-        if source is not None:
-            _geoms[source] = shape(feature["geometry"])
+    with _load_lock:
+        if _geoms:  # re-check inside lock
+            return
+        with open(_BORDERS_PATH) as f:
+            data = json.load(f)
+        for feature in data["features"]:
+            admin = feature["properties"].get("ADMIN")
+            source = _ADMIN_TO_SOURCE.get(admin)
+            if source is not None:
+                _geoms[source] = shape(feature["geometry"])
 
 
 def classify_region(lat: float, lon: float) -> str | None:
@@ -38,6 +43,6 @@ def classify_region(lat: float, lon: float) -> str | None:
     _load_borders()
     point = Point(lon, lat)  # GeoJSON order is (lon, lat)
     for source, geom in _geoms.items():
-        if geom.contains(point):
+        if geom.covers(point):  # covers() includes boundary points; contains() excludes them
             return source
     return None
