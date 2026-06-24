@@ -293,15 +293,19 @@ def _nearby_states(lat: float, lon: float) -> list[str]:
         dists.append((d, code))
     dists.sort()
 
-    # Take the closest state plus neighbours within ~3 degrees
+    # Take the closest state plus neighbours within ~4 degrees (~350-440 km).
+    # No hard cap — the distance threshold naturally limits to ~6-10 states
+    # in the dense northeast corridor.  A low cap risks excluding the user's
+    # own state when its centroid is far away (e.g. Long Island, NY: NY's
+    # centroid near Syracuse is farther than NH's centroid).
     primary = dists[0][1]
     result = [primary]
     for d, code in dists[1:]:
-        if d < 4.0:  # ~4 degrees ≈ 350-440 km, covers 80km radius well
+        if d < 4.0:
             result.append(code)
         else:
             break
-    return result[:5]  # Cap at 5 states to avoid excessive queries
+    return result
 
 
 async def fetch_fcc_tv_stations(

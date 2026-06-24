@@ -1,6 +1,28 @@
-"""Unit tests for tower helper functions: _detect_source."""
+"""Unit tests for tower helper functions: _detect_source, _nearby_states."""
 
+from clients.fcc import _nearby_states
 from routes.towers import _detect_source
+
+
+# ── Nearby States ───────────────────────────────────────────────────────────
+
+
+class TestNearbyStates:
+    """Tests for _nearby_states(lat, lon) -> list[str]."""
+
+    def test_long_island_includes_ny(self):
+        """Long Island is in NY — NY must be queried despite its distant centroid."""
+        states = _nearby_states(40.777229, -73.081408)
+        assert "NY" in states
+
+    def test_chicago_includes_il(self):
+        states = _nearby_states(41.88, -87.63)
+        assert "IL" in states
+
+    def test_hawaii(self):
+        states = _nearby_states(21.31, -157.86)
+        assert "HI" in states
+        assert len(states) == 1
 
 # ── Source Detection ─────────────────────────────────────────────────────────
 
