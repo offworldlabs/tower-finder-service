@@ -49,6 +49,30 @@ def _load_config() -> dict:
         return json.load(f)
 
 
+# Band taxonomy: TV = VHF/UHF, FM = radio. Hardcoded (consistent with
+# BAND_PRIORITY / MEASUREMENT_TOLERANCE_MHZ, which also key on these names).
+# TODO(DAB): DAB (digital radio) sits in VHF Band III, overlapping TV-VHF;
+# band-based gating would misclassify it as TV and wrongly withhold it from
+# non-NA users. When DAB data is ingested, give it its own band label /
+# service-level classification rather than reusing 'VHF'.
+ALL_BANDS = frozenset({"FM", "VHF", "UHF"})
+FM_ONLY = frozenset({"FM"})
+
+# Regions whose broadcast TV standard matches the node's ATSC-only demodulation.
+# TV towers are withheld everywhere else (DVB-T/ISDB-T regions) until the node
+# gains multi-standard support. This is a capability allowlist, not geography.
+TV_ELIGIBLE_REGIONS = frozenset({"us", "ca"})
+
+
+def allowed_bands_for_region(source: str) -> frozenset:
+    """Bands a request from `source` may be served.
+
+    ATSC-capable regions get all bands; everyone else gets FM only, until the
+    node gains multi-standard demodulation.
+    """
+    return ALL_BANDS if source in TV_ELIGIBLE_REGIONS else FM_ONLY
+
+
 def reload_config():
     """Re-read tower_config.json and update module-level settings."""
     global RX_ANTENNA_GAIN_DBI, SENSITIVITY_DBM
@@ -87,7 +111,7 @@ def reload_config():
     DEFAULT_LIMIT = search.get("default_limit", 20)
 
 
-# Initialise on import
+# Initialise on import.
 reload_config()
 
 
@@ -280,6 +304,7 @@ def process_and_rank(
     limit: int = 0,
     radius_km: float = 0,
     measurements: list[dict] | None = None,
+    allowed_bands: frozenset = ALL_BANDS,
 ) -> list:
     """
     Takes raw system records from Maprad/FCC, filters and ranks them
@@ -295,6 +320,9 @@ def process_and_rank(
             fields (``snr_db``, ``score``, ``power_db``, ``obw_fraction``)
             and ``frequency_matched=True``.  Unmatched towers carry
             ``measured=False`` and None for those fields.
+        allowed_bands: Bands to keep. Defaults to unrestricted (ALL_BANDS);
+            callers narrow it (e.g. FM_ONLY for non-ATSC regions) rather than
+            opting out of a wider set.
     """
     effective_radius = radius_km if radius_km > 0 else DEFAULT_RADIUS_KM
     effective_limit = limit if limit > 0 else DEFAULT_LIMIT
@@ -310,6 +338,9 @@ def process_and_rank(
             band = classify_band(freq_val)
             if band is None:
                 continue  # not in a broadcast band
+
+            if band not in allowed_bands:
+                continue  # band withheld for this request (e.g. TV to a non-ATSC region)
 
             loc = device.get("location") or {}
             coords = parse_geom(loc.get("geom"))

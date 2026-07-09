@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import app
+from tests._helpers import device, system
 
 
 @pytest.fixture()
@@ -72,10 +73,15 @@ class TestDetectSource:
 
         assert _detect_source(64.2, -152.5) == "us"
 
-    def test_unknown_defaults_to_us(self):
+    def test_unknown_region_raises(self):
+        """Paris (48.85, 2.35) is not in a supported region — must raise 422
+        rather than silently falling through to 'us'."""
+        from fastapi import HTTPException
+
         from routes.towers import _detect_source
 
-        assert _detect_source(48.85, 2.35) == "us"  # Paris → falls through to us
+        with pytest.raises(HTTPException):
+            _detect_source(48.85, 2.35)
 
 
 # ── Tower search validation ──────────────────────────────────────────────────
@@ -94,6 +100,14 @@ class TestTowerSearch:
     def test_lat_out_of_range(self, client):
         r = client.get("/api/towers?lat=100&lon=0")
         assert r.status_code == 422
+
+    def test_unmapped_location_returns_422(self, client):
+        # source defaults to "auto"; Paris is outside US/CA/AU, so _detect_source
+        # raises before any external fetch. The specific detail distinguishes this
+        # from a request-validation 422.
+        r = client.get("/api/towers?lat=48.85&lon=2.35")
+        assert r.status_code == 422
+        assert "not in a supported region" in r.json()["detail"]
 
 
 # ── Config endpoints ─────────────────────────────────────────────────────────
@@ -257,6 +271,124 @@ class TestFindTowersServiceErrors:
         assert r.status_code == 502
 
 
+# ── TV-band gating by region (ATSC allowlist) ────────────────────────────────
+
+
+def _raw_device(freq_mhz, lat, lon, callsign):
+    """Raw device dict shaped like Maprad/FCC output for process_and_rank.
+
+    Thin wrapper over the shared factory with a strong EIRP so these towers
+    clear the sensitivity filter regardless of distance.
+    """
+    return device(freq_mhz, lat, lon, callsign=callsign, eirp=10000)  # watts
+
+
+def _raw_system(devices):
+    return system(devices, licence_type="Broadcast")
+
+
+class TestTvBandGatingByRegion:
+    # Sydney query point; devices placed within ~a few km so they pass radius.
+    _SYD_LAT = -33.87
+    _SYD_LON = 151.21
+
+    def _au_mixed_systems(self):
+        return [
+            _raw_system(
+                [
+                    _raw_device(95.5, -33.87, 151.21, "AUFM"),  # FM
+                    _raw_device(195.0, -33.87, 151.21, "AUVHF"),  # TV VHF
+                    _raw_device(545.0, -33.87, 151.21, "AUUHF"),  # TV UHF
+                ]
+            )
+        ]
+
+    def test_au_source_returns_fm_only(self):
+        with (
+            unittest.mock.patch("routes.towers.API_KEY", "fake-key"),
+            unittest.mock.patch(
+                "routes.towers.fetch_broadcast_systems",
+                new=unittest.mock.AsyncMock(return_value=self._au_mixed_systems()),
+            ),
+            unittest.mock.patch(
+                "routes.towers._batch_lookup_elevations",
+                new=unittest.mock.AsyncMock(return_value={}),
+            ),
+        ):
+            with TestClient(app, raise_server_exceptions=False) as c:
+                r = c.get(f"/api/towers?lat={self._SYD_LAT}&lon={self._SYD_LON}&source=au")
+
+        assert r.status_code == 200
+        towers = r.json()["towers"]
+        assert len(towers) > 0
+        bands = {t["band"] for t in towers}
+        assert bands == {"FM"}, f"AU (non-ATSC) must yield FM only, got {bands}"
+
+    def test_us_source_includes_tv(self):
+        us_systems = [
+            _raw_system(
+                [
+                    _raw_device(95.5, 33.9, -84.6, "USFM"),  # FM
+                    _raw_device(195.0, 33.9, -84.6, "USVHF"),  # TV VHF
+                    _raw_device(545.0, 33.9, -84.6, "USUHF"),  # TV UHF
+                ]
+            )
+        ]
+        with (
+            unittest.mock.patch("routes.towers.API_KEY", ""),
+            unittest.mock.patch(
+                "routes.towers.fetch_fcc_broadcast_systems",
+                new=unittest.mock.AsyncMock(return_value=us_systems),
+            ),
+            unittest.mock.patch(
+                "routes.towers._batch_lookup_elevations",
+                new=unittest.mock.AsyncMock(return_value={}),
+            ),
+        ):
+            with TestClient(app, raise_server_exceptions=False) as c:
+                r = c.get("/api/towers?lat=33.9&lon=-84.6&source=us")
+
+        assert r.status_code == 200
+        bands = {t["band"] for t in r.json()["towers"]}
+        assert bands & {"VHF", "UHF"}, f"US (ATSC) must include TV, got {bands}"
+
+    def test_post_au_source_excludes_tv(self):
+        payload = {
+            "lat": self._SYD_LAT,
+            "lon": self._SYD_LON,
+            "source": "au",
+            "measurements": [
+                {
+                    "freq_mhz": 195.0,
+                    "snr_db": 30.0,
+                    "obw_fraction": 0.03,
+                    "score": 0.75,
+                    "power_db": -62.0,
+                    "band": "VHF",
+                }
+            ],
+        }
+        with (
+            unittest.mock.patch("routes.towers.API_KEY", "fake-key"),
+            unittest.mock.patch(
+                "routes.towers.fetch_broadcast_systems",
+                new=unittest.mock.AsyncMock(return_value=self._au_mixed_systems()),
+            ),
+            unittest.mock.patch(
+                "routes.towers._batch_lookup_elevations",
+                new=unittest.mock.AsyncMock(return_value={}),
+            ),
+        ):
+            with TestClient(app, raise_server_exceptions=False) as c:
+                r = c.post("/api/towers", json=payload)
+
+        assert r.status_code == 200
+        bands = {t["band"] for t in r.json()["towers"]}
+        assert "VHF" not in bands and "UHF" not in bands, (
+            f"AU POST path must withhold TV even for a TV measurement, got {bands}"
+        )
+
+
 # ── POST /api/towers (measurement payload) ───────────────────────────────────
 
 _VALID_MEASUREMENT = {
@@ -286,6 +418,13 @@ class TestFindTowersWithMeasurements:
         r = client.post("/api/towers", json=payload)
         assert r.status_code == 400
         assert "Invalid source" in r.json()["detail"]
+
+    def test_unmapped_location_returns_422(self, client):
+        # No source → defaults to "auto"; Paris is unmapped, so the request is
+        # rejected before any external fetch.
+        r = client.post("/api/towers", json={"lat": 48.85, "lon": 2.35, "measurements": []})
+        assert r.status_code == 422
+        assert "not in a supported region" in r.json()["detail"]
 
     def test_empty_measurements_accepted(self, client):
         payload = {**_VALID_PAYLOAD, "measurements": []}

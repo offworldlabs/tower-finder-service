@@ -5,6 +5,7 @@ import pytest
 from routes.towers import _detect_source
 from services.tower_ranking import (
     DEFAULT_LIMIT,
+    FM_ONLY,
     MEASUREMENT_TOLERANCE_MHZ,
     SENSITIVITY_DBM,
     _as_float,
@@ -20,6 +21,8 @@ from services.tower_ranking import (
     process_and_rank,
     watts_to_dbm,
 )
+from tests._helpers import device as _device
+from tests._helpers import system as _system
 
 # ── Auto source detection ────────────────────────────────────────────────────
 
@@ -40,8 +43,13 @@ class TestDetectSource:
     def test_honolulu_us(self):
         assert _detect_source(21.3069, -157.8583) == "us"
 
-    def test_unknown_fallback_us(self):
-        assert _detect_source(0, 0) == "us"
+    def test_unknown_region_raises(self):
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as exc_info:
+            _detect_source(0, 0)
+        assert exc_info.value.status_code == 422
+        assert "supported region" in exc_info.value.detail
 
 
 # ── Broadcast band classification ────────────────────────────────────────────
@@ -83,6 +91,19 @@ class TestClassifyBand:
 
     def test_above_uhf(self):
         assert classify_band(609) is None
+
+
+# ── Band taxonomy ────────────────────────────────────────────────────────────
+
+
+class TestBandTaxonomy:
+    def test_all_bands_is_fm_vhf_uhf(self):
+        import services.tower_ranking as _tr
+
+        assert _tr.ALL_BANDS == frozenset({"FM", "VHF", "UHF"})
+
+    def test_fm_only_is_fm(self):
+        assert FM_ONLY == frozenset({"FM"})
 
 
 # ── Haversine ────────────────────────────────────────────────────────────────
@@ -188,29 +209,8 @@ _USER_LAT = 33.749
 _USER_LON = -84.388
 
 
-def _device(freq_mhz, lat, lon, callsign="KXXX", eirp_dbm=60.0, antenna_height=100):
-    """Build a minimal device dict accepted by process_and_rank."""
-    return {
-        "frequency": freq_mhz,
-        "callsign": callsign,
-        "antennaHeight": antenna_height,
-        "location": {
-            # parse_geom accepts a plain WKT string; lon before lat per WKT convention
-            "geom": f"POINT({lon} {lat})",
-            "name": "Test Tower",
-            "state": "GA",
-        },
-        "eirp_dbm": eirp_dbm,
-    }
-
-
-def _system(devices, licence_type="", licence_subtype=""):
-    """Wrap devices in a raw-system dict."""
-    return {
-        "licence": {"type": licence_type, "subtype": licence_subtype},
-        "devices": devices,
-    }
-
+# _device / _system are the canonical factories from tests._helpers (imported
+# at the top), shared with test_towers_routes.py so the two can't drift.
 
 # A valid FM tower ~20 km north of Atlanta — well within the default 80 km radius
 _FM_DEVICE = _device(freq_mhz=95.5, lat=33.93, lon=-84.388, callsign="WXYZ")
@@ -302,6 +302,47 @@ class TestProcessAndRank:
         result = process_and_rank([_system([bad_device])], _USER_LAT, _USER_LON)
         assert result == []
 
+    # ── allowed_bands filtering (ATSC-region gating) ─────────────────────────
+
+    def test_fm_only_excludes_tv_keeps_fm(self):
+        # FM_ONLY should drop VHF and UHF (TV) towers but keep the FM tower.
+        fm = _device(freq_mhz=95.5, lat=33.85, lon=-84.388, callsign="KFM")
+        vhf = _device(freq_mhz=195.0, lat=33.85, lon=-84.388, callsign="KVHF")
+        uhf = _device(freq_mhz=545.0, lat=33.85, lon=-84.388, callsign="KUHF")
+        result = process_and_rank([_system([fm, vhf, uhf])], _USER_LAT, _USER_LON, allowed_bands=FM_ONLY)
+        bands = {t["band"] for t in result}
+        callsigns = {t["callsign"] for t in result}
+        assert bands == {"FM"}
+        assert callsigns == {"KFM"}
+
+    def test_default_allowed_bands_keeps_tv(self):
+        # The allowed_bands default is "unrestricted": omitting it keeps every
+        # band, incl. TV. Callers opt into narrowing (e.g. FM_ONLY for non-ATSC
+        # regions) rather than opting out of it.
+        vhf = _device(freq_mhz=195.0, lat=33.85, lon=-84.388, callsign="KVHF")
+        uhf = _device(freq_mhz=545.0, lat=33.85, lon=-84.388, callsign="KUHF")
+        result = process_and_rank([_system([vhf, uhf])], _USER_LAT, _USER_LON)
+        bands = {t["band"] for t in result}
+        assert "VHF" in bands
+        assert "UHF" in bands
+
+    def test_fm_only_filters_before_limit(self):
+        # TV outranks FM (band_priority). With several TV devices plus one FM
+        # device and a small limit, FM_ONLY must still return the FM tower —
+        # proving the band filter runs BEFORE truncation, not after.
+        tv_devices = [_device(freq_mhz=195.0, lat=33.85 + i * 0.001, lon=-84.388, callsign=f"KTV{i}") for i in range(5)]
+        fm = _device(freq_mhz=95.5, lat=33.85, lon=-84.388, callsign="KFM")
+        result = process_and_rank(
+            [_system(tv_devices + [fm])],
+            _USER_LAT,
+            _USER_LON,
+            limit=1,
+            allowed_bands=FM_ONLY,
+        )
+        assert len(result) == 1
+        assert result[0]["callsign"] == "KFM"
+        assert result[0]["band"] == "FM"
+
     # ── Geometry filtering ───────────────────────────────────────────────────
 
     def test_device_with_no_geom_excluded(self):
@@ -326,22 +367,22 @@ class TestProcessAndRank:
     def test_deduplication_keeps_stronger_signal(self):
         # Two devices with the same callsign+frequency but different distances
         # The closer one (stronger signal) should win
-        closer = _device(95.5, 33.85, -84.388, callsign="KDUP", eirp_dbm=60.0)  # ~11 km
-        farther = _device(95.5, 33.99, -84.388, callsign="KDUP", eirp_dbm=60.0)  # ~27 km
+        closer = _device(95.5, 33.85, -84.388, callsign="KDUP")  # ~11 km
+        farther = _device(95.5, 33.99, -84.388, callsign="KDUP")  # ~27 km
         result = process_and_rank([_system([closer, farther])], _USER_LAT, _USER_LON)
         assert len(result) == 1
         # Closer tower should be kept (higher received_power_dbm)
         assert result[0]["distance_km"] < 20.0
 
     def test_deduplication_different_callsigns_both_kept(self):
-        dev1 = _device(95.5, 33.85, -84.388, callsign="KAAA", eirp_dbm=60.0)
-        dev2 = _device(95.5, 33.86, -84.388, callsign="KBBB", eirp_dbm=60.0)
+        dev1 = _device(95.5, 33.85, -84.388, callsign="KAAA")
+        dev2 = _device(95.5, 33.86, -84.388, callsign="KBBB")
         result = process_and_rank([_system([dev1, dev2])], _USER_LAT, _USER_LON)
         assert len(result) == 2
 
     def test_deduplication_different_frequencies_both_kept(self):
-        dev1 = _device(95.5, 33.85, -84.388, callsign="KSAME", eirp_dbm=60.0)
-        dev2 = _device(101.1, 33.85, -84.388, callsign="KSAME", eirp_dbm=60.0)
+        dev1 = _device(95.5, 33.85, -84.388, callsign="KSAME")
+        dev2 = _device(101.1, 33.85, -84.388, callsign="KSAME")
         result = process_and_rank([_system([dev1, dev2])], _USER_LAT, _USER_LON)
         assert len(result) == 2
 
@@ -677,3 +718,11 @@ class TestProcessAndRankMeasurements:
         t = result[0]
         assert t["measured"] is False
         assert t["snr_db"] is None
+
+
+def test_allowed_bands_for_region():
+    # ATSC-capable regions get all bands; everyone else gets FM only.
+    import services.tower_ranking as tower_ranking
+
+    assert tower_ranking.allowed_bands_for_region("us") == frozenset({"FM", "VHF", "UHF"})
+    assert tower_ranking.allowed_bands_for_region("au") == frozenset({"FM"})

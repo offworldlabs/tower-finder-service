@@ -19,6 +19,13 @@ _ADMIN_TO_SOURCE = {
     "Australia": "au",
 }
 
+# Single source of truth for the supported-region set and the human-facing
+# rejection message, derived from _ADMIN_TO_SOURCE so the two can't drift.
+SUPPORTED_REGIONS = tuple(_ADMIN_TO_SOURCE.values())
+UNSUPPORTED_REGION_DETAIL = (
+    f"Location is not in a supported region ({', '.join(s.upper() for s in SUPPORTED_REGIONS)})."
+)
+
 _geoms: dict[str, BaseGeometry] = {}
 _load_lock = threading.Lock()
 
