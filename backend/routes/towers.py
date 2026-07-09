@@ -10,9 +10,10 @@ from fastapi import APIRouter, HTTPException, Query
 from clients.fcc import fetch_fcc_broadcast_systems
 from clients.maprad import fetch_broadcast_systems
 from models.measurements import MeasurementPayload
-from services.region_lookup import classify_region
+from services.region_lookup import SUPPORTED_REGIONS, UNSUPPORTED_REGION_DETAIL, classify_region
 from services.tower_ranking import (
     _CONFIG_PATH,
+    allowed_bands_for_region,
     DEFAULT_LIMIT,
     DEFAULT_RADIUS_KM,
     process_and_rank,
@@ -37,7 +38,11 @@ def _detect_source(lat: float, lon: float) -> str:
     region = classify_region(lat, lon)
     if region is not None:
         return region
-    return "us"
+    # Deliberate stopgap: we only have tower data + an ATSC demod for the
+    # supported regions, so an unmapped location can't be served meaningfully.
+    # Edge-of-country false negatives are accepted for now; revisit when
+    # coverage and demod standards expand.
+    raise HTTPException(status_code=422, detail=UNSUPPORTED_REGION_DETAIL)
 
 
 async def _lookup_elevation(lat: float, lon: float) -> float | None:
@@ -85,8 +90,8 @@ async def find_towers(
     source = source.lower()
     if source == "auto":
         source = _detect_source(lat, lon)
-    if source not in ("us", "au", "ca"):
-        raise HTTPException(status_code=400, detail="Invalid source. Use: us, au, ca, auto")
+    if source not in SUPPORTED_REGIONS:
+        raise HTTPException(status_code=400, detail=f"Invalid source. Use: {', '.join(SUPPORTED_REGIONS)}, auto")
 
     effective_radius = radius_km if radius_km > 0 else DEFAULT_RADIUS_KM
     effective_limit = limit if limit > 0 else DEFAULT_LIMIT
@@ -128,7 +133,15 @@ async def find_towers(
         if elev is not None:
             resolved_altitude = elev
 
-    towers = process_and_rank(raw, lat, lon, limit=effective_limit, radius_km=effective_radius)
+    allowed_bands = allowed_bands_for_region(source)
+    towers = process_and_rank(
+        raw,
+        lat,
+        lon,
+        limit=effective_limit,
+        radius_km=effective_radius,
+        allowed_bands=allowed_bands,
+    )
 
     tower_coords = [(t["latitude"], t["longitude"]) for t in towers]
     elevations = await _batch_lookup_elevations(tower_coords)
@@ -169,8 +182,8 @@ async def find_towers_with_measurements(payload: MeasurementPayload):
     source = payload.source.lower()
     if source == "auto":
         source = _detect_source(payload.lat, payload.lon)
-    if source not in ("us", "au", "ca"):
-        raise HTTPException(status_code=400, detail="Invalid source. Use: us, au, ca, auto")
+    if source not in SUPPORTED_REGIONS:
+        raise HTTPException(status_code=400, detail=f"Invalid source. Use: {', '.join(SUPPORTED_REGIONS)}, auto")
 
     effective_radius = payload.radius_km if payload.radius_km > 0 else DEFAULT_RADIUS_KM
     effective_limit = payload.limit if payload.limit > 0 else DEFAULT_LIMIT
@@ -214,6 +227,7 @@ async def find_towers_with_measurements(payload: MeasurementPayload):
             detail="External service unavailable. Please try again.",
         ) from None
 
+    allowed_bands = allowed_bands_for_region(source)
     towers = process_and_rank(
         raw,
         payload.lat,
@@ -221,6 +235,7 @@ async def find_towers_with_measurements(payload: MeasurementPayload):
         limit=effective_limit,
         radius_km=effective_radius,
         measurements=measurements,
+        allowed_bands=allowed_bands,
     )
 
     tower_coords = [(t["latitude"], t["longitude"]) for t in towers]
