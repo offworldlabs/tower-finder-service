@@ -316,7 +316,9 @@ class TestProcessAndRank:
         assert callsigns == {"KFM"}
 
     def test_default_allowed_bands_keeps_tv(self):
-        # Omitting allowed_bands must keep TV towers (backward compatibility).
+        # The allowed_bands default is "unrestricted": omitting it keeps every
+        # band, incl. TV. Callers opt into narrowing (e.g. FM_ONLY for non-ATSC
+        # regions) rather than opting out of it.
         vhf = _device(freq_mhz=195.0, lat=33.85, lon=-84.388, callsign="KVHF")
         uhf = _device(freq_mhz=545.0, lat=33.85, lon=-84.388, callsign="KUHF")
         result = process_and_rank([_system([vhf, uhf])], _USER_LAT, _USER_LON)

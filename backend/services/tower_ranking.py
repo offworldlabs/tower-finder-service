@@ -320,6 +320,9 @@ def process_and_rank(
             fields (``snr_db``, ``score``, ``power_db``, ``obw_fraction``)
             and ``frequency_matched=True``.  Unmatched towers carry
             ``measured=False`` and None for those fields.
+        allowed_bands: Bands to keep. Defaults to unrestricted (ALL_BANDS);
+            callers narrow it (e.g. FM_ONLY for non-ATSC regions) rather than
+            opting out of a wider set.
     """
     effective_radius = radius_km if radius_km > 0 else DEFAULT_RADIUS_KM
     effective_limit = limit if limit > 0 else DEFAULT_LIMIT
