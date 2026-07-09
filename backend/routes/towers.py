@@ -96,9 +96,7 @@ async def _fetch_raw_towers(source: str, lat: float, lon: float, radius_km: int)
             raw = await fetch_fcc_broadcast_systems(lat, lon, radius_km=radius_km)
             if API_KEY:
                 try:
-                    maprad_raw = await fetch_broadcast_systems(
-                        API_KEY, lat, lon, radius_km=radius_km, source=source
-                    )
+                    maprad_raw = await fetch_broadcast_systems(API_KEY, lat, lon, radius_km=radius_km, source=source)
                     raw.extend(maprad_raw)
                 except Exception:
                     logging.warning("Maprad supplement failed, using FCC data only")
@@ -110,9 +108,7 @@ async def _fetch_raw_towers(source: str, lat: float, lon: float, radius_km: int)
         raise
     except Exception:
         logging.exception("Tower data fetch failed")
-        raise HTTPException(
-            status_code=502, detail="External service unavailable. Please try again."
-        ) from None
+        raise HTTPException(status_code=502, detail="External service unavailable. Please try again.") from None
     return raw
 
 
