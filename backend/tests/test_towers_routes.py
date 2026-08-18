@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import app
+from core.auth import ENV_VAR
 from tests._helpers import device, system
 
 
@@ -118,10 +119,18 @@ class TestTowerConfig:
         r = client.get("/api/config")
         assert r.status_code == 200
 
-    def test_update_config_too_large_returns_413(self, client):
-        """PUT /api/config with a body > 1 MB → 413 before writing to disk."""
+    def test_update_config_too_large_returns_413(self, client, monkeypatch):
+        """PUT /api/config with a body > 1 MB → 413 before writing to disk.
+
+        Authenticated, since the admin guard now runs ahead of the size check.
+        """
+        monkeypatch.setenv(ENV_VAR, "token-for-size-check")
         huge_body = {"data": "x" * 1_100_000}
-        r = client.put("/api/config", json=huge_body)
+        r = client.put(
+            "/api/config",
+            json=huge_body,
+            headers={"Authorization": "Bearer token-for-size-check"},
+        )
         assert r.status_code == 413
         assert "too large" in r.json()["detail"].lower()
 
