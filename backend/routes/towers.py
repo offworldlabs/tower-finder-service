@@ -5,10 +5,11 @@ import logging
 import os
 
 import httpx
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from clients.fcc import fetch_fcc_broadcast_systems
 from clients.maprad import fetch_broadcast_systems
+from core.auth import require_admin
 from models.measurements import MeasurementPayload
 from services.region_lookup import SUPPORTED_REGIONS, UNSUPPORTED_REGION_DETAIL, classify_region
 from services.tower_ranking import (
@@ -224,7 +225,7 @@ async def get_config():
         return json.load(f)
 
 
-@router.put("/api/config")
+@router.put("/api/config", dependencies=[Depends(require_admin)])
 async def update_config(body: dict):
     # Sanity check: config should be a reasonable size
     raw = json.dumps(body)

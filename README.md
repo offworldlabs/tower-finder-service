@@ -13,6 +13,7 @@ uvicorn app:app --reload
 Optional env vars:
 - `MAPRAD_API_KEY` — required for non-US queries; US can fall back to FCC only.
 - `TOWER_FINDER_RUNTIME_DIR` — where `tower_config.json` is read/written (default `./data/runtime/`). On first start the runtime overlay is seeded from `backend/config/tower_config.json`.
+- `TOWER_FINDER_ADMIN_TOKEN` — shared secret gating `PUT /api/config`, presented as `Authorization: Bearer <token>`. Unset closes the endpoint (503) rather than opening it, so a deploy that omits it cannot silently expose a public config write.
 
 ## API
 
@@ -21,7 +22,7 @@ Optional env vars:
 | GET | `/api/towers?lat&lon&altitude&radius_km&limit&source` | Ranked towers near (lat, lon) using model-based scoring (EIRP, FSPL, distance class). |
 | POST | `/api/towers` | Same tower search, enriched with spectrum-analyser measurements. Body: `MeasurementPayload` (see `backend/models/measurements.py`). Only towers the SDR can see are returned — unmatched towers are excluded. Matched towers carry real measured fields (`snr_db`, `score`, `obw_fraction`, `power_db`, `measured=true`). |
 | GET | `/api/config` | Current ranking config (bands, distance classes, defaults). |
-| PUT | `/api/config` | Replace ranking config; sanity-capped at 1 MB. No auth — gate this behind a reverse proxy if it's reachable externally. |
+| PUT | `/api/config` | Replace ranking config; sanity-capped at 1 MB. Requires the admin bearer token (see `TOWER_FINDER_ADMIN_TOKEN`). |
 
 ## Layout
 
