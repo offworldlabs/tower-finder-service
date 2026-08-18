@@ -18,7 +18,12 @@ dependencies = [
 dev = [
   "pytest>=8",
   "pytest-asyncio>=0.23",
-  "ruff>=0.4",
+  # Upper bound deliberate: ruff 0.16 widened the default rule set (I, SIM,
+  # BLE, ASYNC, LOG among them) and the repo picks up 30 findings under it that
+  # 0.15 does not raise. Unpinned, CI would have started failing on unrelated
+  # lint the next time it ran, which is what it did. Adopting 0.16 and clearing
+  # those is tracked separately.
+  "ruff>=0.4,<0.16",
 ]
 
 [tool.setuptools]
