@@ -1,6 +1,6 @@
 # tower-finder-service
 
-FastAPI service that ranks broadcast towers near a node from FCC and Maprad data. Split out from the `Tower-Finder` monorepo with full git history (`git filter-repo`).
+FastAPI service that ranks broadcast towers near a node from FCC and Maprad data. Split out from the `retina-server` monorepo with full git history (`git filter-repo`).
 
 ## Run
 
@@ -46,7 +46,7 @@ pytest -q
 
 ## Origin
 
-Extracted from `offworldlabs/Tower-Finder` on 2026-05-20 with `git filter-repo --path ...` over the 11 tower-finder paths, then made standalone:
+Extracted from `offworldlabs/retina-server` on 2026-05-20 with `git filter-repo --path ...` over the 11 tower-finder paths, then made standalone:
 - `tower_ranking.py` no longer imports `core.runtime_config`; the runtime overlay is inlined.
 - `routes/towers.py` trimmed to tower endpoints only (dropped `/api/health`, `/api/elevation`, and the `core.users.require_admin` auth dep).
 - Tests rewired to a local `app` entry point.
