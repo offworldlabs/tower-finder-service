@@ -1,0 +1,7 @@
+# Test. Co-located with retina-server's test stack on retina-test, reached
+# over that droplet's retina-edge network.
+services:
+  tower-finder-service:
+    container_name: tower-finder-test
+    environment:
+      TOWER_FINDER_ENV: test

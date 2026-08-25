@@ -2,7 +2,7 @@ services:
   tower-finder-service:
     build: .
     env_file:
-      - .env
+      - backend/.env
     volumes:
       - runtime-data:/app/data/runtime
     networks:
