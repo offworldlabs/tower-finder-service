@@ -26,7 +26,9 @@ router = APIRouter()
 
 @router.get("/api/health")
 async def health():
-    return {"status": "ok"}
+    # Read per request, not at import: three near-identical stacks make
+    # "which environment answered?" otherwise unanswerable from outside.
+    return {"status": "ok", "environment": os.getenv("TOWER_FINDER_ENV", "unknown")}
 
 
 API_KEY = os.getenv("MAPRAD_API_KEY", "")
