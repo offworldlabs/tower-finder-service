@@ -16,7 +16,7 @@ droplet** that runs `tower-finder` — without disturbing that existing stack.
 | Public exposure | **Reverse-proxy vhost behind tower-finder's existing nginx** (matches `api.`/`dash.` subdomains) |
 | Shared networking | **External Docker network `retina-edge`** joined by both stacks; nginx `resolver 127.0.0.11` + variable `proxy_pass` to defer DNS |
 | Public hostname | **`tower-finder.retina.fm`** (Cloudflare-proxied A-record → droplet) |
-| Deploy target | **Production droplet `157.245.214.30`**, dir `/opt/tower-finder-service` |
+| Deploy target | **Production droplet `retina-prod`**, dir `/opt/tower-finder-service` |
 | Pipeline weight | **Lightweight**: test on PR/push; deploy + smoke on push to `main` |
 | Deploy auth | **New dedicated SSH key** (not reused from tower-finder) |
 | Health check | **Hybrid**: cheap `/api/health` liveness; smoke test hits real `/api/towers` |
@@ -135,10 +135,10 @@ afford one real upstream-touching request.
 
 - **New deploy SSH key**: generate a dedicated `ed25519` keypair; add the public
   key to the droplet's `root` `authorized_keys`; store the private key as GitHub
-  secret **`DEPLOY_SSH_KEY`** and **`DEPLOY_HOST=157.245.214.30`**.
+  secret **`DEPLOY_SSH_KEY`**, and `retina-prod`'s address as **`DEPLOY_HOST`**.
 - **Shared network**: `docker network create retina-edge` on the droplet
   (idempotent; both stacks declare it `external: true`).
-- **Cloudflare DNS**: add a proxied A-record `tower-finder` → `157.245.214.30`.
+- **Cloudflare DNS**: add a proxied A-record `tower-finder` → `retina-prod`.
   No cert work — the `*.retina.fm` Origin cert already covers it.
 - **tower-finder nginx vhost** (separate PR against the `tower-finder` repo):
   add the `tower-finder.retina.fm` server block to `deploy/nginx.conf` and
