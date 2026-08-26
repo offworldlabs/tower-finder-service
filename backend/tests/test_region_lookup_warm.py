@@ -7,6 +7,7 @@ worker, once per process.
 
 import unittest.mock
 
+import pytest
 from fastapi.testclient import TestClient
 from services import region_lookup
 
@@ -16,6 +17,13 @@ from app import app
 def _clear_cache():
     """Drop the module-level geometry cache so a cold start can be observed."""
     region_lookup._geoms.clear()
+
+
+@pytest.fixture(autouse=True)
+def _restore_borders():
+    """Leave the cache warm for whatever runs next, whichever way the test went."""
+    yield
+    region_lookup.warm_borders()
 
 
 class TestWarmBorders:
@@ -42,6 +50,20 @@ class TestWarmBorders:
         _clear_cache()
 
         assert region_lookup.classify_region(42.38708028093612, -71.24905416622781) == "us"
+
+    def test_a_warm_cache_is_never_re_parsed(self):
+        """The regression this guards: the 5 MB parse happening on the request path.
+
+        classify_region() always calls _load_borders(); the point is that once
+        warm it returns on a dict check. Patch the shapely constructor, which
+        only runs on a real parse, rather than the guard itself.
+        """
+        _clear_cache()
+        region_lookup.warm_borders()
+
+        with unittest.mock.patch.object(region_lookup, "shape", side_effect=AssertionError("re-parsed after warm-up")):
+            assert region_lookup.classify_region(42.38708028093612, -71.24905416622781) == "us"
+            assert region_lookup.classify_region(48.8566, 2.3522) is None
 
 
 class TestStartupWarmsBorders:
