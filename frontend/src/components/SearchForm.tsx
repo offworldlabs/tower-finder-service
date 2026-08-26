@@ -3,55 +3,48 @@ import { fetchElevation } from "../api";
 import "./SearchForm.css";
 
 /**
- * Detect the most likely data source based on lat/lon bounding boxes.
- * Returns "au", "us", "ca", or null if unknown.
+ * Location entry for a tower search.
+ *
+ * Note what this component deliberately does NOT do: guess the country from
+ * the coordinates. It used to, with lat/lon bounding boxes that checked Canada
+ * before the US along a flat 42°N line, so every US point above that latitude
+ * — New England, Michigan, Minnesota, the Pacific Northwest — was pinned to
+ * "ca" and searched against Canadian ISED data. Worse, it wrote that guess into
+ * the request, so the server's polygon lookup never got to correct it. The
+ * default is now "auto" and the server decides.
  */
-function detectSource(lat, lon) {
-  if (lat == null || lon == null || isNaN(lat) || isNaN(lon)) return null;
-  // Australia
-  if (lat >= -45 && lat <= -10 && lon >= 112 && lon <= 155) return "au";
-  // Canada — checked before US to include southern Ontario/Quebec (down to 42°N)
-  if (lat >= 42 && lat <= 84 && lon >= -141 && lon <= -52) return "ca";
-  // United States (continental + Alaska + Hawaii)
-  if (lat >= 24 && lat < 49 && lon >= -125 && lon <= -66) return "us";
-  // Alaska
-  if (lat >= 51 && lat <= 72 && lon >= -180 && lon <= -129) return "us";
-  // Hawaii
-  if (lat >= 18 && lat <= 23 && lon >= -161 && lon <= -154) return "us";
-  return null;
-}
-
 export default function SearchForm({ onSearch, loading }) {
   const [lat, setLat] = useState("");
   const [lon, setLon] = useState("");
   const [altitude, setAltitude] = useState("");
-  const [source, setSource] = useState("us");
+  const [source, setSource] = useState("auto");
   const [geoError, setGeoError] = useState(null);
   const [geoLoading, setGeoLoading] = useState(false);
   const altitudeManual = useRef(false);
 
-  // Auto-detect data source when coordinates change
-  useEffect(() => {
-    const parsedLat = parseFloat(lat);
-    const parsedLon = parseFloat(lon);
-    const detected = detectSource(parsedLat, parsedLon);
-    if (detected) setSource(detected);
-  }, [lat, lon]);
-
-  // Auto-lookup elevation when lat/lon change and altitude hasn't been manually set
+  // Auto-lookup elevation when lat/lon change and altitude hasn't been set by
+  // hand. Debounced and aborted so typing a coordinate doesn't fire one
+  // un-cancellable request per keystroke.
   useEffect(() => {
     if (altitudeManual.current) return;
     const parsedLat = parseFloat(lat);
     const parsedLon = parseFloat(lon);
     if (isNaN(parsedLat) || isNaN(parsedLon)) return;
 
-    let cancelled = false;
-    fetchElevation(parsedLat, parsedLon).then((elev) => {
-      if (!cancelled && elev != null && !altitudeManual.current) {
-        setAltitude(Math.round(elev).toString());
-      }
-    });
-    return () => { cancelled = true; };
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      fetchElevation(parsedLat, parsedLon, controller.signal)
+        .then((elev) => {
+          if (!controller.signal.aborted && elev != null && !altitudeManual.current) {
+            setAltitude(Math.round(elev).toString());
+          }
+        })
+        .catch(() => {});
+    }, 400);
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+    };
   }, [lat, lon]);
 
   function handleSubmit(e) {
@@ -139,8 +132,7 @@ export default function SearchForm({ onSearch, loading }) {
             value={altitude}
             onChange={(e) => {
               setAltitude(e.target.value);
-              if (e.target.value !== "") altitudeManual.current = true;
-              else altitudeManual.current = false;
+              altitudeManual.current = e.target.value !== "";
             }}
             placeholder="Auto-detected"
           />
@@ -148,6 +140,7 @@ export default function SearchForm({ onSearch, loading }) {
         <label>
           Data Source
           <select value={source} onChange={(e) => setSource(e.target.value)}>
+            <option value="auto">Auto-detect from coordinates</option>
             <option value="us">United States (FCC)</option>
             <option value="ca">Canada (ISED)</option>
             <option value="au">Australia (ACMA)</option>

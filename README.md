@@ -10,6 +10,23 @@ pip install -e ".[dev]"
 uvicorn app:app --reload
 ```
 
+That serves the API. For the UI, either build it once so `app.py` picks up
+`frontend/dist`:
+
+```bash
+cd frontend && npm ci && npm run build
+```
+
+…or run Vite alongside `uvicorn` while working on it — it proxies `/api` back
+to port 8000:
+
+```bash
+cd frontend && npm run dev
+```
+
+The Docker image builds the UI itself and serves it from the same origin as the
+API, so a deployed service is a single container with no separate web host.
+
 Optional env vars:
 - `MAPRAD_API_KEY` — required for non-US queries; US can fall back to FCC only.
 - `TOWER_FINDER_RUNTIME_DIR` — where `tower_config.json` is read/written (default `./data/runtime/`). On first start the runtime overlay is seeded from `backend/config/tower_config.json`.
@@ -21,6 +38,7 @@ Optional env vars:
 | --- | --- | --- |
 | GET | `/api/towers?lat&lon&altitude&radius_km&limit&source` | Ranked towers near (lat, lon) using model-based scoring (EIRP, FSPL, distance class). |
 | POST | `/api/towers` | Same tower search, enriched with spectrum-analyser measurements. Body: `MeasurementPayload` (see `backend/models/measurements.py`). Only towers the SDR can see are returned — unmatched towers are excluded. Matched towers carry real measured fields (`snr_db`, `score`, `obw_fraction`, `power_db`, `measured=true`). |
+| GET | `/api/elevation?lat&lon` | Ground elevation at a point. The search form pre-fills altitude from this; `GET /api/towers` resolves altitude itself when none is given. 502 if the upstream lookup fails. |
 | GET | `/api/config` | Current ranking config (bands, distance classes, defaults). |
 | PUT | `/api/config` | Replace ranking config; sanity-capped at 1 MB. Requires the admin bearer token (see `TOWER_FINDER_ADMIN_TOKEN`). |
 
@@ -35,23 +53,31 @@ Optional env vars:
 | `backend/clients/maprad.py` | Maprad.io broadcast-systems client |
 | `backend/config/tower_config.json` | Default ranking config (image-shipped) |
 | `backend/tests/` | pytest suite (176 tests); integration tests require running `capture_fixture.py` first) |
-| `frontend/` | Reference React/Playwright snippets from the parent monorepo's UI — not part of the service runtime |
+| `frontend/` | The standalone React UI (Vite). Built into the image and served by `app.py`; `npm test` / `npm run test:e2e` cover it |
 | `pyproject.toml` | Package + tooling config |
 
 ## Tests
 
 ```bash
-pytest -q
+pytest -q                 # backend
+cd frontend && npm test   # frontend unit tests
+cd frontend && npm run test:e2e   # Playwright, against the built dist
 ```
 
 ## Origin
 
 Extracted from `offworldlabs/retina-server` on 2026-05-20 with `git filter-repo --path ...` over the 11 tower-finder paths, then made standalone:
 - `tower_ranking.py` no longer imports `core.runtime_config`; the runtime overlay is inlined.
-- `routes/towers.py` trimmed to tower endpoints only (dropped `/api/health`, `/api/elevation`, and the `core.users.require_admin` auth dep).
+- `routes/towers.py` trimmed to tower endpoints only (dropped `/api/health` and the
+  `core.users.require_admin` auth dep). `/api/health` and `/api/elevation` were later
+  added back — the first for deploy smoke tests, the second for the UI's altitude field.
 - Tests rewired to a local `app` entry point.
 
 The parent repo still contains the same code for now; deduplication can come later.
+The two have already diverged once in a way worth knowing about: the region
+detection here is a border-polygon lookup (`services/region_lookup.py`), while
+retina-server kept a lat/lon bounding-box heuristic that returned "ca" for every
+US point above 42°N until it was ported across.
 
 ## Deployment
 
