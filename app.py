@@ -9,6 +9,7 @@ file picks up ``frontend/dist``, or run ``npm run dev`` alongside — Vite proxi
 /api straight back here.
 """
 
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -20,6 +21,8 @@ from fastapi.staticfiles import StaticFiles
 from routes.towers import router
 from services.region_lookup import warm_borders
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -27,7 +30,14 @@ async def lifespan(app: FastAPI):
     # classify_region() call otherwise does it inside a request handler, on the
     # event loop, once per process — ~1.5s during which every other request on
     # this worker is stalled. In a thread so the loop stays free even here.
-    await run_in_threadpool(warm_borders)
+    try:
+        await run_in_threadpool(warm_borders)
+    except Exception:
+        # A missing or corrupt borders file should cost /api/towers its region
+        # detection, not the whole service its boot: classify_region still
+        # loads on demand and surfaces the real error on the request that
+        # needs it. Raising here would crash-loop the container instead.
+        logger.exception("Warming the border polygons failed; region lookup will load on demand")
     yield
 
 
