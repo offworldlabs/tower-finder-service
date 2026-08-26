@@ -24,6 +24,7 @@ dev = [
   # lint the next time it ran, which is what it did. Adopting 0.16 and clearing
   # those is tracked separately.
   "ruff>=0.4,<0.16",
+  "pyyaml>=6",
 ]
 
 [tool.setuptools]

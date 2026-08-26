@@ -21,10 +21,28 @@ check_status() {
   fi
 }
 
+check_environment() {
+  local expected="$1"
+  printf "  %-40s " "environment is ${expected}"
+  local actual
+  actual=$(curl -s --connect-timeout 10 --max-time 60 "${BASE_URL}/api/health" \
+    | python3 -c "import json,sys; print(json.load(sys.stdin).get('environment','?'))" 2>/dev/null) \
+    || { echo "FAIL (unreadable)"; FAIL=$((FAIL + 1)); return; }
+  if [ "$actual" = "$expected" ]; then
+    echo "OK"; PASS=$((PASS + 1))
+  else
+    echo "FAIL (${actual} != ${expected})"; FAIL=$((FAIL + 1))
+  fi
+}
+
 echo "── tower-finder-service smoke tests (${BASE_URL}) ──"
 check_status "GET /api/health" "${BASE_URL}/api/health" "200"
 check_status "GET /api/config" "${BASE_URL}/api/config" "200"
 check_status "GET /api/towers (Greenville SC)" "${BASE_URL}/api/towers?lat=34.85&lon=-82.40" "200"
+
+if [ -n "${EXPECT_ENV:-}" ]; then
+  check_environment "$EXPECT_ENV"
+fi
 
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed"

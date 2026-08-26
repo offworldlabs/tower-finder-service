@@ -1,0 +1,7 @@
+# Staging. Co-located with retina-server's staging stack on retina-staging,
+# reached over that droplet's retina-edge network.
+services:
+  tower-finder-service:
+    container_name: tower-finder-staging
+    environment:
+      TOWER_FINDER_ENV: staging

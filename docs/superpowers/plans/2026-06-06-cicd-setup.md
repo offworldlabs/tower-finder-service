@@ -4,7 +4,7 @@
 
 **Goal:** Add CI (lint + test) and CD (build + deploy to the production droplet via a Cloudflare Tunnel) for the standalone `tower-finder-service`, served at `tower-finder.retina.fm`.
 
-**Architecture:** The service runs as its own Docker Compose stack at `/opt/tower-finder-service` on the production droplet (`157.245.214.30`), independent of the `tower-finder` stack. A `cloudflared` sidecar dials outbound to Cloudflare and forwards `tower-finder.retina.fm` → `http://tower-finder-service:8000`, so no host port is published and the existing nginx (which owns 80/443) is untouched. GitHub Actions runs lint + tests on every PR/push, and on push to `main` it SSHes in, hard-resets to `origin/main`, rebuilds, and smoke-tests the public URL.
+**Architecture:** The service runs as its own Docker Compose stack at `/opt/tower-finder-service` on the production droplet (`retina-prod`), independent of the `tower-finder` stack. A `cloudflared` sidecar dials outbound to Cloudflare and forwards `tower-finder.retina.fm` → `http://tower-finder-service:8000`, so no host port is published and the existing nginx (which owns 80/443) is untouched. GitHub Actions runs lint + tests on every PR/push, and on push to `main` it SSHes in, hard-resets to `origin/main`, rebuilds, and smoke-tests the public URL.
 
 **Tech Stack:** FastAPI + uvicorn, Docker / Docker Compose, `cloudflare/cloudflared`, GitHub Actions (`appleboy/ssh-action`), ruff, pytest.
 
@@ -440,12 +440,12 @@ untouched.
 
 ```bash
 ssh-keygen -t ed25519 -f ~/.ssh/tower_finder_service_deploy -C "tfs-deploy" -N ""
-ssh root@157.245.214.30 "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys" \
+ssh retina-prod "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys" \
   < ~/.ssh/tower_finder_service_deploy.pub
 ```
 
 Then add GitHub Actions repository secrets (Settings → Secrets and variables → Actions):
-- `DEPLOY_HOST` = `157.245.214.30`
+- `DEPLOY_HOST` = `retina-prod`'s public address
 - `DEPLOY_SSH_KEY` = contents of `~/.ssh/tower_finder_service_deploy` (the private key)
 
 **2. Cloudflare Tunnel (Zero Trust dashboard):**

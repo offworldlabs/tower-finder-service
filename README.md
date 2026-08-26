@@ -55,70 +55,131 @@ The parent repo still contains the same code for now; deduplication can come lat
 
 ## Deployment
 
-CI/CD runs via GitHub Actions (`.github/workflows/ci.yml`):
+CI/CD runs via GitHub Actions (`.github/workflows/ci.yml`) across three
+environments, each its own droplet, Compose project and overlay:
+
+| Environment | Droplet (SSH alias) | Public hostname | Deploys on |
+| --- | --- | --- | --- |
+| staging | `retina-staging` | none | push to `main` |
+| production | `retina-prod` | `tower-finder.retina.fm` | push to `main`, once staging deploys and passes smoke |
+| test | `retina-test` | none | `workflow_dispatch` only |
 
 - **Every PR / push to `main`**: `ruff check`, `ruff format --check`, and
   `pytest -m "not integration"`.
-- **Push to `main`**: after tests pass, SSHes to the production droplet,
-  hard-resets to `origin/main`, rebuilds the stack, waits for health, then
-  smoke-tests `https://tower-finder.retina.fm`.
+- **Push to `main`**: staging deploys and is smoke-tested first; production
+  deploys only after staging succeeds, so a merge no longer reaches
+  production directly.
+- **Manual dispatch**: `deploy-test` deploys to `retina-test`, for rehearsing
+  a change without touching staging or production.
 
-The service runs as its own Docker Compose stack at `/opt/tower-finder-service`.
-It publishes no host port; instead it joins a shared Docker network
-(`retina-edge`) and is fronted by the existing `tower-finder` container's nginx,
-which terminates TLS (Cloudflare Origin cert) and proxies
-`tower-finder.retina.fm` → `http://tower-finder-service:8000`. This mirrors how
-`api.retina.fm`, `dash.retina.fm`, etc. are served. DNS for the subdomain is a
-Cloudflare-proxied A-record pointing at the droplet.
+Staging and test have no public hostname and are deliberately not proxied
+through retina-server's nginx: that proxying (`staging-towers.retina.fm/api/towers`)
+is a separate, later change that cannot switch on until this stack exists to
+answer it, and switching it on before then would make each wait on the other.
+Their deploy jobs verify against the running container instead, over
+`docker compose exec` (`deploy/smoke-local.sh`), once the health poll
+succeeds. Production keeps the public smoke test it already had
+(`deploy/smoke-test.sh`, against `tower-finder.retina.fm`).
 
-The nginx vhost itself lives in the `tower-finder` repo (`deploy/nginx.conf`) and
-ships through that repo's own deploy pipeline — see "tower-finder nginx vhost"
-below.
+Each deploy job SSHes to its droplet, checks the box's `hostname` matches the
+environment it expects (three near-identical droplets and secret pairs mean a
+mis-set secret would otherwise deploy the wrong one, silently), hard-resets
+`$APP_DIR` to the commit the run is for (`github.sha`, not `origin/main`, so a
+second merge landing mid-run cannot reach production untested), and rebuilds. On every deploy it copies
+`deploy/env.<env>.example` to `.env`, so the droplet's `.env` cannot drift or
+name another environment; secrets live in `backend/.env`, which CI never
+writes, and the job refuses to proceed if that file is missing.
+
+The service runs as its own Docker Compose stack under `$APP_DIR`
+(`/opt/tower-finder-service` on each droplet). It publishes no host port;
+instead it joins a shared Docker network (`retina-edge`). On `retina-prod`
+that network is also how retina-server's nginx reaches it: nginx terminates
+TLS (Cloudflare Origin cert) and proxies `tower-finder.retina.fm` to
+`http://tower-finder-service:8000`, mirroring how `api.retina.fm`,
+`dash.retina.fm`, etc. are served. Staging and test have no vhost and no DNS
+record.
+
+The nginx vhost itself lives in the `retina-server` repo (`deploy/nginx.conf`) and
+ships through that repo's own deploy pipeline. See "Public hostname" below.
 
 ### One-time setup
 
-**1. Deploy SSH key (run locally):**
+Every environment needs steps 1, 2 and 4 below on its own droplet, plus its
+own pair of repository secrets. Step 3 (public hostname) is production only.
+
+**1. Deploy SSH key (run locally, once per droplet):**
 
 ```bash
 ssh-keygen -t ed25519 -f ~/.ssh/tower_finder_service_deploy -C "tfs-deploy" -N ""
-ssh root@157.245.214.30 "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys" \
+ssh retina-prod "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys" \
   < ~/.ssh/tower_finder_service_deploy.pub
 ```
 
-Then add GitHub Actions repository secrets (Settings → Secrets and variables → Actions):
-- `DEPLOY_HOST` = `157.245.214.30`
-- `DEPLOY_SSH_KEY` = contents of `~/.ssh/tower_finder_service_deploy` (the private key)
+Then add GitHub Actions repository secrets (Settings → Secrets and variables →
+Actions), one pair per environment:
 
-**2. Shared network + DNS:**
+| Environment | Host secret | Private-key secret |
+| --- | --- | --- |
+| production | `DEPLOY_HOST` | `DEPLOY_SSH_KEY` |
+| staging | `STAGING_HOST` | `STAGING_SSH_KEY` |
+| test | `TEST_HOST` | `TEST_SSH_KEY` |
+
+Each host secret is that droplet's public address; each key secret is the
+matching private key. Every deploy job checks its own pair is set and fails
+with the secret's name if not.
+
+The guard reads the droplet's own OS `hostname`, not the SSH alias you connect
+by, so each box must actually be named for its environment (`hostnamectl
+set-hostname retina-staging`, or DigitalOcean's droplet name at creation). A
+local `~/.ssh/config` alias alone leaves every deploy failing at the guard.
+
+**2. Shared network:**
 
 ```bash
-# On the droplet — create the shared network both stacks attach to (idempotent).
+# On each droplet, create the shared network both stacks attach to (idempotent).
 docker network create retina-edge 2>/dev/null || true
 ```
 
-In the Cloudflare dashboard, add a **proxied** DNS A-record:
-`tower-finder` → `157.245.214.30` (orange cloud on). The `*.retina.fm` Origin
-cert already covers this hostname, so no certificate work is needed.
+**3. Public hostname (production only):**
 
-**3. tower-finder nginx vhost:**
+In the Cloudflare dashboard, add a **proxied** DNS A-record (orange cloud on)
+for `tower-finder` pointing at `retina-prod`. The `*.retina.fm` Origin cert
+already covers it, so no certificate work is needed. Staging and test get no
+record: they are verified on the droplet, not over a public path.
 
-Add a `tower-finder.retina.fm` server block to the `tower-finder` repo's
-`deploy/nginx.conf` (proxying to `http://tower-finder-service:8000` over
-`retina-edge`), and attach the `tower-finder` service to the `retina-edge`
-network in its compose file. Deploy that change through tower-finder's pipeline
-so its image is rebuilt and the container restarted.
+Add a server block for `tower-finder.retina.fm` to the droplet's copy of the
+`retina-server` repo's `deploy/nginx.conf` (proxying to
+`http://tower-finder-service:8000` over `retina-edge`), and attach the
+`tower-finder-service` service to the `retina-edge` network in its compose
+file. Deploy that change through retina-server's own pipeline so its image is
+rebuilt and the container restarted.
 
 **4. Droplet bootstrap (run on the droplet as root):**
 
 ```bash
 git clone https://github.com/offworldlabs/tower-finder-service.git /opt/tower-finder-service
 cd /opt/tower-finder-service
-cp .env.example .env
-# Edit .env: set MAPRAD_API_KEY (optional, non-US only).
+cp backend/.env.example backend/.env
+# Edit backend/.env: set TOWER_FINDER_ADMIN_TOKEN (a different one per
+# environment: it gates config writes and must not cross a trust boundary).
+# Set MAPRAD_API_KEY on production only: staging and test are not meant to
+# reach the metered upstream, so leave it unset there; see "Metered upstream"
+# below for the consequence. This file holds secrets and CI never writes it.
+cp deploy/env.<env>.example .env   # prod, staging or test
 docker compose up -d --build
 ```
 
-After this, every push to `main` redeploys the service automatically.
+After this, every push to `main` deploys to staging first, then to
+production once staging deploys and passes its smoke test.
+
+### Metered upstream
+
+`MAPRAD_API_KEY` is deliberately absent from staging and test: those
+environments exist to rehearse a change, not to spend a metered budget, and
+Maprad's upstream is billed per query. Both serve US tower queries via the
+keyless FCC path as normal, but every `au` or `ca` query returns 500. A
+ranking change that touches the Maprad path can only be exercised in
+production.
 
 ### Rollback (manual)
 

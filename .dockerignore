@@ -10,3 +10,7 @@ frontend
 docs
 backend/tests
 .github
+# Secrets. `COPY backend/` would otherwise bake backend/.env into an image
+# layer, and every token rotation would bust that layer's cache.
+.env
+backend/.env

@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+env:
+  APP_DIR: /opt/tower-finder-service
 
 jobs:
   test:
@@ -24,14 +28,89 @@ jobs:
       - name: Unit tests
         run: pytest -m "not integration" -q
 
-  deploy:
+  deploy-staging:
     runs-on: ubuntu-latest
     needs: [test]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     concurrency:
-      group: tf-svc-deploy
+      group: tf-svc-deploy-staging
       cancel-in-progress: false
+    env:
+      DEPLOY_REF: ${{ github.sha }}
     steps:
+      - name: Check required secrets
+        env:
+          STAGING_HOST: ${{ secrets.STAGING_HOST }}
+          STAGING_SSH_KEY: ${{ secrets.STAGING_SSH_KEY }}
+        run: |
+          test -n "$STAGING_HOST" || { echo "STAGING_HOST is not set"; exit 1; }
+          test -n "$STAGING_SSH_KEY" || { echo "STAGING_SSH_KEY is not set"; exit 1; }
+      - name: Deploy to staging via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: root
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          command_timeout: 20m
+          envs: APP_DIR,DEPLOY_REF
+          script: |
+            set -euo pipefail
+            # Three near-identical droplets share this workflow. A mis-set
+            # secret would otherwise deploy the wrong one, silently.
+            test "$(hostname)" = "retina-staging" || {
+              echo "Refusing to deploy staging to $(hostname)"; exit 1; }
+            cd "$APP_DIR"
+            # Deploy the commit this run is for, not whatever origin/main points
+            # at now, so a second merge landing mid-run cannot slip an untested
+            # commit past staging's smoke test. Hard-reset rather than `git pull`:
+            # pull aborts silently on a divergent branch (a local commit on the
+            # server), the build then caches every layer because the source
+            # "didn't change", and the new code never ships.
+            git fetch origin "$DEPLOY_REF"
+            git reset --hard FETCH_HEAD
+            test -f backend/.env || {
+              echo "backend/.env is missing; secrets would be lost"; exit 1; }
+            cp deploy/env.staging.example .env
+            docker compose up -d --build
+            healthy=""
+            for i in $(seq 1 12); do
+              if docker compose exec -T tower-finder-service \
+                python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')" 2>/dev/null; then
+                echo "Deploy healthy after ~$((i * 5))s"
+                healthy=1
+                break
+              fi
+              echo "Waiting for health check... attempt $i/12"
+              sleep 5
+            done
+            if [ -z "$healthy" ]; then
+              echo "Health check failed after 60s"
+              docker compose logs --tail=50 || true
+              exit 1
+            fi
+            # Staging has no public hostname (that needs proxying through
+            # retina-server's nginx, which cannot switch on until this stack
+            # exists to answer it), so verification runs against the
+            # container directly rather than production's public path.
+            EXPECT_ENV=staging bash deploy/smoke-local.sh
+
+  deploy-prod:
+    runs-on: ubuntu-latest
+    needs: [test, deploy-staging]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    concurrency:
+      group: tf-svc-deploy-prod
+      cancel-in-progress: false
+    env:
+      DEPLOY_REF: ${{ github.sha }}
+    steps:
+      - name: Check required secrets
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          test -n "$DEPLOY_HOST" || { echo "DEPLOY_HOST is not set"; exit 1; }
+          test -n "$DEPLOY_SSH_KEY" || { echo "DEPLOY_SSH_KEY is not set"; exit 1; }
       - name: Deploy to production via SSH
         uses: appleboy/ssh-action@v1
         with:
@@ -39,16 +118,18 @@ jobs:
           username: root
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           command_timeout: 20m
+          envs: APP_DIR,DEPLOY_REF
           script: |
-            cd /opt/tower-finder-service
-            # Hard-reset rather than `git pull`: pull aborts silently on a
-            # divergent branch (a local commit on the server), the build then
-            # caches every layer because the source "didn't change", and the
-            # new code never ships. The deploy server must mirror origin/main.
-            git fetch origin main
-            git reset --hard origin/main
+            set -euo pipefail
+            test "$(hostname)" = "retina-prod" || {
+              echo "Refusing to deploy production to $(hostname)"; exit 1; }
+            cd "$APP_DIR"
+            git fetch origin "$DEPLOY_REF"
+            git reset --hard FETCH_HEAD
+            test -f backend/.env || {
+              echo "backend/.env is missing; secrets would be lost"; exit 1; }
+            cp deploy/env.prod.example .env
             docker compose up -d --build
-            # Wait for the service to become healthy (up to 60s).
             for i in $(seq 1 12); do
               if docker compose exec -T tower-finder-service \
                 python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')" 2>/dev/null; then
@@ -59,13 +140,74 @@ jobs:
               sleep 5
             done
             echo "Health check failed after 60s"
-            docker compose logs --tail=50
+            docker compose logs --tail=50 || true
             exit 1
 
-  smoke:
+  smoke-prod:
     runs-on: ubuntu-latest
-    needs: [deploy]
+    needs: [deploy-prod]
     steps:
       - uses: actions/checkout@v4
-      - name: Smoke test public URL
+      - name: Smoke test production
+        env:
+          BASE_URL: https://tower-finder.retina.fm
+          EXPECT_ENV: prod
         run: bash deploy/smoke-test.sh
+
+  deploy-test:
+    runs-on: ubuntu-latest
+    needs: [test]
+    # Dispatch only: retina-test is for rehearsing a change, not for every merge.
+    if: github.event_name == 'workflow_dispatch'
+    concurrency:
+      group: tf-svc-deploy-test
+      cancel-in-progress: false
+    env:
+      DEPLOY_REF: ${{ github.sha }}
+    steps:
+      - name: Check required secrets
+        env:
+          TEST_HOST: ${{ secrets.TEST_HOST }}
+          TEST_SSH_KEY: ${{ secrets.TEST_SSH_KEY }}
+        run: |
+          test -n "$TEST_HOST" || { echo "TEST_HOST is not set"; exit 1; }
+          test -n "$TEST_SSH_KEY" || { echo "TEST_SSH_KEY is not set"; exit 1; }
+      - name: Deploy to test via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.TEST_HOST }}
+          username: root
+          key: ${{ secrets.TEST_SSH_KEY }}
+          command_timeout: 20m
+          envs: APP_DIR,DEPLOY_REF
+          script: |
+            set -euo pipefail
+            test "$(hostname)" = "retina-test" || {
+              echo "Refusing to deploy test to $(hostname)"; exit 1; }
+            cd "$APP_DIR"
+            # Dispatching from a feature branch rehearses that branch, which is
+            # the whole point of this environment.
+            git fetch origin "$DEPLOY_REF"
+            git reset --hard FETCH_HEAD
+            test -f backend/.env || {
+              echo "backend/.env is missing; secrets would be lost"; exit 1; }
+            cp deploy/env.test.example .env
+            docker compose up -d --build
+            healthy=""
+            for i in $(seq 1 12); do
+              if docker compose exec -T tower-finder-service \
+                python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')" 2>/dev/null; then
+                echo "Deploy healthy after ~$((i * 5))s"
+                healthy=1
+                break
+              fi
+              echo "Waiting for health check... attempt $i/12"
+              sleep 5
+            done
+            if [ -z "$healthy" ]; then
+              echo "Health check failed after 60s"
+              docker compose logs --tail=50 || true
+              exit 1
+            fi
+            # No public hostname for test either; see deploy-staging.
+            EXPECT_ENV=test bash deploy/smoke-local.sh

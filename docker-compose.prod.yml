@@ -1,0 +1,7 @@
+# Production. Co-located with retina-server's prod stack on retina-prod,
+# reached over that droplet's retina-edge network.
+services:
+  tower-finder-service:
+    container_name: tower-finder-prod
+    environment:
+      TOWER_FINDER_ENV: prod
