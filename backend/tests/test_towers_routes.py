@@ -513,3 +513,35 @@ class TestFindTowersWithMeasurements:
             r = client.post("/api/towers", json=payload)
         assert r.status_code == 200
         assert r.json()["query"]["source"] == "au"
+
+
+# ── /api/elevation ───────────────────────────────────────────────────────────
+
+
+class TestElevationEndpoint:
+    """The search form pre-fills altitude from this as coordinates are typed."""
+
+    def test_returns_elevation_for_a_point(self, client):
+        with unittest.mock.patch(
+            "routes.towers._batch_lookup_elevations",
+            new=unittest.mock.AsyncMock(return_value={(42.387080, -71.249054): 43.5}),
+        ):
+            r = client.get("/api/elevation", params={"lat": 42.38708028093612, "lon": -71.24905416622781})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["elevation_m"] == 43.5
+        assert body["latitude"] == 42.38708028093612
+        assert body["longitude"] == -71.24905416622781
+
+    def test_upstream_failure_returns_502(self, client):
+        with unittest.mock.patch(
+            "routes.towers._batch_lookup_elevations",
+            new=unittest.mock.AsyncMock(return_value={}),
+        ):
+            r = client.get("/api/elevation", params={"lat": 33.9, "lon": -84.6})
+        assert r.status_code == 502
+        assert "Elevation lookup failed" in r.json()["detail"]
+
+    def test_rejects_out_of_range_latitude(self, client):
+        r = client.get("/api/elevation", params={"lat": 91, "lon": 0})
+        assert r.status_code == 422

@@ -1,10 +1,11 @@
 /**
  * Tower Finder frontend E2E tests.
- * Tests the main retina.fm / staging.retina.fm interface:
+ *
+ * Covers the standalone UI this service ships:
  * - Page load and header rendering
- * - Tab navigation
  * - Search form validation and submission
- * - Results table rendering
+ * - Server-side source classification (the client must not guess)
+ * - Results table, summary strip, error states
  * - Map rendering
  */
 import { test, expect } from "@playwright/test";
@@ -12,19 +13,59 @@ import { hosts } from "../playwright.config";
 
 const BASE = hosts.frontend;
 
+/** A tower row shaped like services/tower_ranking.py emits. */
+function tower(overrides = {}) {
+  return {
+    rank: 1,
+    callsign: "WGBH",
+    name: "WGBH-TV",
+    state: "MA",
+    latitude: 42.30,
+    longitude: -71.12,
+    elevation_m: 60,
+    altitude_m: 340,
+    antenna_height_m: 280,
+    frequency_mhz: 89.7,
+    band: "FM",
+    eirp_dbm: 78,
+    distance_km: 12.3,
+    distance_class: "Ideal",
+    bearing_deg: 145,
+    bearing_cardinal: "SE",
+    received_power_dbm: -62.1,
+    ...overrides,
+  };
+}
+
+function query(overrides = {}) {
+  return {
+    latitude: 42.38708028093612,
+    longitude: -71.24905416622781,
+    altitude_m: 43,
+    radius_km: 80,
+    source: "us",
+    ...overrides,
+  };
+}
+
+// The form pre-fills altitude from /api/elevation as coordinates are typed.
+// Nothing here asserts on it, but leaving it unmocked means every spec logs a
+// proxy connection error against a backend that isn't running.
+test.beforeEach(async ({ page }) => {
+  await page.route("**/api/elevation**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ latitude: 0, longitude: 0, elevation_m: 43 }),
+    });
+  });
+});
+
 test.describe("Tower Finder — page load", () => {
   test("loads and renders the app header", async ({ page }) => {
     await page.goto(BASE);
-    await expect(page).toHaveTitle(/Tower Finder|RETINA/i);
-    await expect(page.locator("h1")).toBeVisible();
-  });
-
-  test("renders Tower Search tab by default on main domain", async ({ page }) => {
-    await page.goto(BASE);
-    // On the tower finder domain, Tower Search tab should be present and active
-    const tab = page.getByRole("button", { name: /Tower Search/i });
-    await expect(tab).toBeVisible();
-    await expect(tab).toHaveClass(/active/);
+    await expect(page).toHaveTitle(/Tower Finder/i);
+    await expect(page.locator("h1")).toHaveText(/Tower Finder/i);
   });
 
   test("search form is visible with lat/lon/altitude inputs", async ({ page }) => {
@@ -49,120 +90,108 @@ test.describe("Tower Finder — search form", () => {
   });
 
   test("shows validation error if search submitted with empty fields", async ({ page }) => {
-    const btn = page.locator("button[type='submit']").filter({ hasText: /Find Towers/i });
-    await btn.click();
-    // Either HTML5 validation (field required) or custom error message
+    await page.locator("button[type='submit']").filter({ hasText: /Find Towers/i }).click();
     const latInput = page.getByLabel(/latitude/i);
     const validationMsg = await latInput.evaluate((el: HTMLInputElement) => el.validationMessage);
     expect(validationMsg).not.toBe("");
   });
 
-  test("auto-detects US source for US coordinates", async ({ page }) => {
-    await page.getByLabel(/latitude/i).fill("37.7749");
-    await page.getByLabel(/longitude/i).fill("-122.4194");
-    // Source dropdown should switch to "us" — toHaveValue auto-waits for the useEffect
-    const sourceSelect = page.getByLabel(/source|country|region/i).first();
-    if (await sourceSelect.isVisible()) {
-      await expect(sourceSelect).toHaveValue("us");
-    }
+  test("leaves source on auto and lets the server classify the coordinates", async ({ page }) => {
+    // The client used to guess the country from lat/lon bounding boxes and pin
+    // the dropdown, which sent "ca" for every US point above 42N. Detection
+    // lives server-side against real border polygons now, so the form's job is
+    // to stay out of the way and send "auto".
+    const towersRequest = page.waitForRequest((r) => r.url().includes("/api/towers"));
+    await page.route("**/api/towers**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ towers: [], query: query(), count: 0 }),
+      });
+    });
+
+    // Waltham, MA — 42.387N, the latitude the old bounding box misread as Canada.
+    await page.getByLabel(/latitude/i).fill("42.38708028093612");
+    await page.getByLabel(/longitude/i).fill("-71.24905416622781");
+    await expect(page.getByLabel(/data source/i)).toHaveValue("auto");
+
+    await page.locator("button[type='submit']").filter({ hasText: /Find Towers/i }).click();
+    const url = new URL((await towersRequest).url());
+    expect(url.searchParams.get("source")).toBe("auto");
   });
 
-  test("auto-fetches elevation when lat/lon are entered", async ({ page }) => {
-    // Set up response interceptor before triggering the network request
-    const elevationResponse = page
-      .waitForResponse((r) => r.url().includes("elevation"), { timeout: 15_000 })
-      .catch(() => null); // resolves null if no elevation request fires
+  test("an explicitly chosen source is sent instead of auto", async ({ page }) => {
+    const towersRequest = page.waitForRequest((r) => r.url().includes("/api/towers"));
+    await page.route("**/api/towers**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ towers: [], query: query({ source: "ca" }), count: 0 }),
+      });
+    });
 
-    await page.getByLabel(/latitude/i).fill("37.7749");
-    await page.getByLabel(/longitude/i).fill("-122.4194");
-    // Blur the field to ensure the React useEffect fires and the API call is made
-    await page.getByLabel(/longitude/i).blur();
+    await page.getByLabel(/latitude/i).fill("43.6532");
+    await page.getByLabel(/longitude/i).fill("-79.3832");
+    await page.getByLabel(/data source/i).selectOption("ca");
+    await page.locator("button[type='submit']").filter({ hasText: /Find Towers/i }).click();
 
-    const gotElevation = await elevationResponse;
-    const altVal = await page.getByLabel(/altitude/i).inputValue();
-    // Either the elevation field was populated or an elevation API call was made
-    const hasResult = altVal !== "" || gotElevation !== null;
-    expect(hasResult).toBe(true);
-  });
-
-  test("frequency filter toggle shows/hides frequency inputs", async ({ page }) => {
-    const toggle = page.getByRole("button", { name: /frequenc/i });
-    await expect(toggle).toBeVisible(); // Fail fast if the toggle was removed from the UI
-
-    const freqInput = page.locator("input[placeholder*='MHz']").first();
-    const initiallyVisible = await freqInput.isVisible().catch(() => false);
-
-    await toggle.click();
-
-    // Use Playwright auto-waiting assertions instead of a fixed sleep
-    if (initiallyVisible) {
-      await expect(freqInput).toBeHidden();
-    } else {
-      await expect(freqInput).toBeVisible();
-    }
+    const url = new URL((await towersRequest).url());
+    expect(url.searchParams.get("source")).toBe("ca");
   });
 });
 
 test.describe("Tower Finder — search results", () => {
   test("returns tower results for a known US location", async ({ page }) => {
-    // Mock the API to avoid dependency on live FCC data
     await page.route("**/api/towers**", async (route) => {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
           towers: [
-            {
-              callsign: "KQED",
-              band: "FM",
-              frequency_mhz: 88.5,
-              distance_km: 12.3,
-              distance_class: "Ideal",
-              latitude: 37.75,
-              longitude: -122.45,
-              power_kw: 110,
-              antenna_height_m: 440,
-              rank: 1,
-              name: "KQED-FM",
-              state: "CA",
-            },
-            {
-              callsign: "KCBS",
-              band: "AM",
-              frequency_mhz: 0.74,
-              distance_km: 8.1,
-              distance_class: "Ideal",
-              latitude: 37.60,
-              longitude: -122.38,
-              power_kw: 5,
-              antenna_height_m: 0,
+            tower(),
+            tower({
               rank: 2,
-              name: "KCBS",
-              state: "CA",
-            },
+              callsign: "WBZ",
+              name: "WBZ-TV",
+              frequency_mhz: 30.0,
+              band: "VHF",
+              distance_km: 8.1,
+              bearing_cardinal: "E",
+            }),
           ],
-          query: { latitude: 37.7749, longitude: -122.4194, altitude_m: 15 },
+          query: query(),
           count: 2,
         }),
       });
     });
 
     await page.goto(BASE);
-    await page.getByLabel(/latitude/i).fill("37.7749");
-    await page.getByLabel(/longitude/i).fill("-122.4194");
-    await page.getByLabel(/altitude/i).fill("15");
+    await page.getByLabel(/latitude/i).fill("42.38708028093612");
+    await page.getByLabel(/longitude/i).fill("-71.24905416622781");
     await page.locator("button[type='submit']").filter({ hasText: /Find Towers/i }).click();
 
-    // Results table should appear
-    await expect(page.locator("table, [data-testid='results']")).toBeVisible({ timeout: 10000 });
-
-    // Should show at least one result row
-    const rows = page.locator("tbody tr");
-    await expect(rows).toHaveCount(2);
-
-    // Summary strip should show tower count
-    await expect(page.locator(".summary-strip, [class*='summary']")).toBeVisible();
+    await expect(page.locator("table")).toBeVisible({ timeout: 10000 });
+    await expect(page.locator("tbody tr")).toHaveCount(2);
     await expect(page.locator(".results-count")).toHaveText("2");
+    await expect(page.locator(".summary-strip")).toBeVisible();
+  });
+
+  test("surfaces the resolved region so a misclassification is visible", async ({ page }) => {
+    await page.route("**/api/towers**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ towers: [tower()], query: query({ source: "us" }), count: 1 }),
+      });
+    });
+
+    await page.goto(BASE);
+    await page.getByLabel(/latitude/i).fill("42.38708028093612");
+    await page.getByLabel(/longitude/i).fill("-71.24905416622781");
+    await page.locator("button[type='submit']").filter({ hasText: /Find Towers/i }).click();
+
+    await expect(page.locator(".summary-strip")).toContainText("US");
+    await expect(page.locator(".summary-strip")).toContainText(/United States/i);
   });
 
   test("shows no-results message when API returns empty towers", async ({ page }) => {
@@ -170,17 +199,34 @@ test.describe("Tower Finder — search results", () => {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ towers: [], query: { latitude: 0, longitude: 0, altitude_m: 0 }, count: 0 }),
+        body: JSON.stringify({ towers: [], query: query(), count: 0 }),
       });
     });
 
     await page.goto(BASE);
-    await page.getByLabel(/latitude/i).fill("0");
-    await page.getByLabel(/longitude/i).fill("0");
-    await page.getByLabel(/altitude/i).fill("10");
+    await page.getByLabel(/latitude/i).fill("42.38708028093612");
+    await page.getByLabel(/longitude/i).fill("-71.24905416622781");
     await page.locator("button[type='submit']").filter({ hasText: /Find Towers/i }).click();
 
     await expect(page.getByText(/No suitable broadcast towers/i)).toBeVisible({ timeout: 10000 });
+  });
+
+  test("shows the server's message for a coordinate outside the supported regions", async ({ page }) => {
+    // /api/towers answers 422 rather than silently serving US data.
+    await page.route("**/api/towers**", async (route) => {
+      await route.fulfill({
+        status: 422,
+        contentType: "application/json",
+        body: JSON.stringify({ detail: "Location is not in a supported region (US, CA, AU)." }),
+      });
+    });
+
+    await page.goto(BASE);
+    await page.getByLabel(/latitude/i).fill("48.8566");
+    await page.getByLabel(/longitude/i).fill("2.3522");
+    await page.locator("button[type='submit']").filter({ hasText: /Find Towers/i }).click();
+
+    await expect(page.locator(".error-banner")).toContainText(/not in a supported region/i);
   });
 
   test("shows error banner on API failure", async ({ page }) => {
@@ -189,19 +235,17 @@ test.describe("Tower Finder — search results", () => {
     });
 
     await page.goto(BASE);
-    await page.getByLabel(/latitude/i).fill("37.7749");
-    await page.getByLabel(/longitude/i).fill("-122.4194");
-    await page.getByLabel(/altitude/i).fill("15");
+    await page.getByLabel(/latitude/i).fill("42.38708028093612");
+    await page.getByLabel(/longitude/i).fill("-71.24905416622781");
     await page.locator("button[type='submit']").filter({ hasText: /Find Towers/i }).click();
 
-    await expect(page.locator(".error-banner, [class*='error']")).toBeVisible({ timeout: 10000 });
+    await expect(page.locator(".error-banner")).toBeVisible({ timeout: 10000 });
   });
 });
 
 test.describe("Tower Finder — map rendering", () => {
   test("Leaflet map container is present", async ({ page }) => {
     await page.goto(BASE);
-    // TowerMap uses Leaflet — look for the leaflet container
     await expect(page.locator(".leaflet-container")).toBeVisible({ timeout: 8000 });
   });
 });

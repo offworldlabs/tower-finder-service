@@ -221,6 +221,22 @@ async def find_towers_with_measurements(payload: MeasurementPayload):
     }
 
 
+@router.get("/api/elevation")
+async def get_elevation(
+    lat: float = Query(..., ge=-90, le=90),
+    lon: float = Query(..., ge=-180, le=180),
+):
+    """Ground elevation at a point.
+
+    The search form uses this to pre-fill the altitude field as coordinates
+    are typed; GET /api/towers resolves altitude itself when none is given.
+    """
+    elev = await _lookup_elevation(lat, lon)
+    if elev is None:
+        raise HTTPException(status_code=502, detail="Elevation lookup failed")
+    return {"latitude": lat, "longitude": lon, "elevation_m": elev}
+
+
 @router.get("/api/config")
 async def get_config():
     with open(_CONFIG_PATH) as f:

@@ -1,12 +1,27 @@
+# ── Frontend build ────────────────────────────────────────────────────────────
+FROM node:20-alpine AS frontend-build
+
+WORKDIR /app/frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY frontend/ ./
+RUN npm run build
+
+
+# ── Service ───────────────────────────────────────────────────────────────────
 FROM python:3.12-slim
 
 WORKDIR /app
 
-# Dependencies (declared in pyproject.toml: fastapi, uvicorn[standard], httpx)
+# Dependencies (declared in pyproject.toml: fastapi, uvicorn[standard], httpx, shapely)
 COPY pyproject.toml ./
 COPY app.py ./
 COPY backend/ ./backend/
 RUN pip install --no-cache-dir .
+
+# Built UI, served by app.py. Kept out of the pip layer so a frontend-only
+# change doesn't invalidate the Python install.
+COPY --from=frontend-build /app/frontend/dist ./frontend/dist
 
 # app.py (root) + backend packages (models, config, services, clients, routes)
 # must both be importable — mirrors the test config's pythonpath = [".", "backend"].
