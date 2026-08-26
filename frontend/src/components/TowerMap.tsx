@@ -109,7 +109,7 @@ export default function TowerMap({ towers, userLocation, highlighted }) {
 
         {towers.map((t) => (
           <Marker
-            key={`${t.callsign}-${t.frequency_mhz}`}
+            key={`${t.rank}-${t.frequency_mhz}`}
             position={[t.latitude, t.longitude]}
             icon={makeTowerIcon(
               t.distance_class,

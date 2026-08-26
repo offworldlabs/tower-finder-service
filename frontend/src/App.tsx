@@ -5,7 +5,7 @@ import TowerMap from "./components/TowerMap";
 import { fetchTowers } from "./api";
 import type { Tower, TowerQuery } from "./types";
 
-const SOURCE_LABELS = {
+const SOURCE_LABELS: Record<string, string> = {
   us: "United States (FCC)",
   ca: "Canada (ISED)",
   au: "Australia (ACMA)",

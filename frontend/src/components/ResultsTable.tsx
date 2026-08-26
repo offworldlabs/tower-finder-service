@@ -53,7 +53,7 @@ export default function ResultsTable({ towers, onHover }) {
           <tbody>
             {towers.map((t) => (
               <tr
-                key={`${t.callsign}-${t.frequency_mhz}`}
+                key={`${t.rank}-${t.frequency_mhz}`}
                 onMouseEnter={() => onHover(t)}
                 onMouseLeave={() => onHover(null)}
               >
