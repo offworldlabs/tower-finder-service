@@ -10,17 +10,31 @@ file picks up ``frontend/dist``, or run ``npm run dev`` alongside — Vite proxi
 """
 
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-
 from routes.towers import router
+from services.region_lookup import warm_borders
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Parse the US/CA/AU border polygons before anything is served. The first
+    # classify_region() call otherwise does it inside a request handler, on the
+    # event loop, once per process — ~1.5s during which every other request on
+    # this worker is stalled. In a thread so the loop stays free even here.
+    await run_in_threadpool(warm_borders)
+    yield
+
 
 app = FastAPI(
     title="tower-finder-service",
     description="Ranks broadcast towers near a node from FCC + Maprad data.",
+    lifespan=lifespan,
 )
 app.include_router(router)
 
