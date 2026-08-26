@@ -84,7 +84,8 @@ succeeds. Production keeps the public smoke test it already had
 Each deploy job SSHes to its droplet, checks the box's `hostname` matches the
 environment it expects (three near-identical droplets and secret pairs mean a
 mis-set secret would otherwise deploy the wrong one, silently), hard-resets
-`$APP_DIR` to `origin/main`, and rebuilds. On every deploy it copies
+`$APP_DIR` to the commit the run is for (`github.sha`, not `origin/main`, so a
+second merge landing mid-run cannot reach production untested), and rebuilds. On every deploy it copies
 `deploy/env.<env>.example` to `.env`, so the droplet's `.env` cannot drift or
 name another environment; secrets live in `backend/.env`, which CI never
 writes, and the job refuses to proceed if that file is missing.
@@ -126,6 +127,11 @@ Actions), one pair per environment:
 Each host secret is that droplet's public address; each key secret is the
 matching private key. Every deploy job checks its own pair is set and fails
 with the secret's name if not.
+
+The guard reads the droplet's own OS `hostname`, not the SSH alias you connect
+by, so each box must actually be named for its environment (`hostnamectl
+set-hostname retina-staging`, or DigitalOcean's droplet name at creation). A
+local `~/.ssh/config` alias alone leaves every deploy failing at the guard.
 
 **2. Shared network:**
 
