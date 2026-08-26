@@ -18,6 +18,7 @@ from services.tower_ranking import (
     haversine,
     initial_bearing,
     parse_geom,
+    parse_user_frequencies,
     process_and_rank,
     watts_to_dbm,
 )
@@ -726,3 +727,93 @@ def test_allowed_bands_for_region():
 
     assert tower_ranking.allowed_bands_for_region("us") == frozenset({"FM", "VHF", "UHF"})
     assert tower_ranking.allowed_bands_for_region("au") == frozenset({"FM"})
+
+
+# ── User frequency parsing (GET ?frequencies=) ───────────────────────────────
+
+
+class TestParseUserFrequencies:
+    def test_empty_string(self):
+        assert parse_user_frequencies("") == []
+
+    def test_single_freq(self):
+        assert parse_user_frequencies("95.5") == [95.5]
+
+    def test_multiple_freqs(self):
+        assert parse_user_frequencies("95.5, 177.5, 500") == [95.5, 177.5, 500]
+
+    def test_trailing_comma(self):
+        assert parse_user_frequencies("95.5,") == [95.5]
+
+    def test_invalid_values_skipped(self):
+        assert parse_user_frequencies("abc, 95.5, xyz") == [95.5]
+
+    def test_max_10_enforced(self):
+        assert len(parse_user_frequencies(",".join(str(i) for i in range(1, 20)))) == 10
+
+    def test_zero_skipped(self):
+        assert parse_user_frequencies("0, 95.5") == [95.5]
+
+    def test_negative_skipped(self):
+        assert parse_user_frequencies("-5, 95.5") == [95.5]
+
+
+# ── User frequencies in ranking ──────────────────────────────────────────────
+
+
+class TestUserFrequencyRanking:
+    """Boost semantics: matched towers sort first, nothing is dropped —
+    unlike ``measurements``, which filters to what the SDR can see."""
+
+    # A second FM tower whose frequency is far from every user frequency used
+    # below, same location so distance cannot decide the order.
+    _OTHER_DEVICE = _device(freq_mhz=107.9, lat=33.93, lon=-84.388, callsign="KFAR")
+    _OTHER_SYSTEM = _system([_OTHER_DEVICE], licence_type="Broadcast", licence_subtype="FM")
+
+    def test_matched_tower_flagged_and_sorted_first(self):
+        result = process_and_rank(
+            [self._OTHER_SYSTEM, _FM_SYSTEM],
+            _USER_LAT,
+            _USER_LON,
+            user_frequencies=[95.5],
+        )
+        assert len(result) == 2  # boost, not filter
+        assert result[0]["callsign"] == "WXYZ"
+        assert result[0]["frequency_matched"] is True
+        assert result[1]["frequency_matched"] is False
+
+    def test_match_within_tolerance(self):
+        result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON, user_frequencies=[99.0])
+        assert result[0]["frequency_matched"] is True  # |95.5 - 99.0| <= 5 MHz
+
+    def test_no_match_outside_tolerance(self):
+        result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON, user_frequencies=[101.1])
+        assert result[0]["frequency_matched"] is False
+
+    def test_user_freqs_never_set_measured(self):
+        result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON, user_frequencies=[95.5])
+        t = result[0]
+        assert t["frequency_matched"] is True
+        assert t["measured"] is False
+        assert t["snr_db"] is None
+
+    def test_user_freqs_do_not_exempt_from_measurement_filter(self):
+        # A measurement matching only WXYZ must still drop KFAR, even when a
+        # user frequency matches KFAR: hand-typed values say nothing about
+        # what the SDR can actually see.
+        m = {
+            "freq_mhz": 95.5,
+            "snr_db": 30.0,
+            "obw_fraction": 0.03,
+            "score": 0.75,
+            "power_db": -62.0,
+            "band": "FM",
+        }
+        result = process_and_rank(
+            [_FM_SYSTEM, self._OTHER_SYSTEM],
+            _USER_LAT,
+            _USER_LON,
+            measurements=[m],
+            user_frequencies=[107.9],
+        )
+        assert [t["callsign"] for t in result] == ["WXYZ"]

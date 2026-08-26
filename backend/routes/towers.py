@@ -17,6 +17,7 @@ from services.tower_ranking import (
     allowed_bands_for_region,
     DEFAULT_LIMIT,
     DEFAULT_RADIUS_KM,
+    parse_user_frequencies,
     process_and_rank,
     reload_config,
 )
@@ -142,11 +143,13 @@ async def find_towers(
     radius_km: int = Query(0, ge=0, le=300),
     limit: int = Query(0, ge=0, le=200),
     source: str = Query("auto"),
+    frequencies: str = Query(""),
 ):
     source = _resolve_source(source, lat, lon)
 
     effective_radius = radius_km if radius_km > 0 else DEFAULT_RADIUS_KM
     effective_limit = limit if limit > 0 else DEFAULT_LIMIT
+    user_freqs = parse_user_frequencies(frequencies)
 
     raw = await _fetch_raw_towers(source, lat, lon, effective_radius)
 
@@ -162,6 +165,7 @@ async def find_towers(
         lon,
         limit=effective_limit,
         radius_km=effective_radius,
+        user_frequencies=user_freqs,
         allowed_bands=allowed_bands_for_region(source),
     )
     await _enrich_with_elevation(towers)
@@ -174,6 +178,7 @@ async def find_towers(
             "altitude_m": resolved_altitude,
             "radius_km": effective_radius,
             "source": source,
+            "user_frequencies_mhz": user_freqs,
         },
         "count": len(towers),
     }
