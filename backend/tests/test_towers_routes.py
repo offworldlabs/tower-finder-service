@@ -545,3 +545,61 @@ class TestElevationEndpoint:
     def test_rejects_out_of_range_latitude(self, client):
         r = client.get("/api/elevation", params={"lat": 91, "lon": 0})
         assert r.status_code == 422
+
+
+# ── GET /api/towers?frequencies= (user frequencies) ──────────────────────────
+
+
+class TestUserFrequencies:
+    """The `frequencies` query param, which retina-server's nginx contract
+    (deploy/tower-contract.sh there) asserts by its echo in the response."""
+
+    _SYSTEMS = [
+        _raw_system(
+            [
+                _raw_device(95.5, 33.93, -84.6, "WNEAR"),
+                _raw_device(107.9, 33.93, -84.6, "WFAR"),
+            ]
+        )
+    ]
+
+    def _get(self, client, query):
+        with (
+            unittest.mock.patch("routes.towers.API_KEY", ""),
+            unittest.mock.patch(
+                "routes.towers.fetch_fcc_broadcast_systems",
+                new=unittest.mock.AsyncMock(return_value=self._SYSTEMS),
+            ),
+            unittest.mock.patch(
+                "routes.towers._batch_lookup_elevations",
+                new=unittest.mock.AsyncMock(return_value={}),
+            ),
+        ):
+            return client.get(f"/api/towers?{query}")
+
+    def test_frequencies_echoed_in_query(self, client):
+        r = self._get(client, "lat=33.9&lon=-84.6&source=us&frequencies=1234.5")
+        assert r.status_code == 200
+        assert r.json()["query"]["user_frequencies_mhz"] == [1234.5]
+
+    def test_contract_echo_shape(self, client):
+        """Byte-for-byte what assert_tower_contract greps for: key name and
+        JSON rendering both count, so this pins the serialized form."""
+        r = self._get(client, "lat=33.9&lon=-84.6&source=us&frequencies=1234.5")
+        assert '"user_frequencies_mhz":[1234.5]' in r.content.decode()
+
+    def test_no_frequencies_echoes_empty_list(self, client):
+        r = self._get(client, "lat=33.9&lon=-84.6&source=us")
+        assert r.json()["query"]["user_frequencies_mhz"] == []
+
+    def test_matched_tower_ranks_first_nothing_dropped(self, client):
+        r = self._get(client, "lat=33.9&lon=-84.6&source=us&frequencies=107.9")
+        towers = r.json()["towers"]
+        assert [t["callsign"] for t in towers] == ["WFAR", "WNEAR"]
+        assert towers[0]["frequency_matched"] is True
+        assert towers[1]["frequency_matched"] is False
+
+    def test_junk_frequencies_ignored(self, client):
+        r = self._get(client, "lat=33.9&lon=-84.6&source=us&frequencies=abc,,-5")
+        assert r.status_code == 200
+        assert r.json()["query"]["user_frequencies_mhz"] == []

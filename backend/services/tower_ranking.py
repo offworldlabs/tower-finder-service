@@ -19,6 +19,12 @@ MEASUREMENT_TOLERANCE_MHZ: dict[str, float] = {
     "UHF": 4.0,
 }
 
+# Hand-typed frequencies (GET ?frequencies=), not analyser output: wide enough
+# to forgive a remembered-roughly value. Same constant as the parent repo's
+# in-process route, which this endpoint replaces behind nginx — the two must
+# match a tower the same way while both exist.
+FREQUENCY_MATCH_TOLERANCE_MHZ = 5.0
+
 # ── Load configurable settings from tower_config.json ────────────────────
 # Image-shipped default lives next to this module (config/ is image-only); the
 # runtime overlay holds whatever PUT /api/config writes back, so the source
@@ -297,6 +303,26 @@ def _match_measurement(freq_mhz: float, band: str, measurements: list[dict]) -> 
     return best
 
 
+def parse_user_frequencies(raw: str, max_count: int = 10) -> list[float]:
+    """Parse a comma-separated string of frequencies in MHz. Returns up to max_count valid values."""
+    if not raw or not raw.strip():
+        return []
+    freqs = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            val = float(part)
+            if 0 < val < 10000:  # reasonable MHz range
+                freqs.append(val)
+        except ValueError:
+            continue
+        if len(freqs) >= max_count:
+            break
+    return freqs
+
+
 def process_and_rank(
     raw_systems: list,
     user_lat: float,
@@ -304,6 +330,7 @@ def process_and_rank(
     limit: int = 0,
     radius_km: float = 0,
     measurements: list[dict] | None = None,
+    user_frequencies: list[float] | None = None,
     allowed_bands: frozenset = ALL_BANDS,
 ) -> list:
     """
@@ -320,6 +347,10 @@ def process_and_rank(
             fields (``snr_db``, ``score``, ``power_db``, ``obw_fraction``)
             and ``frequency_matched=True``.  Unmatched towers carry
             ``measured=False`` and None for those fields.
+        user_frequencies: Optional hand-typed frequencies in MHz (from
+            GET ?frequencies=).  A tower within FREQUENCY_MATCH_TOLERANCE_MHZ
+            of any of them gains ``frequency_matched=True`` and sorts ahead of
+            unmatched towers; nothing is dropped, unlike ``measurements``.
         allowed_bands: Bands to keep. Defaults to unrestricted (ALL_BANDS);
             callers narrow it (e.g. FM_ONLY for non-ATSC regions) rather than
             opting out of a wider set.
@@ -369,6 +400,8 @@ def process_and_rank(
             # Match against spectrum-analyser measurements (band-specific tolerance).
             measurement = _match_measurement(freq_val, band, measurements) if measurements else None
             freq_matched = measurement is not None
+            if not freq_matched and user_frequencies:
+                freq_matched = any(abs(freq_val - uf) <= FREQUENCY_MATCH_TOLERANCE_MHZ for uf in user_frequencies)
 
             towers.append(
                 {
@@ -410,11 +443,19 @@ def process_and_rank(
     # Towers with no matching measurement are invisible to the radar — drop them.
     # (An empty measurements list means no scan data was sent; treat as no filter.)
     if measurements:
-        towers = [t for t in towers if t["frequency_matched"]]
+        # Keyed on `measured`, not `frequency_matched`: the latter is also set
+        # by a hand-typed user frequency, which says nothing about what the SDR
+        # can see and must not exempt a tower from this filter.
+        towers = [t for t in towers if t["measured"]]
 
-    # Sort using configurable sort order
+    # Sort using configurable sort order.
+    # If user frequencies were provided, frequency-matched towers sort first.
+    has_user_freqs = bool(user_frequencies)
+
     def _sort_key(t):
         parts = []
+        if has_user_freqs:
+            parts.append(0 if t.get("frequency_matched") else 1)
         for rule in SORT_ORDER:
             field = rule["field"]
             asc = rule.get("ascending", True)
