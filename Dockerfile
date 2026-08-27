@@ -5,6 +5,13 @@ WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY frontend/ ./
+# The CARTO basemap key, baked into the bundle by Vite. Declared here rather
+# than at the top of the stage so that changing it re-runs this build step
+# alone and leaves the `npm ci` layer cached. The empty default matters: a host
+# that has no key (or a plain `docker build`) produces the anonymous tile URLs,
+# which is exactly what shipped before this arg existed.
+ARG VITE_CARTO_API_KEY=""
+ENV VITE_CARTO_API_KEY=${VITE_CARTO_API_KEY}
 RUN npm run build
 
 
