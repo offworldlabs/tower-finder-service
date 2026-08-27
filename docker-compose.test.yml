@@ -9,4 +9,4 @@ services:
   edge:
     container_name: tower-finder-edge-test
     environment:
-      TFS_EDGE_HOST: test-tower-finder.retina.fm
+      TFS_EDGE_HOST: test-towers.retina.fm

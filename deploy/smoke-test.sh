@@ -3,7 +3,7 @@
 # Hits the public URL (through the Cloudflare tunnel) to validate the full path.
 set -euo pipefail
 
-BASE_URL="${BASE_URL:-https://tower-finder.retina.fm}"
+BASE_URL="${BASE_URL:-https://towers.retina.fm}"
 PASS=0
 FAIL=0
 

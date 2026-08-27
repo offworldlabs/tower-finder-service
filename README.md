@@ -87,9 +87,9 @@ environments, each its own droplet, Compose project and overlay:
 
 | Environment | Droplet (SSH alias) | Public hostname | Deploys on |
 | --- | --- | --- | --- |
-| staging | `retina-staging` | none | push to `main` |
-| production | `retina-prod` | `tower-finder.retina.fm` | push to `main`, once staging deploys and passes smoke |
-| test | `retina-test` | none | `workflow_dispatch` only |
+| staging | `retina-staging` | `staging-towers.retina.fm` | push to `main` |
+| production | `retina-prod` | `towers.retina.fm` | push to `main`, once staging deploys and passes smoke |
+| test | `retina-test` | `test-towers.retina.fm` | `workflow_dispatch` only |
 
 - **Every PR / push to `main`**: `ruff check`, `ruff format --check`, and
   `pytest -m "not integration"`.
@@ -99,14 +99,14 @@ environments, each its own droplet, Compose project and overlay:
 - **Manual dispatch**: `deploy-test` deploys to `retina-test`, for rehearsing
   a change without touching staging or production.
 
-Staging and test have no public hostname and are deliberately not proxied
-through retina-server's nginx: that proxying (`staging-towers.retina.fm/api/towers`)
-is a separate, later change that cannot switch on until this stack exists to
-answer it, and switching it on before then would make each wait on the other.
-Their deploy jobs verify against the running container instead, over
+Every environment has a public hostname — a proxied Cloudflare record
+pointing at its own droplet, served today by retina-server's nginx there. The
+staging and test deploy jobs still verify against the running container, over
 `docker compose exec` (`deploy/smoke-local.sh`), once the health poll
-succeeds. Production keeps the public smoke test it already had
-(`deploy/smoke-test.sh`, against `tower-finder.retina.fm`).
+succeeds: the droplet-local path cannot be blurred by Cloudflare caching, and
+proves this deploy rather than whatever the name still routes to. Production
+additionally keeps the public smoke test it already had
+(`deploy/smoke-test.sh`, against `towers.retina.fm`).
 
 Each deploy job SSHes to its droplet, checks the box's `hostname` matches the
 environment it expects (three near-identical droplets and secret pairs mean a
@@ -120,11 +120,10 @@ writes, and the job refuses to proceed if that file is missing.
 The service runs as its own Docker Compose stack under `$APP_DIR`
 (`/opt/tower-finder-service` on each droplet). The app container publishes no
 host port; instead it joins a shared Docker network (`retina-edge`). On
-`retina-prod` that network is also how retina-server's nginx reaches it: nginx
-terminates TLS (Cloudflare Origin cert) and proxies `tower-finder.retina.fm` to
-`http://tower-finder-service:8000`, mirroring how `api.retina.fm`,
-`dash.retina.fm`, etc. are served. Staging and test have no vhost and no DNS
-record.
+every droplet that network is also how retina-server's nginx reaches it: nginx
+terminates TLS (Cloudflare Origin cert) and proxies that droplet's towers name
+to `http://tower-finder-service:8000`, mirroring how `api.retina.fm`,
+`dash.retina.fm`, etc. are served.
 
 That vhost lives in the `retina-server` repo (`deploy/nginx/nginx.conf.template`)
 and ships through that repo's own deploy pipeline. See "Public hostname" below,
@@ -137,11 +136,12 @@ The stack now also runs an `edge` container: the official nginx image rendering
 HTTPS origin port) with the same Cloudflare origin certificate retina-server
 uses, proxying everything to the app. It is this service's own way in.
 
-**It ships dark.** Nothing routes to 8443 in any environment. The fleet still
-reaches `tower-finder.retina.fm` on 443, through retina-server's nginx, exactly
-as before — `retina-spectrum` reads that hostname from retina-node's compose and
-moving the *name* would need an OTA rollout, so the name does not move. Only the
-port behind it does, and only Cloudflare sees that.
+**It ships dark.** Nothing routes to 8443 in any environment. Browsers still
+reach the towers names on 443, through retina-server's nginx, exactly as
+before — and the fleet still calls `tower-finder.retina.fm`: `retina-spectrum`
+reads that hostname from retina-node's compose and moving the *name* would need
+an OTA rollout, so that name never moves. Only the origin port behind the names
+does, and only Cloudflare sees that.
 
 Two couplings with retina-server are worth separating here, because only one of
 them is going away:
@@ -152,23 +152,23 @@ them is going away:
   which is why the app keeps its `retina-edge` alias. The edge container reaches
   the app over this project's own `internal` network instead, so this service's
   ingress does not depend on retina's network existing.
-- The **`${HOST_LEGACY_REDIRECT}` vhost** in retina's nginx, which proxies
-  `tower-finder.retina.fm/` here, is what the flip below retires.
+- The **serving vhosts** in retina's nginx — the towers vhosts, and the
+  `${HOST_LEGACY_REDIRECT}` vhost that proxies `tower-finder.retina.fm` (the
+  fleet name) here — are what the flip below retires.
 
 **Verification.** Until the flip there is no public path to 8443, so each deploy
 job probes the edge from the droplet itself:
 
 ```bash
-curl -sk --resolve "tower-finder.retina.fm:8443:127.0.0.1" \
-  https://tower-finder.retina.fm:8443/api/health   # must be 200
+curl -sk --resolve "towers.retina.fm:8443:127.0.0.1" \
+  https://towers.retina.fm:8443/api/health   # must be 200
 ```
 
-`--resolve` rather than DNS on purpose: production's name resolves to
-Cloudflare, and `staging-tower-finder.retina.fm` / `test-tower-finder.retina.fm`
-have no DNS records at all (they are nginx-shape-only names, so the three
-environments render identically). `deploy/smoke-test.sh` still targets
-`https://tower-finder.retina.fm` over 443 — that remains where public traffic
-enters until the flip.
+`--resolve` rather than DNS on purpose: every name resolves to Cloudflare,
+not to the droplet, and the probe must reach the local listener directly.
+`deploy/smoke-test.sh` still targets `https://towers.retina.fm` over 443 —
+the URL public traffic enters by both before and after the flip; the flip
+changes the origin port behind it, not the address.
 
 **The origin is Cloudflare-only, and stays that way.** retina-server enforces
 Cloudflare Authenticated Origin Pulls (`ssl_verify_client on`) plus a
@@ -176,39 +176,45 @@ DOCKER-USER rule that narrows 80 and 443 to Cloudflare's ranges. The edge keeps
 the first half: it requires a client certificate signed by Cloudflare's
 origin-pull CA, refusing anything else with `403`, exempting only peers on
 `127.0.0.0/8` and `172.16.0.0/12` (the droplet itself and its Docker networks)
-so the deploy probe above can run. The second half is retina's to extend —
-`deploy/docker-user-firewall.sh` there sets `PORTS="80,443"`, so **8443 is
-reachable at the TCP layer from anywhere** until `8443` is added to that list.
-Do that before the flip; the TLS-layer refusal is the boundary in the meantime.
+so the deploy probe above can run. The second half is retina's, and
+now covers the edge too: `deploy/docker-user-firewall.sh` there sets
+`PORTS="80,443,8443"`. Changing that list does nothing on a live droplet by
+itself — only boot re-runs the unit — so run
+`systemctl restart retina-firewall.service` on each droplet before its flip.
 
-**The flip is one manual Cloudflare change**, production only:
+**The flip is one manual Cloudflare change per hostname**, and because every
+environment has its own name and droplet, it rehearses on test first:
 
 > Rules → Origin Rules → Create rule
-> - Name: `tower-finder origin port`
-> - When incoming requests match: `Hostname` `equals` `tower-finder.retina.fm`
+> - Name: `tower-finder origin port (test)`
+> - When incoming requests match: `Hostname` `equals` `test-towers.retina.fm`
 > - Then: **Rewrite to… Destination Port → `8443`**
 
-`tower-finder.retina.fm` is proxied (orange cloud), so the fleet reaches it
-through Cloudflare on 443 and never sees the origin port change. Confirm
-Authenticated Origin Pulls is still on for the zone before flipping — if it were
-off, Cloudflare would present no client certificate and the edge would answer
-403. Creating proxied records and matching rules for the staging and test names
-is optional and orthogonal; they have no DNS today.
+Verify, then repeat for `staging-towers.retina.fm`, then `towers.retina.fm`.
+Production also needs the same rewrite for `tower-finder.retina.fm` — the
+fleet name — either as a fourth rule or a `Hostname` `is in` list alongside
+`towers.retina.fm`: without it, retiring retina's `${HOST_LEGACY_REDIRECT}`
+vhost would cut the fleet off. The names are proxied (orange cloud), so
+clients stay on 443 and never see the origin port change. Confirm
+Authenticated Origin Pulls is still on for the zone before flipping — if it
+were off, Cloudflare would present no client certificate and the edge would
+answer 403.
 
-**After the flip is verified** (`curl https://tower-finder.retina.fm/api/health`
+**After the flip is verified** (`curl https://towers.retina.fm/api/health`
 still 200, and the request shows up in `docker compose logs edge` rather than in
 retina's nginx), retina-server deletes its `${HOST_LEGACY_REDIRECT}` vhost and
-the `HOST_LEGACY_REDIRECT` environment variable. That is a separate PR in that
+the `HOST_LEGACY_REDIRECT` environment variable, and can retire the towers
+vhosts' tower-serving role at its own pace. That is a separate PR in that
 repo, and it must come after, not with, the flip.
 
-**Rollback is deleting the Origin Rule.** Traffic instantly re-enters through
-retina-server's nginx on 443, which still carries the vhost until the step
+**Rollback is deleting the Origin Rule(s).** Traffic instantly re-enters through
+retina-server's nginx on 443, which still carries the vhosts until the step
 above. Nothing has to be redeployed here.
 
 ### One-time setup
 
 Every environment needs steps 1, 2 and 4 below on its own droplet, plus its
-own pair of repository secrets. Step 3 (public hostname) is production only.
+own pair of repository secrets. Step 3 is already in place everywhere.
 
 **1. Deploy SSH key (run locally, once per droplet):**
 
@@ -251,19 +257,16 @@ The `edge` container bind-mounts `/etc/ssl/cloudflare` read-only and needs
 co-located on, so there is normally nothing to do — but nginx will not start
 without them, and it fails at boot rather than at first request.
 
-**3. Public hostname (production only):**
+**3. Public hostname (already in place everywhere):**
 
-In the Cloudflare dashboard, add a **proxied** DNS A-record (orange cloud on)
-for `tower-finder` pointing at `retina-prod`. The `*.retina.fm` Origin cert
-already covers it, so no certificate work is needed. Staging and test get no
-record: they are verified on the droplet, not over a public path.
-
-Add a server block for `tower-finder.retina.fm` to the droplet's copy of the
-`retina-server` repo's `deploy/nginx.conf` (proxying to
-`http://tower-finder-service:8000` over `retina-edge`), and attach the
-`tower-finder-service` service to the `retina-edge` network in its compose
-file. Deploy that change through retina-server's own pipeline so its image is
-rebuilt and the container restarted.
+In the Cloudflare dashboard each environment has a **proxied** DNS A-record
+(orange cloud on) pointing at its droplet: `towers` → `retina-prod`,
+`staging-towers` → `retina-staging`, `test-towers` → `retina-test`, plus
+`tower-finder` (the fleet name) → `retina-prod`. The `*.retina.fm` Origin
+cert covers them all, so no certificate work is needed. retina-server's nginx
+carries the matching server blocks (proxying to
+`http://tower-finder-service:8000` over `retina-edge`) until the flip retires
+them.
 
 **4. Droplet bootstrap (run on the droplet as root):**
 
