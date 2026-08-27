@@ -114,6 +114,32 @@ jobs:
               docker compose logs --tail=50 || true
               exit 1
             fi
+            # The edge ships dark: nothing points at 8443 yet — the fleet still
+            # arrives over retina-server's nginx on 443 — so the only way to
+            # verify this listener before the Cloudflare Origin Rule flips is to
+            # address it directly on the droplet, under the hostname it serves.
+            # --resolve rather than DNS: staging and test carry no DNS record at
+            # all, and production's must keep resolving to Cloudflare.
+            # An unverified peer needs a Cloudflare client certificate; this
+            # probe is exempt because it arrives from the droplet itself.
+            edge_ok=""
+            for i in $(seq 1 12); do
+              code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 \
+                --resolve "staging-tower-finder.retina.fm:8443:127.0.0.1" \
+                "https://staging-tower-finder.retina.fm:8443/api/health" || true)"
+              if [ "$code" = "200" ]; then
+                echo "Edge answered 200 on 8443 after ~$((i * 5))s"
+                edge_ok=1
+                break
+              fi
+              echo "Waiting for the edge on 8443... attempt $i/12 (last: ${code:-no answer})"
+              sleep 5
+            done
+            if [ -z "$edge_ok" ]; then
+              echo "Edge did not answer 200 on https://staging-tower-finder.retina.fm:8443/api/health"
+              docker compose logs --tail=50 edge || true
+              exit 1
+            fi
             # Staging has no public hostname (that needs proxying through
             # retina-server's nginx, which cannot switch on until this stack
             # exists to answer it), so verification runs against the
@@ -156,18 +182,51 @@ jobs:
               echo "backend/.env is missing; secrets would be lost"; exit 1; }
             cp deploy/env.prod.example .env
             docker compose up -d --build
+            # `healthy` rather than an `exit 0` inside the loop: success has to
+            # fall through to the edge probe below, which an early exit would
+            # make dead code.
+            healthy=""
             for i in $(seq 1 12); do
               if docker compose exec -T tower-finder-service \
                 python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')" 2>/dev/null; then
                 echo "Deploy healthy after ~$((i * 5))s"
-                exit 0
+                healthy=1
+                break
               fi
               echo "Waiting for health check... attempt $i/12"
               sleep 5
             done
-            echo "Health check failed after 60s"
-            docker compose logs --tail=50 || true
-            exit 1
+            if [ -z "$healthy" ]; then
+              echo "Health check failed after 60s"
+              docker compose logs --tail=50 || true
+              exit 1
+            fi
+            # The edge ships dark: nothing points at 8443 yet — the fleet still
+            # arrives over retina-server's nginx on 443 — so the only way to
+            # verify this listener before the Cloudflare Origin Rule flips is to
+            # address it directly on the droplet, under the hostname it serves.
+            # --resolve rather than DNS: staging and test carry no DNS record at
+            # all, and production's must keep resolving to Cloudflare.
+            # An unverified peer needs a Cloudflare client certificate; this
+            # probe is exempt because it arrives from the droplet itself.
+            edge_ok=""
+            for i in $(seq 1 12); do
+              code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 \
+                --resolve "tower-finder.retina.fm:8443:127.0.0.1" \
+                "https://tower-finder.retina.fm:8443/api/health" || true)"
+              if [ "$code" = "200" ]; then
+                echo "Edge answered 200 on 8443 after ~$((i * 5))s"
+                edge_ok=1
+                break
+              fi
+              echo "Waiting for the edge on 8443... attempt $i/12 (last: ${code:-no answer})"
+              sleep 5
+            done
+            if [ -z "$edge_ok" ]; then
+              echo "Edge did not answer 200 on https://tower-finder.retina.fm:8443/api/health"
+              docker compose logs --tail=50 edge || true
+              exit 1
+            fi
 
   smoke-prod:
     runs-on: ubuntu-latest
@@ -233,6 +292,32 @@ jobs:
             if [ -z "$healthy" ]; then
               echo "Health check failed after 60s"
               docker compose logs --tail=50 || true
+              exit 1
+            fi
+            # The edge ships dark: nothing points at 8443 yet — the fleet still
+            # arrives over retina-server's nginx on 443 — so the only way to
+            # verify this listener before the Cloudflare Origin Rule flips is to
+            # address it directly on the droplet, under the hostname it serves.
+            # --resolve rather than DNS: staging and test carry no DNS record at
+            # all, and production's must keep resolving to Cloudflare.
+            # An unverified peer needs a Cloudflare client certificate; this
+            # probe is exempt because it arrives from the droplet itself.
+            edge_ok=""
+            for i in $(seq 1 12); do
+              code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 \
+                --resolve "test-tower-finder.retina.fm:8443:127.0.0.1" \
+                "https://test-tower-finder.retina.fm:8443/api/health" || true)"
+              if [ "$code" = "200" ]; then
+                echo "Edge answered 200 on 8443 after ~$((i * 5))s"
+                edge_ok=1
+                break
+              fi
+              echo "Waiting for the edge on 8443... attempt $i/12 (last: ${code:-no answer})"
+              sleep 5
+            done
+            if [ -z "$edge_ok" ]; then
+              echo "Edge did not answer 200 on https://test-tower-finder.retina.fm:8443/api/health"
+              docker compose logs --tail=50 edge || true
               exit 1
             fi
             # No public hostname for test either; see deploy-staging.

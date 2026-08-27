@@ -1,0 +1,183 @@
+# tower-finder-service's own TLS ingress.
+#
+# Rendered by the official nginx image's entrypoint
+# (/docker-entrypoint.d/20-envsubst-on-templates.sh), which envsubsts every
+# /etc/nginx/templates/*.template into /etc/nginx/conf.d/. Compose mounts this
+# file as `default.conf.template` specifically so the render lands on
+# /etc/nginx/conf.d/default.conf and REPLACES the image's stock server block —
+# otherwise that would keep an unwanted listener on :80.
+#
+# Only ${TFS_EDGE_HOST} is substituted: the entrypoint passes envsubst an
+# explicit list of the environment's own variable names, so nginx's own $host,
+# $remote_addr, $ssl_client_verify and friends survive untouched.
+#
+# conf.d is included from http{}, which is why the real-IP, rate-limit, geo and
+# map directives below (all http-context) can live in the same file as the
+# server blocks.
+#
+# This ships DARK: nothing sends traffic to 8443 until a Cloudflare Origin Rule
+# rewrites the origin port for ${TFS_EDGE_HOST}. See "Own ingress + the flip
+# plan" in README.md.
+
+# ── Real client IP behind Cloudflare (must precede the zones below) ──────────
+# Mirrors retina-server's deploy/nginx-security.conf. Without it,
+# $binary_remote_addr is the Cloudflare edge address and the rate-limit zone
+# buckets per-edge rather than per-client — a limiter that fails open and
+# silently. `set_real_ip_from` is what makes `real_ip_header` safe: the header
+# is honoured only from these sources, so a direct connection to the origin
+# from anywhere else keeps its true address and cannot spoof a client IP.
+#
+# Source: https://www.cloudflare.com/ips-v4 and /ips-v6 (as carried by
+# retina-server, fetched 2026-08-10). `real_ip_recursive` is deliberately
+# absent: CF-Connecting-IP carries a single address, not an XFF chain.
+set_real_ip_from 173.245.48.0/20;
+set_real_ip_from 103.21.244.0/22;
+set_real_ip_from 103.22.200.0/22;
+set_real_ip_from 103.31.4.0/22;
+set_real_ip_from 141.101.64.0/18;
+set_real_ip_from 108.162.192.0/18;
+set_real_ip_from 190.93.240.0/20;
+set_real_ip_from 188.114.96.0/20;
+set_real_ip_from 197.234.240.0/22;
+set_real_ip_from 198.41.128.0/17;
+set_real_ip_from 162.158.0.0/15;
+set_real_ip_from 104.16.0.0/13;
+set_real_ip_from 104.24.0.0/14;
+set_real_ip_from 172.64.0.0/13;
+set_real_ip_from 131.0.72.0/22;
+set_real_ip_from 2400:cb00::/32;
+set_real_ip_from 2606:4700::/32;
+set_real_ip_from 2803:f800::/32;
+set_real_ip_from 2405:b500::/32;
+set_real_ip_from 2405:8100::/32;
+set_real_ip_from 2a06:98c0::/29;
+set_real_ip_from 2c0f:f248::/32;
+real_ip_header CF-Connecting-IP;
+
+# ── Rate limiting ────────────────────────────────────────────────────────────
+# Parity with the path this replaces: retina-server's tower-finder vhost runs
+# `limit_req zone=api burst=60 nodelay` against a 30r/s zone. Same numbers, own
+# zone — the two nginxes are separate processes and cannot share state, so the
+# effective allowance during the dark period is doubled for anyone who reaches
+# both. That ends at the flip, when retina's vhost is deleted.
+limit_req_status 429;
+limit_req_zone $binary_remote_addr zone=tfs_edge_api:10m rate=30r/s;
+
+# ── Cloudflare Authenticated Origin Pulls ────────────────────────────────────
+# retina-server enforces this at the handshake (`ssl_verify_client on`), which
+# is why a direct curl to its 443 answers "400 No required SSL certificate was
+# sent". That protection has to come with this hostname when it moves, or the
+# flip would trade a Cloudflare-only origin for one open to the whole internet:
+# the DOCKER-USER boundary in retina-server only narrows 80 and 443, so 8443 is
+# reachable from anywhere until that list grows.
+#
+# Enforced per request rather than per handshake so the deploy's own probe can
+# still verify the edge: CI has no Cloudflare client certificate and never will,
+# and the only other way to check this listener is over the public internet
+# after the flip. A peer address of 127.0.0.0/8 or 172.16.0.0/12 means the
+# droplet itself or a Docker network on it (retina-edge is 172.19.0.0/16);
+# nothing off-box can present one, because inbound packets keep their real
+# source through Docker's DNAT.
+#
+# $realip_remote_addr, not $remote_addr: the real-IP module above rewrites the
+# latter to whatever CF-Connecting-IP said, so matching on it would let a
+# spoofed header inside the exemption. $realip_remote_addr is always the actual
+# TCP peer.
+geo $realip_remote_addr $tfs_edge_peer_is_local {
+    default        0;
+    127.0.0.0/8    1;
+    172.16.0.0/12  1;
+}
+
+map $ssl_client_verify $tfs_edge_cert_ok {
+    SUCCESS  1;
+    default  0;
+}
+
+map $tfs_edge_cert_ok$tfs_edge_peer_is_local $tfs_edge_denied {
+    "00"     1;
+    default  0;
+}
+
+server_tokens off;
+
+server {
+    # default_server, stated rather than inherited. With a single server block
+    # on this port nginx would serve it for any SNI or Host regardless, so the
+    # keyword changes nothing today; it is here so the next block added to 8443
+    # cannot silently take over the catch-all. Serving unknown Hosts is the
+    # deliberate choice: this is a public read API, Cloudflare always sends SNI,
+    # and everything that is not Cloudflare is already refused below.
+    listen 8443 ssl default_server;
+    server_name ${TFS_EDGE_HOST};
+
+    # The Cloudflare origin certificate, bind-mounted read-only from the host.
+    # Wildcard *.retina.fm, so the same material covers all three environment
+    # hostnames — including the two that have no DNS record yet.
+    ssl_certificate     /etc/ssl/cloudflare/cert.pem;
+    ssl_certificate_key /etc/ssl/cloudflare/key.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+
+    # `optional`, with the decision made per request by $tfs_edge_denied above.
+    # Cloudflare presents a certificate signed by this CA on every origin
+    # connection once Authenticated Origin Pulls is on for the zone — it is on,
+    # which is what retina-server's `ssl_verify_client on` has been relying on.
+    ssl_client_certificate /etc/ssl/cloudflare/origin-pull-ca.pem;
+    ssl_verify_client      optional;
+
+    if ($tfs_edge_denied) {
+        return 403 "Origin reachable through Cloudflare only.\n";
+    }
+
+    # Mirrors snippets/security-headers-api.conf: no HTML is served here, so the
+    # page-level headers (CSP, frame-ancestors) would be noise.
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    location / {
+        limit_req zone=tfs_edge_api burst=60 nodelay;
+
+        # Resolved at request time (hence the variable) so nginx still boots
+        # when the app container is down or slow to start: the upstream then
+        # 502s per request instead of failing the whole config. proxy_pass with
+        # a variable and no URI part forwards the request URI unchanged, which
+        # is what this vhost wants — it is the whole service, not a sub-path.
+        resolver 127.0.0.11 valid=10s;
+        set $tfs_upstream tower-finder-service;
+        proxy_pass http://$tfs_upstream:8000;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # 120s read timeout is the value retina-server uses for this same
+        # upstream: a cold /api/towers can spend a while in the FCC and Maprad
+        # clients. The connect timeout is short on purpose — failing to reach a
+        # container on the same host is immediate when it happens at all.
+        proxy_connect_timeout 5s;
+        proxy_send_timeout    120s;
+        proxy_read_timeout    120s;
+    }
+}
+
+server {
+    # Container-local health endpoint for the Docker healthcheck. Not published
+    # and not TLS: the alternative is asking BusyBox wget to speak HTTPS to a
+    # certificate it cannot validate, and a broken certificate or key would stop
+    # nginx from starting at all rather than showing up here.
+    listen 127.0.0.1:8080;
+    server_name _;
+
+    access_log off;
+
+    location = /_edge_health {
+        return 200 "ok\n";
+    }
+
+    location / {
+        return 404;
+    }
+}

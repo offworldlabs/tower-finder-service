@@ -32,6 +32,22 @@ LOCAL_SMOKE_EXPECTED = {
 
 LOCAL_SMOKE_RE = re.compile(r"EXPECT_ENV=(?P<env>\S+)\s+bash\s+deploy/smoke-local\.sh")
 
+# Every deploy job must also prove this service's own ingress answers on 8443.
+# Nothing routes there until a Cloudflare Origin Rule rewrites the origin port,
+# so the probe has to address the droplet directly, under the hostname the edge
+# serves — which is also the hostname `server_name` is rendered from.
+EDGE_PROBE_EXPECTED = {
+    "deploy-prod": "tower-finder.retina.fm",
+    "deploy-staging": "staging-tower-finder.retina.fm",
+    "deploy-test": "test-tower-finder.retina.fm",
+}
+
+# `--resolve` and not DNS: two of the three hostnames have no record at all, and
+# production's resolves to Cloudflare, which cannot reach a dark port.
+EDGE_PROBE_RE = re.compile(
+    r'--resolve\s+"(?P<host>[\w.-]+):8443:127\.0\.0\.1"[^\n]*\n\s*"https://(?P<url_host>[\w.-]+):8443/api/health"'
+)
+
 # The line that brings the stack up, allowing for flags between `compose`
 # and `up` (e.g. `docker compose --profile x up -d --build`).
 DEPLOY_UP_RE = re.compile(r"docker compose\b[^\n]*\bup\s+-d\s+--build")
@@ -184,3 +200,30 @@ def test_local_smoke_is_reachable(job, workflow):
 @pytest.mark.parametrize("job", ["deploy-staging", "deploy-prod"])
 def test_main_line_deploys_only_on_a_push_to_main(job, workflow):
     assert workflow["jobs"][job]["if"] == MAIN_PUSH_ONLY
+
+
+@pytest.mark.parametrize("job", sorted(EDGE_PROBE_EXPECTED))
+def test_each_deploy_job_probes_its_own_edge(job, workflow):
+    """The direct-origin probe is the only verification the edge gets until the
+    flip, and a job probing another environment's hostname would pass against a
+    server_name this droplet never renders."""
+    script = _ssh_script(workflow["jobs"][job])
+    match = EDGE_PROBE_RE.search(script)
+    assert match, f"{job}: no direct-origin probe of https://<host>:8443/api/health"
+    assert match.group("host") == EDGE_PROBE_EXPECTED[job]
+    assert match.group("url_host") == EDGE_PROBE_EXPECTED[job]
+
+
+@pytest.mark.parametrize("job", sorted(EDGE_PROBE_EXPECTED))
+def test_the_edge_probe_is_reachable_and_fatal(job, workflow):
+    """Production's health poll used to `exit 0` on success, which would leave
+    the probe below it as dead code; and a probe whose failure does not exit
+    non-zero verifies nothing."""
+    script = _ssh_script(workflow["jobs"][job])
+    up_match = DEPLOY_UP_RE.search(script)
+    assert up_match, f"{job}: expected 'docker compose ... up -d --build' in the deploy script"
+    probe = EDGE_PROBE_RE.search(script)
+    between = script[up_match.start() : probe.start()]
+    assert not EXIT_SUCCESS_RE.search(between), f"{job}: an exit before the edge probe makes it unreachable"
+    after = script[probe.end() :]
+    assert re.search(r"exit\s+[1-9]\d*", after), f"{job}: a failing edge probe does not fail the deploy"
