@@ -193,6 +193,17 @@ cp backend/.env.example backend/.env
 # reach the metered upstream, so leave it unset there; see "Metered upstream"
 # below for the consequence. This file holds secrets and CI never writes it.
 cp deploy/env.<env>.example .env   # prod, staging or test
+
+# The CARTO basemap key, in a file of its own outside the repo. Unkeyed tiles
+# come back stamped "API KEY REQUIRED", so a droplet whose map anyone looks at
+# wants this; a droplet without it still builds and runs. Every deploy appends
+# this file to ./.env after copying the example above, and docker-compose.yml
+# interpolates it into the frontend's VITE_CARTO_API_KEY build arg. It is NOT
+# in backend/.env: Compose reads build args from ./.env alone.
+install -d -m 700 /root/.secrets
+printf 'CARTO_API_KEY=%s\n' "<key from the CARTO dashboard>" > /root/.secrets/carto.env
+chmod 600 /root/.secrets/carto.env
+
 docker compose up -d --build
 ```
 
