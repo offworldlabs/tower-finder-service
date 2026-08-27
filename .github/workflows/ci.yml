@@ -122,15 +122,15 @@ jobs:
             # arrives over retina-server's nginx on 443 — so the only way to
             # verify this listener before the Cloudflare Origin Rule flips is to
             # address it directly on the droplet, under the hostname it serves.
-            # --resolve rather than DNS: staging and test carry no DNS record at
-            # all, and production's must keep resolving to Cloudflare.
+            # --resolve rather than DNS: every name resolves to Cloudflare, not to
+            # the droplet, and this probe must reach the local listener directly.
             # An unverified peer needs a Cloudflare client certificate; this
             # probe is exempt because it arrives from the droplet itself.
             edge_ok=""
             for i in $(seq 1 12); do
               code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 \
-                --resolve "staging-tower-finder.retina.fm:8443:127.0.0.1" \
-                "https://staging-tower-finder.retina.fm:8443/api/health" || true)"
+                --resolve "staging-towers.retina.fm:8443:127.0.0.1" \
+                "https://staging-towers.retina.fm:8443/api/health" || true)"
               if [ "$code" = "200" ]; then
                 echo "Edge answered 200 on 8443 after ~$((i * 5))s"
                 edge_ok=1
@@ -140,14 +140,14 @@ jobs:
               sleep 5
             done
             if [ -z "$edge_ok" ]; then
-              echo "Edge did not answer 200 on https://staging-tower-finder.retina.fm:8443/api/health"
+              echo "Edge did not answer 200 on https://staging-towers.retina.fm:8443/api/health"
               docker compose logs --tail=50 edge || true
               exit 1
             fi
-            # Staging has no public hostname (that needs proxying through
-            # retina-server's nginx, which cannot switch on until this stack
-            # exists to answer it), so verification runs against the
-            # container directly rather than production's public path.
+            # Verification runs against the container directly rather than over
+            # staging's public hostname: the droplet-local path cannot be blurred
+            # by Cloudflare caching and proves this deploy, not whatever the
+            # edge in front of the name still routes to.
             EXPECT_ENV=staging bash deploy/smoke-local.sh
 
   deploy-prod:
@@ -213,15 +213,15 @@ jobs:
             # arrives over retina-server's nginx on 443 — so the only way to
             # verify this listener before the Cloudflare Origin Rule flips is to
             # address it directly on the droplet, under the hostname it serves.
-            # --resolve rather than DNS: staging and test carry no DNS record at
-            # all, and production's must keep resolving to Cloudflare.
+            # --resolve rather than DNS: every name resolves to Cloudflare, not to
+            # the droplet, and this probe must reach the local listener directly.
             # An unverified peer needs a Cloudflare client certificate; this
             # probe is exempt because it arrives from the droplet itself.
             edge_ok=""
             for i in $(seq 1 12); do
               code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 \
-                --resolve "tower-finder.retina.fm:8443:127.0.0.1" \
-                "https://tower-finder.retina.fm:8443/api/health" || true)"
+                --resolve "towers.retina.fm:8443:127.0.0.1" \
+                "https://towers.retina.fm:8443/api/health" || true)"
               if [ "$code" = "200" ]; then
                 echo "Edge answered 200 on 8443 after ~$((i * 5))s"
                 edge_ok=1
@@ -231,7 +231,7 @@ jobs:
               sleep 5
             done
             if [ -z "$edge_ok" ]; then
-              echo "Edge did not answer 200 on https://tower-finder.retina.fm:8443/api/health"
+              echo "Edge did not answer 200 on https://towers.retina.fm:8443/api/health"
               docker compose logs --tail=50 edge || true
               exit 1
             fi
@@ -243,7 +243,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Smoke test production
         env:
-          BASE_URL: https://tower-finder.retina.fm
+          BASE_URL: https://towers.retina.fm
           EXPECT_ENV: prod
         run: bash deploy/smoke-test.sh
 
@@ -310,15 +310,15 @@ jobs:
             # arrives over retina-server's nginx on 443 — so the only way to
             # verify this listener before the Cloudflare Origin Rule flips is to
             # address it directly on the droplet, under the hostname it serves.
-            # --resolve rather than DNS: staging and test carry no DNS record at
-            # all, and production's must keep resolving to Cloudflare.
+            # --resolve rather than DNS: every name resolves to Cloudflare, not to
+            # the droplet, and this probe must reach the local listener directly.
             # An unverified peer needs a Cloudflare client certificate; this
             # probe is exempt because it arrives from the droplet itself.
             edge_ok=""
             for i in $(seq 1 12); do
               code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 \
-                --resolve "test-tower-finder.retina.fm:8443:127.0.0.1" \
-                "https://test-tower-finder.retina.fm:8443/api/health" || true)"
+                --resolve "test-towers.retina.fm:8443:127.0.0.1" \
+                "https://test-towers.retina.fm:8443/api/health" || true)"
               if [ "$code" = "200" ]; then
                 echo "Edge answered 200 on 8443 after ~$((i * 5))s"
                 edge_ok=1
@@ -328,9 +328,9 @@ jobs:
               sleep 5
             done
             if [ -z "$edge_ok" ]; then
-              echo "Edge did not answer 200 on https://test-tower-finder.retina.fm:8443/api/health"
+              echo "Edge did not answer 200 on https://test-towers.retina.fm:8443/api/health"
               docker compose logs --tail=50 edge || true
               exit 1
             fi
-            # No public hostname for test either; see deploy-staging.
+            # Same droplet-local verification as deploy-staging, same reasons.
             EXPECT_ENV=test bash deploy/smoke-local.sh

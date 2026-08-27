@@ -113,7 +113,7 @@ server {
 
     # The Cloudflare origin certificate, bind-mounted read-only from the host.
     # Wildcard *.retina.fm, so the same material covers all three environment
-    # hostnames — including the two that have no DNS record yet.
+    # hostnames, and the fleet name (tower-finder.retina.fm) besides.
     ssl_certificate     /etc/ssl/cloudflare/cert.pem;
     ssl_certificate_key /etc/ssl/cloudflare/key.pem;
     ssl_protocols       TLSv1.2 TLSv1.3;

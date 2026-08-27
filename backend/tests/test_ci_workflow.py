@@ -19,12 +19,13 @@ EXPECTED = {
 }
 
 SMOKE_EXPECTED = {
-    "smoke-prod": ("https://tower-finder.retina.fm", "prod"),
+    "smoke-prod": ("https://towers.retina.fm", "prod"),
 }
 
-# Staging and test have no public hostname, so their verification is not a
-# separate job over a URL; it runs inside the deploy script, against the
-# container, once the health poll above it has succeeded.
+# Staging and test verify inside the deploy script, against the container,
+# once the health poll above it has succeeded — the droplet-local path cannot
+# be blurred by Cloudflare caching, and proves this deploy rather than
+# whatever their public names still route to.
 LOCAL_SMOKE_EXPECTED = {
     "deploy-staging": "staging",
     "deploy-test": "test",
@@ -37,9 +38,9 @@ LOCAL_SMOKE_RE = re.compile(r"EXPECT_ENV=(?P<env>\S+)\s+bash\s+deploy/smoke-loca
 # so the probe has to address the droplet directly, under the hostname the edge
 # serves — which is also the hostname `server_name` is rendered from.
 EDGE_PROBE_EXPECTED = {
-    "deploy-prod": "tower-finder.retina.fm",
-    "deploy-staging": "staging-tower-finder.retina.fm",
-    "deploy-test": "test-tower-finder.retina.fm",
+    "deploy-prod": "towers.retina.fm",
+    "deploy-staging": "staging-towers.retina.fm",
+    "deploy-test": "test-towers.retina.fm",
 }
 
 # `--resolve` and not DNS: two of the three hostnames have no record at all, and

@@ -24,13 +24,13 @@ ALLOWED_DIVERGENCE = (
     "services.edge.environment.TFS_EDGE_HOST",
 )
 
-# The hostname each environment's own ingress answers to. Production's is the
-# name the fleet calls; the other two have no DNS record and exist so the three
-# renders stay structurally identical.
+# The hostname each environment's own ingress answers to: the towers name
+# already serving that droplet through retina-server's nginx, which the
+# Cloudflare Origin Rule flip re-points at this edge, port and all.
 EDGE_HOSTS = {
-    "prod": "tower-finder.retina.fm",
-    "staging": "staging-tower-finder.retina.fm",
-    "test": "test-tower-finder.retina.fm",
+    "prod": "towers.retina.fm",
+    "staging": "staging-towers.retina.fm",
+    "test": "test-towers.retina.fm",
 }
 
 

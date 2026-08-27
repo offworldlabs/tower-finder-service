@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Droplet-side smoke test for tower-finder-service.
-# Staging and test have no public hostname, and the container publishes no
-# port (it sits only on retina-edge), so this checks the container directly
+# Staging and test verify on the droplet, not over their public names, and
+# the container publishes no port, so this checks the container directly
 # via `docker compose exec` rather than a URL. The image is python:3.12-slim
 # and has no curl, so the checks run as python3/urllib inside the container.
 set -euo pipefail
