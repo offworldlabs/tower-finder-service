@@ -118,16 +118,92 @@ name another environment; secrets live in `backend/.env`, which CI never
 writes, and the job refuses to proceed if that file is missing.
 
 The service runs as its own Docker Compose stack under `$APP_DIR`
-(`/opt/tower-finder-service` on each droplet). It publishes no host port;
-instead it joins a shared Docker network (`retina-edge`). On `retina-prod`
-that network is also how retina-server's nginx reaches it: nginx terminates
-TLS (Cloudflare Origin cert) and proxies `tower-finder.retina.fm` to
+(`/opt/tower-finder-service` on each droplet). The app container publishes no
+host port; instead it joins a shared Docker network (`retina-edge`). On
+`retina-prod` that network is also how retina-server's nginx reaches it: nginx
+terminates TLS (Cloudflare Origin cert) and proxies `tower-finder.retina.fm` to
 `http://tower-finder-service:8000`, mirroring how `api.retina.fm`,
 `dash.retina.fm`, etc. are served. Staging and test have no vhost and no DNS
 record.
 
-The nginx vhost itself lives in the `retina-server` repo (`deploy/nginx.conf`) and
-ships through that repo's own deploy pipeline. See "Public hostname" below.
+That vhost lives in the `retina-server` repo (`deploy/nginx/nginx.conf.template`)
+and ships through that repo's own deploy pipeline. See "Public hostname" below,
+and "Own ingress + the flip plan" for how it stops being the way in.
+
+### Own ingress + the flip plan
+
+The stack now also runs an `edge` container: the official nginx image rendering
+`deploy/nginx/edge.conf.template`, listening on **8443** (a Cloudflare-supported
+HTTPS origin port) with the same Cloudflare origin certificate retina-server
+uses, proxying everything to the app. It is this service's own way in.
+
+**It ships dark.** Nothing routes to 8443 in any environment. The fleet still
+reaches `tower-finder.retina.fm` on 443, through retina-server's nginx, exactly
+as before — `retina-spectrum` reads that hostname from retina-node's compose and
+moving the *name* would need an OTA rollout, so the name does not move. Only the
+port behind it does, and only Cloudflare sees that.
+
+Two couplings with retina-server are worth separating here, because only one of
+them is going away:
+
+- The **towers-proxy seam** — retina's own vhosts proxying `/api/towers`,
+  `/api/elevation` and `/api/config` to `tower-finder-service:8000` over
+  `retina-edge` — is the intended permanent architecture. It does not change,
+  which is why the app keeps its `retina-edge` alias. The edge container reaches
+  the app over this project's own `internal` network instead, so this service's
+  ingress does not depend on retina's network existing.
+- The **`${HOST_LEGACY_REDIRECT}` vhost** in retina's nginx, which proxies
+  `tower-finder.retina.fm/` here, is what the flip below retires.
+
+**Verification.** Until the flip there is no public path to 8443, so each deploy
+job probes the edge from the droplet itself:
+
+```bash
+curl -sk --resolve "tower-finder.retina.fm:8443:127.0.0.1" \
+  https://tower-finder.retina.fm:8443/api/health   # must be 200
+```
+
+`--resolve` rather than DNS on purpose: production's name resolves to
+Cloudflare, and `staging-tower-finder.retina.fm` / `test-tower-finder.retina.fm`
+have no DNS records at all (they are nginx-shape-only names, so the three
+environments render identically). `deploy/smoke-test.sh` still targets
+`https://tower-finder.retina.fm` over 443 — that remains where public traffic
+enters until the flip.
+
+**The origin is Cloudflare-only, and stays that way.** retina-server enforces
+Cloudflare Authenticated Origin Pulls (`ssl_verify_client on`) plus a
+DOCKER-USER rule that narrows 80 and 443 to Cloudflare's ranges. The edge keeps
+the first half: it requires a client certificate signed by Cloudflare's
+origin-pull CA, refusing anything else with `403`, exempting only peers on
+`127.0.0.0/8` and `172.16.0.0/12` (the droplet itself and its Docker networks)
+so the deploy probe above can run. The second half is retina's to extend —
+`deploy/docker-user-firewall.sh` there sets `PORTS="80,443"`, so **8443 is
+reachable at the TCP layer from anywhere** until `8443` is added to that list.
+Do that before the flip; the TLS-layer refusal is the boundary in the meantime.
+
+**The flip is one manual Cloudflare change**, production only:
+
+> Rules → Origin Rules → Create rule
+> - Name: `tower-finder origin port`
+> - When incoming requests match: `Hostname` `equals` `tower-finder.retina.fm`
+> - Then: **Rewrite to… Destination Port → `8443`**
+
+`tower-finder.retina.fm` is proxied (orange cloud), so the fleet reaches it
+through Cloudflare on 443 and never sees the origin port change. Confirm
+Authenticated Origin Pulls is still on for the zone before flipping — if it were
+off, Cloudflare would present no client certificate and the edge would answer
+403. Creating proxied records and matching rules for the staging and test names
+is optional and orthogonal; they have no DNS today.
+
+**After the flip is verified** (`curl https://tower-finder.retina.fm/api/health`
+still 200, and the request shows up in `docker compose logs edge` rather than in
+retina's nginx), retina-server deletes its `${HOST_LEGACY_REDIRECT}` vhost and
+the `HOST_LEGACY_REDIRECT` environment variable. That is a separate PR in that
+repo, and it must come after, not with, the flip.
+
+**Rollback is deleting the Origin Rule.** Traffic instantly re-enters through
+retina-server's nginx on 443, which still carries the vhost until the step
+above. Nothing has to be redeployed here.
 
 ### One-time setup
 
@@ -166,6 +242,14 @@ local `~/.ssh/config` alias alone leaves every deploy failing at the guard.
 # On each droplet, create the shared network both stacks attach to (idempotent).
 docker network create retina-edge 2>/dev/null || true
 ```
+
+**2b. Origin certificate (every droplet):**
+
+The `edge` container bind-mounts `/etc/ssl/cloudflare` read-only and needs
+`cert.pem`, `key.pem` and `origin-pull-ca.pem` there. retina-server's
+`deploy/setup-server.sh` already places them on every droplet these stacks are
+co-located on, so there is normally nothing to do — but nginx will not start
+without them, and it fails at boot rather than at first request.
 
 **3. Public hostname (production only):**
 

@@ -20,7 +20,18 @@ ENVIRONMENTS = ("prod", "staging", "test")
 ALLOWED_DIVERGENCE = (
     "services.tower-finder-service.container_name",
     "services.tower-finder-service.environment.TOWER_FINDER_ENV",
+    "services.edge.container_name",
+    "services.edge.environment.TFS_EDGE_HOST",
 )
+
+# The hostname each environment's own ingress answers to. Production's is the
+# name the fleet calls; the other two have no DNS record and exist so the three
+# renders stay structurally identical.
+EDGE_HOSTS = {
+    "prod": "tower-finder.retina.fm",
+    "staging": "staging-tower-finder.retina.fm",
+    "test": "test-tower-finder.retina.fm",
+}
 
 
 BACKEND_ENV_SENTINEL_KEY = "TOWER_FINDER_TEST_SENTINEL"
@@ -156,3 +167,48 @@ def test_env_examples_pin_the_project_name():
         text = (REPO_ROOT / "deploy" / f"env.{environment}.example").read_text()
         assert "COMPOSE_PROJECT_NAME=tower-finder-service" in text
         assert f"docker-compose.yml:docker-compose.{environment}.yml" in text
+
+
+def test_edge_serves_its_own_environment_hostname():
+    """server_name comes from this variable; empty would stop nginx booting."""
+    hosts = {
+        environment: render(environment)["services"]["edge"]["environment"]["TFS_EDGE_HOST"]
+        for environment in ENVIRONMENTS
+    }
+    assert hosts == EDGE_HOSTS
+
+
+def test_edge_publishes_8443_on_every_interface():
+    """Cloudflare connects from outside, so a loopback-only publish would make
+    the Origin Rule flip a no-op that only the fleet notices."""
+    for environment in ENVIRONMENTS:
+        ports = render(environment)["services"]["edge"]["ports"]
+        assert len(ports) == 1, ports
+        published = ports[0]
+        assert str(published["published"]) == "8443"
+        assert published["target"] == 8443
+        assert "host_ip" not in published, "8443 must not be bound to a single interface"
+
+
+def test_edge_mounts_the_origin_certificate_read_only():
+    """The Cloudflare origin cert, key and origin-pull CA are a host bind-mount
+    shared with retina-server's nginx. This container only ever reads them."""
+    for environment in ENVIRONMENTS:
+        mounts = {volume["target"]: volume for volume in render(environment)["services"]["edge"]["volumes"]}
+        certs = mounts["/etc/ssl/cloudflare"]
+        assert certs["source"] == "/etc/ssl/cloudflare"
+        assert certs["read_only"] is True
+        # Rendered under this name so it replaces the stock server block rather
+        # than sitting beside it; see docker-compose.yml.
+        template = mounts["/etc/nginx/templates/default.conf.template"]
+        assert template["source"].endswith("deploy/nginx/edge.conf.template")
+        assert template["read_only"] is True
+
+
+def test_edge_reaches_the_app_without_retina_s_network():
+    """retina-edge is retina-server's, and this service's own ingress must not
+    depend on it: the edge→app hop runs over a network this project owns."""
+    for environment in ENVIRONMENTS:
+        services = render(environment)["services"]
+        assert set(services["edge"]["networks"]) == {"internal"}
+        assert "internal" in services["tower-finder-service"]["networks"]
