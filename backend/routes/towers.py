@@ -15,11 +15,13 @@ from services.region_lookup import SUPPORTED_REGIONS, UNSUPPORTED_REGION_DETAIL,
 from services.tower_ranking import (
     _CONFIG_PATH,
     allowed_bands_for_region,
+    apply_config,
     DEFAULT_LIMIT,
     DEFAULT_RADIUS_KM,
     parse_user_frequencies,
     process_and_rank,
     reload_config,
+    validate_config,
 )
 
 router = APIRouter()
@@ -254,7 +256,38 @@ async def update_config(body: dict):
     raw = json.dumps(body)
     if len(raw) > 1_000_000:
         raise HTTPException(status_code=413, detail="Config too large (max 1 MB)")
-    with open(_CONFIG_PATH, "w") as f:
-        f.write(json.dumps(body, indent=2))
-    reload_config()
+
+    # Validate it, prove it applies, and only then write it. _CONFIG_PATH lives
+    # in a persistent volume and reload_config() runs at import, so a config that
+    # reaches disk without applying cleanly outlives both a restart and a
+    # redeploy, recoverable only by hand inside the volume. Writing last means
+    # the file only ever holds a config the running process has accepted, so
+    # there is no rollback to get wrong.
+    error = validate_config(body)
+    if error:
+        raise HTTPException(status_code=400, detail=f"Invalid config: {error}")
+
+    try:
+        apply_config(body)
+    except Exception as exc:
+        # validate_config has a gap. apply_config is all-or-nothing and the file
+        # is still untouched, so the running config is unchanged.
+        logging.exception("Config passed validation but would not apply")
+        raise HTTPException(status_code=400, detail=f"Config could not be applied: {exc}") from exc
+
+    try:
+        with open(_CONFIG_PATH, "w") as f:
+            f.write(json.dumps(body, indent=2))
+    except OSError as exc:
+        # The process has already taken this config but the file has not. Put the
+        # two back in step by re-reading whatever is actually on disk. That read
+        # can itself fail (a truncated write leaves invalid JSON behind), and the
+        # response to report is the write failure either way — the settings still
+        # in memory are then the rejected config, which the log says.
+        logging.exception("Config applied but could not be written")
+        try:
+            reload_config()
+        except Exception:
+            logging.exception("Re-reading the config on disk failed too; in-memory settings are the unwritten config")
+        raise HTTPException(status_code=500, detail=f"Config could not be written: {exc}") from exc
     return {"status": "updated"}

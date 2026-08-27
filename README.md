@@ -40,7 +40,7 @@ Optional env vars:
 | POST | `/api/towers` | Same tower search, enriched with spectrum-analyser measurements. Body: `MeasurementPayload` (see `backend/models/measurements.py`). Only towers the SDR can see are returned — unmatched towers are excluded. Matched towers carry real measured fields (`snr_db`, `score`, `obw_fraction`, `power_db`, `measured=true`). |
 | GET | `/api/elevation?lat&lon` | Ground elevation at a point. The search form pre-fills altitude from this; `GET /api/towers` resolves altitude itself when none is given. 502 if the upstream lookup fails. |
 | GET | `/api/config` | Current ranking config (bands, distance classes, defaults). |
-| PUT | `/api/config` | Replace ranking config; sanity-capped at 1 MB. Requires the admin bearer token (see `TOWER_FINDER_ADMIN_TOKEN`). |
+| PUT | `/api/config` | Replace ranking config; sanity-capped at 1 MB. Requires the admin bearer token (see `TOWER_FINDER_ADMIN_TOKEN`). Validated and applied before it is written (400 if either fails), so the file on the persistent volume only ever holds a config the running process has accepted. |
 
 ## Layout
 
@@ -48,7 +48,8 @@ Optional env vars:
 | --- | --- |
 | `app.py` | FastAPI entry point |
 | `backend/routes/towers.py` | HTTP routes |
-| `backend/services/tower_ranking.py` | Ranking algorithm + config loader |
+| `backend/services/tower_ranking.py` | Ranking algorithm + config loader/validator |
+| `backend/services/tower_coverage.py` | Optional n>=2 coverage-area-added scoring, injected into the ranking as a `coverage_scorer` |
 | `backend/clients/fcc.py` | FCC TV/FM Query CGI client |
 | `backend/clients/maprad.py` | Maprad.io broadcast-systems client |
 | `backend/config/tower_config.json` | Default ranking config (image-shipped) |
