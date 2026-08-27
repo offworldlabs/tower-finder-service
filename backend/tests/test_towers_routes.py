@@ -603,3 +603,21 @@ class TestUserFrequencies:
         r = self._get(client, "lat=33.9&lon=-84.6&source=us&frequencies=abc,,-5")
         assert r.status_code == 200
         assert r.json()["query"]["user_frequencies_mhz"] == []
+
+    def test_repeated_frequencies_key_all_count(self, client):
+        """Starlette keeps only the last occurrence of a repeated key for a
+        scalar-typed query param. requests (used by retina-gui's proxy) sends
+        a list-valued param exactly this way, so a repeated `frequencies` key
+        must not silently drop everything but the last one."""
+        r = self._get(client, "lat=33.9&lon=-84.6&source=us&frequencies=95.5&frequencies=101.1")
+        assert r.status_code == 200
+        assert r.json()["query"]["user_frequencies_mhz"] == [95.5, 101.1]
+
+    def test_many_repeated_frequencies_keys_do_not_error(self, client):
+        """The route bounds what it does with a large repeated-key list rather
+        than joining all of it; the result still respects parse_user_frequencies'
+        own max_count regardless of how many occurrences were sent."""
+        query = "lat=33.9&lon=-84.6&source=us&" + "&".join(f"frequencies={88 + i * 0.001}" for i in range(1000))
+        r = self._get(client, query)
+        assert r.status_code == 200
+        assert len(r.json()["query"]["user_frequencies_mhz"]) <= 10

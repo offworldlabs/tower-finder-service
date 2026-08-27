@@ -527,6 +527,19 @@ def _polygon_centroid(wkt: str) -> tuple[float, float] | None:
     return sum(lats) / len(lats), sum(lngs) / len(lngs)
 
 
+def _within_tolerance(diff: float, tolerance: float) -> bool:
+    """Whether a frequency difference is within tolerance, boundary included.
+
+    A difference of exactly the tolerance is not exactly representable for
+    every pair of decimal MHz values: abs(88.25 - 88.10) is
+    0.15000000000000568, not 0.15, so a raw ``diff <= tolerance`` rejects the
+    documented boundary for most decimal inputs. Rounding to 1 Hz (6 dp of
+    MHz) absorbs that float noise without narrowing genuine mismatches:
+    nothing in this domain is measured or configured to sub-Hz precision.
+    """
+    return round(diff, 6) <= tolerance
+
+
 def _match_measurement(freq_mhz: float, band: str, measurements: list[dict]) -> dict | None:
     """Return the closest measurement to freq_mhz within the band-specific tolerance.
 
@@ -538,18 +551,32 @@ def _match_measurement(freq_mhz: float, band: str, measurements: list[dict]) -> 
     best_diff = float("inf")
     for m in measurements:
         diff = abs(m["freq_mhz"] - freq_mhz)
-        if diff <= tolerance and diff < best_diff:
+        if _within_tolerance(diff, tolerance) and diff < best_diff:
             best = m
             best_diff = diff
     return best
 
 
+# Ceiling on how many comma-separated parts parse_user_frequencies will even
+# look at, independent of how many turn out to be valid. Without it, a long
+# run of unparseable junk walks the whole input before max_count can matter,
+# max_count only counts valid values, so junk that fails float() every time
+# never trips it. Measured: ~600ms for a 2MB junk string, synchronously,
+# inside an async route. This bounds that to a fixed, small amount of work.
+_MAX_FREQUENCY_PARTS = 200
+
+
 def parse_user_frequencies(raw: str, max_count: int = 10) -> list[float]:
-    """Parse a comma-separated string of frequencies in MHz. Returns up to max_count valid values."""
+    """Parse a comma-separated string of frequencies in MHz. Returns up to max_count valid values.
+
+    Bounds its own cost via _MAX_FREQUENCY_PARTS regardless of input size, so a
+    caller (this module is called directly from tests, not only from the route)
+    does not have to bound the input itself.
+    """
     if not raw or not raw.strip():
         return []
     freqs = []
-    for part in raw.split(","):
+    for part in raw.split(",", _MAX_FREQUENCY_PARTS)[:_MAX_FREQUENCY_PARTS]:
         part = part.strip()
         if not part:
             continue
@@ -648,7 +675,9 @@ def process_and_rank(
             measurement = _match_measurement(freq_val, band, measurements) if measurements else None
             freq_matched = measurement is not None
             if not freq_matched and user_frequencies:
-                freq_matched = any(abs(freq_val - uf) <= FREQUENCY_MATCH_TOLERANCE_MHZ for uf in user_frequencies)
+                freq_matched = any(
+                    _within_tolerance(abs(freq_val - uf), FREQUENCY_MATCH_TOLERANCE_MHZ) for uf in user_frequencies
+                )
 
             towers.append(
                 {

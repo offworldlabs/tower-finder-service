@@ -11,13 +11,13 @@ from clients.fcc import fetch_fcc_broadcast_systems
 from clients.maprad import fetch_broadcast_systems
 from core.auth import require_admin
 from models.measurements import MeasurementPayload
+from services import tower_ranking
 from services.region_lookup import SUPPORTED_REGIONS, UNSUPPORTED_REGION_DETAIL, classify_region
 from services.tower_ranking import (
     _CONFIG_PATH,
+    _MAX_FREQUENCY_PARTS,
     allowed_bands_for_region,
     apply_config,
-    DEFAULT_LIMIT,
-    DEFAULT_RADIUS_KM,
     parse_user_frequencies,
     process_and_rank,
     reload_config,
@@ -145,13 +145,20 @@ async def find_towers(
     radius_km: int = Query(0, ge=0, le=300),
     limit: int = Query(0, ge=0, le=200),
     source: str = Query("auto"),
-    frequencies: str = Query(""),
+    frequencies: list[str] = Query(default=[]),
 ):
     source = _resolve_source(source, lat, lon)
 
-    effective_radius = radius_km if radius_km > 0 else DEFAULT_RADIUS_KM
-    effective_limit = limit if limit > 0 else DEFAULT_LIMIT
-    user_freqs = parse_user_frequencies(frequencies)
+    effective_radius = radius_km if radius_km > 0 else tower_ranking.DEFAULT_RADIUS_KM
+    effective_limit = limit if limit > 0 else tower_ranking.DEFAULT_LIMIT
+    # Every occurrence of a repeated `frequencies` key counts (Starlette keeps
+    # only the last one for a scalar-typed param, which is why this is
+    # list-typed), joined back into the comma-separated form
+    # parse_user_frequencies already understands. Slicing first bounds what our
+    # own handler does with the list; it cannot bound Starlette's own
+    # query-string parsing, which has already built the full list by the time
+    # this line runs. That cost is paid upstream and is not capped from here.
+    user_freqs = parse_user_frequencies(",".join(frequencies[:_MAX_FREQUENCY_PARTS]))
 
     raw = await _fetch_raw_towers(source, lat, lon, effective_radius)
 
@@ -198,8 +205,8 @@ async def find_towers_with_measurements(payload: MeasurementPayload):
     """
     source = _resolve_source(payload.source, payload.lat, payload.lon)
 
-    effective_radius = payload.radius_km if payload.radius_km > 0 else DEFAULT_RADIUS_KM
-    effective_limit = payload.limit if payload.limit > 0 else DEFAULT_LIMIT
+    effective_radius = payload.radius_km if payload.radius_km > 0 else tower_ranking.DEFAULT_RADIUS_KM
+    effective_limit = payload.limit if payload.limit > 0 else tower_ranking.DEFAULT_LIMIT
     measurements = [m.model_dump() for m in payload.measurements]
 
     raw = await _fetch_raw_towers(source, payload.lat, payload.lon, effective_radius)

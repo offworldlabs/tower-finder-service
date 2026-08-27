@@ -10,6 +10,11 @@ SERVICE="tower-finder-service"
 PASS=0
 FAIL=0
 
+# SMOKE_FREQ_QUERY / SMOKE_FREQ_ECHO / SMOKE_ELEVATION_QUERY /
+# SMOKE_ELEVATION_KEY / check_contains / assert_*: shared with smoke-test.sh.
+# shellcheck source=deploy/smoke-common.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/smoke-common.sh"
+
 # fetch runs inside $( ), so as a subshell it cannot hand a failure reason
 # back through a variable; it appends one to this file instead, and everything
 # collected is printed once after the results tally rather than interleaved
@@ -20,8 +25,14 @@ trap 'rm -f "$REASONS_FILE"' EXIT
 # Runs a python3 fetch of $1 inside the container and prints "<code>|<body>".
 # A single helper for every endpoint keeps the request shape (timeout,
 # HTTPError handling) in one place instead of duplicated per check.
+#
+# $2, set by the frequencies/elevation retry loop in smoke-common.sh:
+# non-empty while it still has another attempt left after this one. Skips
+# the diagnostic capture below on such a call -- there is no point paying
+# for a second `docker compose exec` to explain a failure that a later
+# attempt may still turn into a pass.
 fetch() {
-  local path="$1"
+  local path="$1" more_attempts="${2:-}"
   local script="
 import urllib.error
 import urllib.request
@@ -37,6 +48,10 @@ except Exception:
   local output
   if output=$(docker compose exec -T "$SERVICE" python3 -c "$script" 2>/dev/null); then
     echo "$output"
+    return
+  fi
+  if [ -n "$more_attempts" ]; then
+    echo "DOWN|"
     return
   fi
   # docker compose exec itself failed here (no running container, no such
@@ -80,6 +95,8 @@ fi
 
 check_status "GET /api/config" "/api/config" "200"
 check_status "GET /api/towers (Greenville SC)" "/api/towers?lat=34.85&lon=-82.40" "200"
+check_contains "GET /api/towers (frequencies honoured)" assert_frequencies_honoured "/api/towers?${SMOKE_FREQ_QUERY}"
+check_contains "GET /api/elevation" assert_elevation_contract "/api/elevation?${SMOKE_ELEVATION_QUERY}"
 
 if [ -n "${EXPECT_ENV:-}" ]; then
   printf "  %-40s " "environment is ${EXPECT_ENV}"

@@ -217,6 +217,11 @@ _USER_LON = -84.388
 _FM_DEVICE = _device(freq_mhz=95.5, lat=33.93, lon=-84.388, callsign="WXYZ")
 _FM_SYSTEM = _system([_FM_DEVICE], licence_type="Broadcast", licence_subtype="FM")
 
+# Same spot, a UHF tower, used to pin the FREQUENCY_MATCH_TOLERANCE_MHZ (5.0)
+# boundary at a decimal pair with float noise (see TestUserFrequencyRanking).
+_UHF_BOUNDARY_DEVICE = _device(freq_mhz=507.2, lat=33.93, lon=-84.388, callsign="WBND")
+_UHF_BOUNDARY_SYSTEM = _system([_UHF_BOUNDARY_DEVICE], licence_type="Broadcast", licence_subtype="TV")
+
 
 class TestProcessAndRank:
     # ── Basic smoke tests ────────────────────────────────────────────────────
@@ -647,6 +652,13 @@ class TestMatchMeasurement:
         # 0.20 MHz offset — safely outside ±0.15 MHz
         assert _match_measurement(95.70, "FM", [m]) is None
 
+    def test_decimal_exact_fm_boundary_matches(self):
+        """abs(88.25 - 88.10) is 0.15000000000000568 in IEEE-754, not 0.15,
+        a raw float `<=` against the 0.15 MHz FM tolerance rejects this
+        boundary pair even though the two are exactly 0.15 MHz apart."""
+        m = _make_measurement(88.25, band="FM")
+        assert _match_measurement(88.10, "FM", [m]) is m
+
     def test_within_uhf_tolerance(self):
         m = _make_measurement(546.0, band="UHF")
         # ±4 MHz tolerance for UHF
@@ -757,6 +769,17 @@ class TestParseUserFrequencies:
     def test_negative_skipped(self):
         assert parse_user_frequencies("-5, 95.5") == [95.5]
 
+    def test_bounds_cost_on_a_huge_junk_prefix(self):
+        """A caller cannot force an unbounded walk by burying a valid value
+        behind a long run of unparseable junk: parse_user_frequencies only
+        examines a bounded prefix of the input, so a value past that prefix
+        (however valid) is never reached. Without this bound, max_count can't
+        engage either: it only counts valid values, and junk that fails
+        float() every time never trips it, so the function would walk the
+        whole input regardless of size (~600ms measured for a 2MB string)."""
+        raw = ",".join(["junk"] * 10_000 + ["95.5"])
+        assert parse_user_frequencies(raw) == []
+
 
 # ── User frequencies in ranking ──────────────────────────────────────────────
 
@@ -789,6 +812,13 @@ class TestUserFrequencyRanking:
     def test_no_match_outside_tolerance(self):
         result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON, user_frequencies=[101.1])
         assert result[0]["frequency_matched"] is False
+
+    def test_decimal_exact_boundary_matches(self):
+        """abs(507.2 - 512.2) is 5.000000000000057 in IEEE-754, not 5.0, a
+        raw float `<=` against FREQUENCY_MATCH_TOLERANCE_MHZ (5.0) rejects
+        this boundary pair even though the two are exactly 5.0 MHz apart."""
+        result = process_and_rank([_UHF_BOUNDARY_SYSTEM], _USER_LAT, _USER_LON, user_frequencies=[512.2])
+        assert result[0]["frequency_matched"] is True
 
     def test_user_freqs_never_set_measured(self):
         result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON, user_frequencies=[95.5])
