@@ -97,6 +97,10 @@ jobs:
             test -f backend/.env || {
               echo "backend/.env is missing; secrets would be lost"; exit 1; }
             cp deploy/env.staging.example .env
+            # Top up with this host's own CARTO basemap key — see the note in
+            # deploy/env.<env>.example. Guarded rather than chained with &&: a host
+            # with no key must build watermarked tiles, not fail its deploy.
+            if [ -f /root/.secrets/carto.env ]; then cat /root/.secrets/carto.env >> .env; fi
             docker compose up -d --build
             healthy=""
             for i in $(seq 1 12); do
@@ -181,6 +185,10 @@ jobs:
             test -f backend/.env || {
               echo "backend/.env is missing; secrets would be lost"; exit 1; }
             cp deploy/env.prod.example .env
+            # Top up with this host's own CARTO basemap key — see the note in
+            # deploy/env.<env>.example. Guarded rather than chained with &&: a host
+            # with no key must build watermarked tiles, not fail its deploy.
+            if [ -f /root/.secrets/carto.env ]; then cat /root/.secrets/carto.env >> .env; fi
             docker compose up -d --build
             # `healthy` rather than an `exit 0` inside the loop: success has to
             # fall through to the edge probe below, which an early exit would
@@ -277,6 +285,10 @@ jobs:
             test -f backend/.env || {
               echo "backend/.env is missing; secrets would be lost"; exit 1; }
             cp deploy/env.test.example .env
+            # Top up with this host's own CARTO basemap key — see the note in
+            # deploy/env.<env>.example. Guarded rather than chained with &&: a host
+            # with no key must build watermarked tiles, not fail its deploy.
+            if [ -f /root/.secrets/carto.env ]; then cat /root/.secrets/carto.env >> .env; fi
             docker compose up -d --build
             healthy=""
             for i in $(seq 1 12); do

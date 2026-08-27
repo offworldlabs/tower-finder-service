@@ -2,6 +2,20 @@
 
 declare module "*.css" {}
 
+interface ImportMetaEnv {
+  /**
+   * CARTO basemap key, baked into the bundle at build time. Unset means
+   * unkeyed tile URLs, which CARTO serves stamped "API KEY REQUIRED". See
+   * utils/basemap.ts for why a bundled key is the supported shape for this
+   * one.
+   */
+  readonly VITE_CARTO_API_KEY?: string;
+}
+
+interface ImportMeta {
+  readonly env: ImportMetaEnv;
+}
+
 /* Leaflet internal icon URL fix */
 declare module "leaflet" {
   namespace Icon {
