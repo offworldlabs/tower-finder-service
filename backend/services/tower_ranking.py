@@ -528,14 +528,12 @@ def _polygon_centroid(wkt: str) -> tuple[float, float] | None:
 
 
 def _within_tolerance(diff: float, tolerance: float) -> bool:
-    """Whether a frequency difference is within tolerance, boundary included.
+    """Whether diff is within tolerance, boundary included.
 
-    A difference of exactly the tolerance is not exactly representable for
-    every pair of decimal MHz values: abs(88.25 - 88.10) is
-    0.15000000000000568, not 0.15, so a raw ``diff <= tolerance`` rejects the
-    documented boundary for most decimal inputs. Rounding to 1 Hz (6 dp of
-    MHz) absorbs that float noise without narrowing genuine mismatches:
-    nothing in this domain is measured or configured to sub-Hz precision.
+    Rounds to 6 dp (nearest 1 Hz) so exact-boundary float noise doesn't
+    reject a genuine match; the same rounding also admits a diff up to
+    ~0.5 Hz past tolerance. Negligible: every tolerance in this module is
+    kHz to MHz wide.
     """
     return round(diff, 6) <= tolerance
 
@@ -557,26 +555,26 @@ def _match_measurement(freq_mhz: float, band: str, measurements: list[dict]) -> 
     return best
 
 
-# Ceiling on how many comma-separated parts parse_user_frequencies will even
-# look at, independent of how many turn out to be valid. Without it, a long
-# run of unparseable junk walks the whole input before max_count can matter,
-# max_count only counts valid values, so junk that fails float() every time
-# never trips it. Measured: ~600ms for a 2MB junk string, synchronously,
-# inside an async route. This bounds that to a fixed, small amount of work.
-_MAX_FREQUENCY_PARTS = 200
+# Ceiling on the raw input length examined, applied before the comma split.
+# Bounds the cost of a single comma-free value of any size reaching float(),
+# independent of max_count (which only counts values already found valid).
+_MAX_FREQUENCY_INPUT_CHARS = 2000
 
 
 def parse_user_frequencies(raw: str, max_count: int = 10) -> list[float]:
     """Parse a comma-separated string of frequencies in MHz. Returns up to max_count valid values.
 
-    Bounds its own cost via _MAX_FREQUENCY_PARTS regardless of input size, so a
-    caller (this module is called directly from tests, not only from the route)
-    does not have to bound the input itself.
+    Bounds its own cost via _MAX_FREQUENCY_INPUT_CHARS regardless of input size,
+    so a caller (this module is called directly from tests, not only from the
+    route) does not have to bound the input itself.
     """
     if not raw or not raw.strip():
         return []
+    if len(raw) > _MAX_FREQUENCY_INPUT_CHARS:
+        # Drop the truncated trailing token rather than parse a partial value.
+        raw = raw[:_MAX_FREQUENCY_INPUT_CHARS].rsplit(",", 1)[0]
     freqs = []
-    for part in raw.split(",", _MAX_FREQUENCY_PARTS)[:_MAX_FREQUENCY_PARTS]:
+    for part in raw.split(","):
         part = part.strip()
         if not part:
             continue

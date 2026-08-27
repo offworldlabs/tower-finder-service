@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from app import app
 from core.auth import ENV_VAR
-from tests._helpers import device, system
+from tests._helpers import device, get_towers, system
 
 
 @pytest.fixture()
@@ -564,18 +564,7 @@ class TestUserFrequencies:
     ]
 
     def _get(self, client, query):
-        with (
-            unittest.mock.patch("routes.towers.API_KEY", ""),
-            unittest.mock.patch(
-                "routes.towers.fetch_fcc_broadcast_systems",
-                new=unittest.mock.AsyncMock(return_value=self._SYSTEMS),
-            ),
-            unittest.mock.patch(
-                "routes.towers._batch_lookup_elevations",
-                new=unittest.mock.AsyncMock(return_value={}),
-            ),
-        ):
-            return client.get(f"/api/towers?{query}")
+        return get_towers(client, query, self._SYSTEMS)
 
     def test_frequencies_echoed_in_query(self, client):
         r = self._get(client, "lat=33.9&lon=-84.6&source=us&frequencies=1234.5")
@@ -584,7 +573,12 @@ class TestUserFrequencies:
 
     def test_contract_echo_shape(self, client):
         """Byte-for-byte what assert_tower_contract greps for: key name and
-        JSON rendering both count, so this pins the serialized form."""
+        JSON rendering both count, so this pins the serialized form.
+
+        Pinned the same way by SMOKE_FREQ_ECHO in deploy/smoke-common.sh and by
+        TOWER_CONTRACT_ECHO in retina-server's deploy/tower-contract.sh. Change
+        the shape, change all three.
+        """
         r = self._get(client, "lat=33.9&lon=-84.6&source=us&frequencies=1234.5")
         assert '"user_frequencies_mhz":[1234.5]' in r.content.decode()
 
@@ -614,10 +608,13 @@ class TestUserFrequencies:
         assert r.json()["query"]["user_frequencies_mhz"] == [95.5, 101.1]
 
     def test_many_repeated_frequencies_keys_do_not_error(self, client):
-        """The route bounds what it does with a large repeated-key list rather
-        than joining all of it; the result still respects parse_user_frequencies'
-        own max_count regardless of how many occurrences were sent."""
-        query = "lat=33.9&lon=-84.6&source=us&" + "&".join(f"frequencies={88 + i * 0.001}" for i in range(1000))
+        """A valid value placed past parse_user_frequencies' own input-length
+        bound, behind 2000 repeated keys that never parse as floats, must not
+        reach the response. Junk never trips max_count, so unlike a
+        repeated-but-valid payload this fails if the length bound is
+        removed rather than passing regardless."""
+        junk = "&".join(f"frequencies=notafreq{i}" for i in range(2000))
+        query = f"lat=33.9&lon=-84.6&source=us&{junk}&frequencies=95.5"
         r = self._get(client, query)
         assert r.status_code == 200
-        assert len(r.json()["query"]["user_frequencies_mhz"]) <= 10
+        assert r.json()["query"]["user_frequencies_mhz"] == []

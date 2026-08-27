@@ -1,81 +1,67 @@
 #!/usr/bin/env bash
 # Shared post-deploy assertions for tower-finder-service's smoke tests.
+# Sourced by deploy/smoke-test.sh (curl, over a public URL) and
+# deploy/smoke-local.sh (docker compose exec, no curl in the image), kept
+# here rather than duplicated into each so the two cannot drift apart from
+# one another. Not meant to run standalone: with no `fetch` in scope there
+# is no transport to check anything over.
 #
-# A status code cannot tell a query parameter that was honoured from one
-# FastAPI silently dropped -- both answer 200 -- so `frequencies` is checked
-# by asserting the response body, not the code. /api/elevation gets the same
-# treatment: a shape check for the key callers actually read, since a route
-# this new has no other coverage after deploy. See retina-server's
-# deploy/tower-contract.sh, which already asserts this same service's
-# production instance the same way, from the outside.
-#
-# Sourced by both deploy/smoke-test.sh (curl, over a public URL) and
-# deploy/smoke-local.sh (docker compose exec -- the image has no curl)
-# rather than duplicated into each: the assertions are identical and only
-# the transport differs, and a fork of this logic has already drifted once
-# within a single commit.
-#
-# The transport is the seam. Each caller defines its own `fetch <target>`,
-# which makes one request and prints "<code>|<body>", always returning 0
-# itself -- failure is reported through the printed code, never through
-# fetch's exit status, so one failed probe can never trip the caller's
-# `set -e`. <target> means whatever that script's own fetch expects: a full
-# URL for curl, a bare path for docker exec. Code "000" is the shared
-# sentinel for "no HTTP response at all" (DNS/connect/timeout/exec
-# failure), whichever transport produced it; smoke-local.sh's fetch also
-# uses "DOWN" for the same thing when `docker compose exec` itself fails,
-# and is treated identically below.
-#
-# check_contains, below, expects the sourcing script to already have
-# integer PASS and FAIL counters in scope, matching its own check_status.
-#
-# Not meant to run standalone: with no `fetch` in scope there is no
-# transport to check anything over.
+# `frequencies` and /api/elevation are asserted against the response body,
+# not the status code: FastAPI answers 200 whether or not it honoured a
+# query parameter, so status alone cannot tell "honoured" from "silently
+# dropped". See retina-server's deploy/tower-contract.sh, which asserts
+# this same service's production instance the same way, from outside.
 
-# Phoenix, AZ. No broadcast tower transmits at 1234.5 MHz, so the echo below
-# can only be this probe's own value, never a tower's. Same coordinates and
-# frequency as retina-server's tower-contract.sh, which asserts this
-# service's production instance from outside its own pipeline; this is the
-# same check, run from inside this one. Reused for /api/elevation too, so
-# there is a single location to reason about rather than one per endpoint.
+# Phoenix, AZ: inland desert terrain, well inside open-meteo's DEM coverage
+# (a direct query returns a plain 335.0, never null), so it doubles as the
+# /api/elevation probe below without risking a legitimate no-data answer at
+# this specific point. No broadcast tower transmits at 1234.5 MHz, so the
+# echo can only be this probe's own value, never a tower's. Same
+# coordinates and frequency as retina-server's deploy/tower-contract.sh,
+# which runs the same check against this service's production instance
+# from outside.
 SMOKE_PROBE_QUERY="lat=33.45&lon=-112.07"
 SMOKE_FREQ_QUERY="${SMOKE_PROBE_QUERY}&frequencies=1234.5"
-# Exact shape, not just the value: key name and JSON rendering both count,
-# since the match below is fixed-string. Pinned on the other side too, by
-# backend/tests/test_towers_routes.py::test_contract_echo_shape.
+# Exact shape, not just the value: the match below is fixed-string, so key
+# name and JSON rendering both count. Pinned in two other places this copy
+# cannot see: backend/tests/test_towers_routes.py::test_contract_echo_shape
+# in this repo, and TOWER_CONTRACT_ECHO in retina-server's
+# deploy/tower-contract.sh. Change the shape, change all three.
 SMOKE_FREQ_ECHO='"user_frequencies_mhz":[1234.5]'
 SMOKE_ELEVATION_QUERY="${SMOKE_PROBE_QUERY}"
 SMOKE_ELEVATION_KEY='"elevation_m"'
 
-# One retry, one sleep. Both routes below fan out to a third party (FCC,
-# open-meteo) and a blip there must not read as this deploy's fault -- but
-# only for the failure kinds a blip actually produces, see
-# _smoke_fetch_with_retry, so a genuine application fault still fails on
-# the first attempt rather than being retried until it happens to clear.
-# Overridable like BASE_URL/SERVICE above, so a test harness can shorten the
-# sleep without touching this file.
+# Retry budget for _smoke_fetch_with_retry, below. Overridable via env so a
+# harness can shorten the sleep without editing this file.
 SMOKE_RETRY_ATTEMPTS="${SMOKE_RETRY_ATTEMPTS:-2}"
 SMOKE_RETRY_SLEEP="${SMOKE_RETRY_SLEEP:-5}"
 
 # _smoke_fetch_with_retry <target>
-# Calls the caller's fetch(), retrying only "000"/"DOWN" (unreachable, no
-# response at all) and "502". Both routes below turn a third-party failure
-# into exactly 502 and nothing else does (routes/towers.py wraps the FCC
-# call and the open-meteo call each in their own broad except, and neither
-# raises any other status) -- so 502 here is provably the dependency, not
-# our own code, and any other code is a real, definite answer from the app
-# and is not retried. Sets SMOKE_LAST_CODE, SMOKE_LAST_BODY and
-# SMOKE_ATTEMPT_CODES (comma-separated, one entry per attempt actually
-# made, so a reader can see a failure mode that changed between attempts
-# rather than just the last one). Returns 0 once a 200 is seen, 1 once
-# retries are exhausted or a non-retryable code is seen.
+# Retries the caller's fetch() on a transport failure or a 502: up to
+# SMOKE_RETRY_ATTEMPTS attempts, sleeping SMOKE_RETRY_SLEEP between them.
+# fetch always returns 0 and reports failure through its printed
+# "<code>|<body>", never its exit status, so a failed probe can never trip
+# the caller's `set -e`. "000" and smoke-local.sh's "DOWN" both mean no
+# HTTP response at all and are treated identically.
 #
-# Passes fetch a second argument, non-empty while a retry is still possible.
-# smoke-test.sh's fetch ignores it. smoke-local.sh's uses it to skip the
-# stderr-capturing second `docker compose exec` it otherwise runs to explain
-# a failure: paying for that, and recording it, on an attempt this loop is
-# about to retry anyway would leave a stale "docker compose exec failed"
-# diagnostic sitting next to a check that goes on to pass.
+# 502 is retryable because routes/towers.py answers it only when the FCC or
+# Maprad fetch itself raises -- for the frequencies check, a real
+# dependency failure. /api/elevation is not as clean: it collapses
+# "open-meteo failed outright" and "open-meteo answered 200 with no data
+# for this point" into the same 502, so a 502 there can persist with no
+# dependency outage involved. _smoke_assert_contains, below, reports which
+# case a failure was.
+#
+# Sets SMOKE_LAST_CODE, SMOKE_LAST_BODY and SMOKE_ATTEMPT_CODES
+# (comma-separated, one entry per attempt made, so a failure mode that
+# changed between attempts is visible rather than just the last one).
+# Returns 0 on the first 200 seen, 1 once attempts are exhausted or a
+# non-retryable code is seen.
+#
+# Passes fetch a second argument, non-empty while a retry is still
+# possible; smoke-test.sh's fetch ignores it, smoke-local.sh's uses it to
+# skip capturing a diagnostic for an attempt this loop is about to retry
+# anyway.
 _smoke_fetch_with_retry() {
     local target="$1" attempt=1 resp code body more_attempts
     SMOKE_ATTEMPT_CODES=""
@@ -107,10 +93,10 @@ _smoke_fetch_with_retry() {
 }
 
 # _smoke_assert_contains <label> <target> <expected>
-# Shared body for both checks below. Prints why it failed in a form that
-# tells "unreachable" apart from "answered wrong" on sight; returns
-# non-zero. Never retries a 200 with the wrong body: that is a definite,
-# repeatable answer from the app, not a transient one.
+# Shared body for both checks below: fetches with retry, then greps the
+# body for $expected. Never retries a 200 with the wrong body, since that
+# is a definite, repeatable answer from the app, not a transient one.
+# Prints why it failed; returns non-zero.
 _smoke_assert_contains() {
     local label="$1" target="$2" expected="$3"
     if ! _smoke_fetch_with_retry "$target"; then
@@ -119,8 +105,20 @@ _smoke_assert_contains() {
                 echo "${label}: unreachable [${SMOKE_ATTEMPT_CODES}]: ${target}"
                 ;;
             502)
-                echo "${label}: upstream still failing [${SMOKE_ATTEMPT_CODES}]: ${target}"
-                echo "    Third-party dependency (FCC/open-meteo), not this route; see deploy/smoke-common.sh."
+                # An attempt sequence ending in 502 is, by construction,
+                # only ever 000/DOWN/502 throughout (anything else ends the
+                # retry loop early) -- so no 000/DOWN entry means every
+                # attempt got 502: the same answer every time, not a blip.
+                case ",${SMOKE_ATTEMPT_CODES}," in
+                    *,000,* | *,DOWN,*)
+                        echo "${label}: upstream still failing [${SMOKE_ATTEMPT_CODES}]: ${target}"
+                        echo "    Failure mode changed between attempts; looks like a genuine third-party blip (FCC/open-meteo)."
+                        ;;
+                    *)
+                        echo "${label}: upstream returned 502 on every attempt [${SMOKE_ATTEMPT_CODES}]: ${target}"
+                        echo "    Same result every time, not a blip: check the probe point or the route itself, not just the dependency."
+                        ;;
+                esac
                 ;;
             *)
                 echo "${label}: answered HTTP ${SMOKE_LAST_CODE} [${SMOKE_ATTEMPT_CODES}], not retried: ${target}"
@@ -150,7 +148,8 @@ assert_elevation_contract() {
 
 # check_contains <name> <assert-fn> <target>
 # check_status's counterpart for the assertions above: same aligned name
-# column, same PASS/FAIL accounting, one line of reason on failure.
+# column, same one-line reason on failure. Expects integer PASS and FAIL
+# counters already in scope, exactly like check_status.
 check_contains() {
     local name="$1" assert_fn="$2" target="$3" reason
     printf "  %-40s " "$name"

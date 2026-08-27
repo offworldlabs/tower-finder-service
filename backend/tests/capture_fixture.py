@@ -101,10 +101,12 @@ async def _capture() -> None:
     print()
     print("  Detected signals with NO matching DB tower (phantoms or out-of-area):")
     for m in sorted(measurements, key=lambda x: x["freq_mhz"]):
-        from services.tower_ranking import MEASUREMENT_TOLERANCE_MHZ
+        from services.tower_ranking import MEASUREMENT_TOLERANCE_MHZ, _within_tolerance
 
         tol = MEASUREMENT_TOLERANCE_MHZ.get(m["band"], 1.0)
-        hit = any(abs(t["frequency_mhz"] - m["freq_mhz"]) <= tol and t["band"] == m["band"] for t in matched)
+        hit = any(
+            _within_tolerance(abs(t["frequency_mhz"] - m["freq_mhz"]), tol) and t["band"] == m["band"] for t in matched
+        )
         if not hit:
             print(
                 f"    {m['band']:3s} {m['freq_mhz']:6.1f} MHz  score={m['score']:.3f}"

@@ -8,6 +8,7 @@ from services.tower_ranking import (
     FM_ONLY,
     MEASUREMENT_TOLERANCE_MHZ,
     SENSITIVITY_DBM,
+    _MAX_FREQUENCY_INPUT_CHARS,
     _as_float,
     _match_measurement,
     bearing_to_cardinal,
@@ -770,15 +771,25 @@ class TestParseUserFrequencies:
         assert parse_user_frequencies("-5, 95.5") == [95.5]
 
     def test_bounds_cost_on_a_huge_junk_prefix(self):
-        """A caller cannot force an unbounded walk by burying a valid value
-        behind a long run of unparseable junk: parse_user_frequencies only
-        examines a bounded prefix of the input, so a value past that prefix
-        (however valid) is never reached. Without this bound, max_count can't
-        engage either: it only counts valid values, and junk that fails
-        float() every time never trips it, so the function would walk the
-        whole input regardless of size (~600ms measured for a 2MB string)."""
+        """A valid value buried behind a long run of unparseable junk is
+        never reached: junk never trips max_count, only the length bound
+        does."""
         raw = ",".join(["junk"] * 10_000 + ["95.5"])
         assert parse_user_frequencies(raw) == []
+
+    def test_oversized_input_is_truncated_without_corrupting_the_boundary_value(self):
+        """The length bound must drop a token it cuts through rather than
+        parse the surviving prefix as a different, shorter value: a raw
+        string engineered so the cutoff lands 5 characters into "101.55"
+        must not yield 101.5 (silent corruption) or 101.55 (it's beyond the
+        bound). Removing the bound entirely makes 101.55 reachable, so this
+        also stands as the regression test for the bound itself."""
+        raw = ("," * (_MAX_FREQUENCY_INPUT_CHARS - 5)) + "101.55"
+        assert len(raw) > _MAX_FREQUENCY_INPUT_CHARS
+
+        result = parse_user_frequencies(raw)
+
+        assert result == []
 
 
 # ── User frequencies in ranking ──────────────────────────────────────────────

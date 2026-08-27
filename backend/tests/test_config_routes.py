@@ -11,14 +11,13 @@ carries a valid token.
 """
 
 import json
-import unittest.mock
 
 import pytest
 from core.auth import ENV_VAR
 from fastapi.testclient import TestClient
 from routes import towers as towers_route
 from services import tower_ranking
-from tests._helpers import device, system
+from tests._helpers import device, get_towers, system
 
 from app import app
 
@@ -50,15 +49,9 @@ def client(monkeypatch):
 
 @pytest.fixture()
 def config_path(tmp_path, monkeypatch):
-    """A scratch overlay for the route, seeded with the sentinel config.
-
-    routes/towers.py binds _CONFIG_PATH at import, so the route's own name is
-    the one to patch — patching services.tower_ranking._CONFIG_PATH would leave
-    the endpoint writing the real overlay.
-    """
+    """A scratch overlay for the route, seeded with the sentinel config."""
     path = tmp_path / "tower_config.json"
     path.write_text(json.dumps(SENTINEL))
-    monkeypatch.setattr(towers_route, "_CONFIG_PATH", path)
     monkeypatch.setattr(tower_ranking, "_CONFIG_PATH", path)
     return path
 
@@ -118,7 +111,7 @@ class TestRejectsWithoutWriting:
     def test_unwritable_path_reports_the_write_failure(self, client, config_path, monkeypatch):
         """The config has applied but the file has not: a 500, not a silent
         divergence dressed up as success."""
-        monkeypatch.setattr(towers_route, "_CONFIG_PATH", config_path.parent / "missing-dir" / "tower_config.json")
+        monkeypatch.setattr(tower_ranking, "_CONFIG_PATH", config_path.parent / "missing-dir" / "tower_config.json")
 
         r = _put(client, VALID)
 
@@ -186,41 +179,24 @@ class TestAcceptsAndApplies:
 
 
 class TestConfigChangeReachesRoute:
-    """routes/towers.py used to import DEFAULT_LIMIT / DEFAULT_RADIUS_KM by
-    name, binding a copy at module load time. apply_config() rebinds
-    tower_ranking's own globals, which a name imported that way never sees
-    again: checking tower_ranking.DEFAULT_LIMIT after a PUT proves the
-    setting changed, but not that the route can see it, which is the actual
-    bug: these round-trip through GET /api/towers to prove the route itself
-    observes the new value on its very next request."""
-
-    def _get_towers(self, client, query, raw_systems):
-        with (
-            unittest.mock.patch("routes.towers.API_KEY", ""),
-            unittest.mock.patch(
-                "routes.towers.fetch_fcc_broadcast_systems",
-                new=unittest.mock.AsyncMock(return_value=raw_systems),
-            ),
-            unittest.mock.patch(
-                "routes.towers._batch_lookup_elevations",
-                new=unittest.mock.AsyncMock(return_value={}),
-            ),
-        ):
-            return client.get(f"/api/towers?{query}")
+    """Checking tower_ranking.DEFAULT_LIMIT after a PUT proves the setting
+    changed, not that the route sees it. These round-trip through GET
+    /api/towers to prove the route itself observes the new value on its
+    very next request."""
 
     def test_put_default_limit_is_seen_by_get_towers(self, client, config_path):
         towers = [device(95.5 + i * 0.4, 33.9, -84.6, callsign=f"T{i}", eirp=10000) for i in range(3)]
         raw = [system(towers, licence_type="Broadcast", licence_subtype="FM")]
         query = "lat=33.9&lon=-84.6&source=us"
 
-        before = self._get_towers(client, query, raw)
+        before = get_towers(client, query, raw)
         assert len(before.json()["towers"]) == 3  # baseline default_limit comfortably covers 3
 
         body = dict(VALID, search={"default_radius_km": 80, "default_limit": 1})
         r = _put(client, body)
         assert r.status_code == 200
 
-        after = self._get_towers(client, query, raw)
+        after = get_towers(client, query, raw)
         assert len(after.json()["towers"]) == 1
         assert after.json()["count"] == 1
 
@@ -230,7 +206,7 @@ class TestConfigChangeReachesRoute:
         raw = [system([near, far], licence_type="Broadcast", licence_subtype="FM")]
         query = "lat=33.9&lon=-84.6&source=us"
 
-        before = self._get_towers(client, query, raw)
+        before = get_towers(client, query, raw)
         # Baseline default_radius_km (shipped 80 km) comfortably covers ~56 km.
         assert {t["callsign"] for t in before.json()["towers"]} == {"NEAR", "FAR"}
 
@@ -238,5 +214,5 @@ class TestConfigChangeReachesRoute:
         r = _put(client, body)
         assert r.status_code == 200
 
-        after = self._get_towers(client, query, raw)
+        after = get_towers(client, query, raw)
         assert {t["callsign"] for t in after.json()["towers"]} == {"NEAR"}

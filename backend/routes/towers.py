@@ -14,8 +14,6 @@ from models.measurements import MeasurementPayload
 from services import tower_ranking
 from services.region_lookup import SUPPORTED_REGIONS, UNSUPPORTED_REGION_DETAIL, classify_region
 from services.tower_ranking import (
-    _CONFIG_PATH,
-    _MAX_FREQUENCY_PARTS,
     allowed_bands_for_region,
     apply_config,
     parse_user_frequencies,
@@ -151,14 +149,13 @@ async def find_towers(
 
     effective_radius = radius_km if radius_km > 0 else tower_ranking.DEFAULT_RADIUS_KM
     effective_limit = limit if limit > 0 else tower_ranking.DEFAULT_LIMIT
-    # Every occurrence of a repeated `frequencies` key counts (Starlette keeps
-    # only the last one for a scalar-typed param, which is why this is
-    # list-typed), joined back into the comma-separated form
-    # parse_user_frequencies already understands. Slicing first bounds what our
-    # own handler does with the list; it cannot bound Starlette's own
-    # query-string parsing, which has already built the full list by the time
-    # this line runs. That cost is paid upstream and is not capped from here.
-    user_freqs = parse_user_frequencies(",".join(frequencies[:_MAX_FREQUENCY_PARTS]))
+    # A repeated `frequencies` key must count every occurrence, which is why
+    # this is list-typed rather than scalar; joined back into the
+    # comma-separated form parse_user_frequencies understands and bounds.
+    # Starlette has already parsed and allocated the full query string by the
+    # time this line runs; today it's uvicorn's request-line limit and
+    # nginx's header-buffer limit at the ingress that cap that, not this code.
+    user_freqs = parse_user_frequencies(",".join(frequencies))
 
     raw = await _fetch_raw_towers(source, lat, lon, effective_radius)
 
@@ -253,7 +250,7 @@ async def get_elevation(
 
 @router.get("/api/config")
 async def get_config():
-    with open(_CONFIG_PATH) as f:
+    with open(tower_ranking._CONFIG_PATH) as f:
         return json.load(f)
 
 
@@ -283,7 +280,7 @@ async def update_config(body: dict):
         raise HTTPException(status_code=400, detail=f"Config could not be applied: {exc}") from exc
 
     try:
-        with open(_CONFIG_PATH, "w") as f:
+        with open(tower_ranking._CONFIG_PATH, "w") as f:
             f.write(json.dumps(body, indent=2))
     except OSError as exc:
         # The process has already taken this config but the file has not. Put the
