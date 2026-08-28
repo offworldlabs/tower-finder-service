@@ -135,6 +135,15 @@ async def _enrich_with_elevation(towers: list) -> None:
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 
+# parse_user_frequencies bounds the string the join below produces, not the
+# join itself: Starlette has already built the full `frequencies` list by the
+# time this line runs, so this is the only thing in this code that bounds
+# what the join costs. Sized well above any real request (the response caps
+# at 10 values regardless) and well under where the transport stops a request
+# of short repeated keys, so it costs this code nothing to enforce.
+_MAX_FREQUENCY_OCCURRENCES = 200
+
+
 @router.get("/api/towers")
 async def find_towers(
     lat: float = Query(..., ge=-90, le=90),
@@ -152,10 +161,7 @@ async def find_towers(
     # A repeated `frequencies` key must count every occurrence, which is why
     # this is list-typed rather than scalar; joined back into the
     # comma-separated form parse_user_frequencies understands and bounds.
-    # Starlette has already parsed and allocated the full query string by the
-    # time this line runs; today it's uvicorn's request-line limit and
-    # nginx's header-buffer limit at the ingress that cap that, not this code.
-    user_freqs = parse_user_frequencies(",".join(frequencies))
+    user_freqs = parse_user_frequencies(",".join(frequencies[:_MAX_FREQUENCY_OCCURRENCES]))
 
     raw = await _fetch_raw_towers(source, lat, lon, effective_radius)
 
@@ -250,6 +256,9 @@ async def get_elevation(
 
 @router.get("/api/config")
 async def get_config():
+    # Dotted access, not a by-value import: tests monkeypatch
+    # tower_ranking._CONFIG_PATH to a scratch path, which only takes effect on
+    # a lookup made at call time against the module.
     with open(tower_ranking._CONFIG_PATH) as f:
         return json.load(f)
 
@@ -280,6 +289,9 @@ async def update_config(body: dict):
         raise HTTPException(status_code=400, detail=f"Config could not be applied: {exc}") from exc
 
     try:
+        # Dotted access: see get_config above. A by-value import would write
+        # to the path bound at import time, missing a test's monkeypatch and
+        # writing outside the sandbox it set up.
         with open(tower_ranking._CONFIG_PATH, "w") as f:
             f.write(json.dumps(body, indent=2))
     except OSError as exc:

@@ -105,18 +105,33 @@ _smoke_assert_contains() {
                 echo "${label}: unreachable [${SMOKE_ATTEMPT_CODES}]: ${target}"
                 ;;
             502)
-                # An attempt sequence ending in 502 is, by construction,
-                # only ever 000/DOWN/502 throughout (anything else ends the
-                # retry loop early) -- so no 000/DOWN entry means every
-                # attempt got 502: the same answer every time, not a blip.
+                # By construction this is only ever 000/DOWN/502
+                # throughout (anything else ends the retry loop early);
+                # whether a 000/DOWN appears tells the two patterns apart.
                 case ",${SMOKE_ATTEMPT_CODES}," in
                     *,000,* | *,DOWN,*)
+                        # An unreachable attempt means our own container
+                        # or the smoke transport wasn't up yet, not
+                        # FCC/open-meteo -- typical right after a deploy.
                         echo "${label}: upstream still failing [${SMOKE_ATTEMPT_CODES}]: ${target}"
-                        echo "    Failure mode changed between attempts; looks like a genuine third-party blip (FCC/open-meteo)."
+                        echo "    Failure mode changed between attempts: an earlier attempt never reached the app at all, not a third-party blip."
                         ;;
                     *)
+                        # Every attempt got 502: a real, repeatable
+                        # answer. /api/towers 502s only on a genuine
+                        # FCC/Maprad failure (see _smoke_fetch_with_retry
+                        # above), so frequencies gets a confident verdict;
+                        # elevation cannot tell that from a data gap at
+                        # the probe point, so it gets the hedge instead.
                         echo "${label}: upstream returned 502 on every attempt [${SMOKE_ATTEMPT_CODES}]: ${target}"
-                        echo "    Same result every time, not a blip: check the probe point or the route itself, not just the dependency."
+                        case "$label" in
+                            frequencies)
+                                echo "    Same result every time, not a blip: the FCC/Maprad fetch itself is failing."
+                                ;;
+                            *)
+                                echo "    Same result every time, not a blip: could be the dependency or a data gap at the probe point -- open-meteo answers both the same way."
+                                ;;
+                        esac
                         ;;
                 esac
                 ;;

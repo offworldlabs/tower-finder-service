@@ -607,6 +607,16 @@ class TestUserFrequencies:
         assert r.status_code == 200
         assert r.json()["query"]["user_frequencies_mhz"] == [95.5, 101.1]
 
+    def test_many_valid_repeated_frequencies_keys_capped_at_ten(self, client):
+        """Unlike the test above (two valid values) and the one below (2000
+        unparseable values, blocked by the length bound before max_count ever
+        matters), this sends many valid repeated keys so the response's cap
+        of ten is the only thing that can be limiting it."""
+        many = "&".join(f"frequencies={90 + i}.5" for i in range(15))
+        r = self._get(client, f"lat=33.9&lon=-84.6&source=us&{many}")
+        assert r.status_code == 200
+        assert len(r.json()["query"]["user_frequencies_mhz"]) == 10
+
     def test_many_repeated_frequencies_keys_do_not_error(self, client):
         """A valid value placed past parse_user_frequencies' own input-length
         bound, behind 2000 repeated keys that never parse as floats, must not

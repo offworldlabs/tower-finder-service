@@ -555,28 +555,43 @@ def _match_measurement(freq_mhz: float, band: str, measurements: list[dict]) -> 
     return best
 
 
-# Ceiling on the raw input length examined, applied before the comma split.
-# Bounds the cost of a single comma-free value of any size reaching float(),
-# independent of max_count (which only counts values already found valid).
+# Ceiling on the raw input, in characters as counted by len() on a str (code
+# points, not bytes: a non-ASCII character can occupy several bytes), examined
+# before the comma split. Bounds the cost of a single comma-free value of any
+# length reaching float(), independent of max_count (which only counts values
+# already found valid).
 _MAX_FREQUENCY_INPUT_CHARS = 2000
 
 
 def parse_user_frequencies(raw: str, max_count: int = 10) -> list[float]:
     """Parse a comma-separated string of frequencies in MHz. Returns up to max_count valid values.
 
-    Bounds its own cost via _MAX_FREQUENCY_INPUT_CHARS regardless of input size,
-    so a caller (this module is called directly from tests, not only from the
-    route) does not have to bound the input itself.
+    Bounds its own cost via _MAX_FREQUENCY_INPUT_CHARS regardless of input
+    length, so a caller (this module is called directly from tests, not only
+    from the route) does not have to bound the input itself. The bound acts on
+    total length, not position: a run of invalid junk followed by a valid
+    value is still found, provided the whole string is under the bound.
     """
     if not raw or not raw.strip():
         return []
     if len(raw) > _MAX_FREQUENCY_INPUT_CHARS:
-        # Drop the truncated trailing token rather than parse a partial value.
-        raw = raw[:_MAX_FREQUENCY_INPUT_CHARS].rsplit(",", 1)[0]
+        # rpartition, not rsplit: rsplit returns the whole string when there's
+        # no comma, so a comma-free value would be cut mid-token and parsed as
+        # a shorter, fabricated number instead of dropped. rpartition returns
+        # an empty head in that case. Either way, whatever sits after the last
+        # comma in the truncated window is one untrusted token, dropped whole:
+        # if that comma is near the start, this discards most of the window,
+        # not just a trailing fragment.
+        raw = raw[:_MAX_FREQUENCY_INPUT_CHARS].rpartition(",")[0]
     freqs = []
     for part in raw.split(","):
         part = part.strip()
         if not part:
+            continue
+        # float() accepts non-ASCII Unicode decimal digits (Devanagari,
+        # mathematical bold, ...), which would let a value the caller never
+        # typed in ASCII pass the range gate below.
+        if not part.isascii():
             continue
         try:
             val = float(part)
