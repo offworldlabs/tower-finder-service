@@ -8,6 +8,7 @@ from services.tower_ranking import (
     FM_ONLY,
     MEASUREMENT_TOLERANCE_MHZ,
     SENSITIVITY_DBM,
+    _MAX_FREQUENCY_INPUT_CHARS,
     _as_float,
     _match_measurement,
     bearing_to_cardinal,
@@ -216,6 +217,11 @@ _USER_LON = -84.388
 # A valid FM tower ~20 km north of Atlanta — well within the default 80 km radius
 _FM_DEVICE = _device(freq_mhz=95.5, lat=33.93, lon=-84.388, callsign="WXYZ")
 _FM_SYSTEM = _system([_FM_DEVICE], licence_type="Broadcast", licence_subtype="FM")
+
+# Same spot, a UHF tower, used to pin the FREQUENCY_MATCH_TOLERANCE_MHZ (5.0)
+# boundary at a decimal pair with float noise (see TestUserFrequencyRanking).
+_UHF_BOUNDARY_DEVICE = _device(freq_mhz=507.2, lat=33.93, lon=-84.388, callsign="WBND")
+_UHF_BOUNDARY_SYSTEM = _system([_UHF_BOUNDARY_DEVICE], licence_type="Broadcast", licence_subtype="TV")
 
 
 class TestProcessAndRank:
@@ -647,6 +653,13 @@ class TestMatchMeasurement:
         # 0.20 MHz offset — safely outside ±0.15 MHz
         assert _match_measurement(95.70, "FM", [m]) is None
 
+    def test_decimal_exact_fm_boundary_matches(self):
+        """abs(88.25 - 88.10) is 0.15000000000000568 in IEEE-754, not 0.15,
+        a raw float `<=` against the 0.15 MHz FM tolerance rejects this
+        boundary pair even though the two are exactly 0.15 MHz apart."""
+        m = _make_measurement(88.25, band="FM")
+        assert _match_measurement(88.10, "FM", [m]) is m
+
     def test_within_uhf_tolerance(self):
         m = _make_measurement(546.0, band="UHF")
         # ±4 MHz tolerance for UHF
@@ -748,6 +761,14 @@ class TestParseUserFrequencies:
     def test_invalid_values_skipped(self):
         assert parse_user_frequencies("abc, 95.5, xyz") == [95.5]
 
+    def test_non_ascii_digits_rejected(self):
+        """float() accepts Unicode decimal digits outside ASCII, from other
+        scripts (Devanagari) and other planes (mathematical bold). Neither is
+        a value the caller typed in ASCII, so both must be rejected rather
+        than echoed back as if they were."""
+        assert parse_user_frequencies("९२.5") == []  # Devanagari "92.5"
+        assert parse_user_frequencies("\U0001d7d7\U0001d7d3.\U0001d7d3") == []  # bold "95.5"
+
     def test_max_10_enforced(self):
         assert len(parse_user_frequencies(",".join(str(i) for i in range(1, 20)))) == 10
 
@@ -756,6 +777,53 @@ class TestParseUserFrequencies:
 
     def test_negative_skipped(self):
         assert parse_user_frequencies("-5, 95.5") == [95.5]
+
+    def test_bounds_cost_on_a_huge_junk_prefix(self):
+        """A valid value buried behind a long run of unparseable junk is
+        never reached: junk never trips max_count, only the length bound
+        does."""
+        raw = ",".join(["junk"] * 10_000 + ["95.5"])
+        assert parse_user_frequencies(raw) == []
+
+    def test_valid_value_after_short_junk_run_is_found(self):
+        """The length bound acts on total size, not on how many parts came
+        before a valid value. The part-count bound this replaced would have
+        stopped at the two-hundredth part and never reached this one; the
+        length bound only cuts when the whole string is over it."""
+        raw = ",".join(["junk"] * 211 + ["95.5"])
+        assert len(raw) < _MAX_FREQUENCY_INPUT_CHARS
+
+        assert parse_user_frequencies(raw) == [95.5]
+
+    def test_oversized_input_is_truncated_without_corrupting_the_boundary_value(self):
+        """With a comma still present just before the cut, the bound must
+        drop the trailing partial token rather than parse the surviving
+        prefix as a different, shorter value: a raw string engineered so the
+        cutoff lands 5 characters into "101.55" must not yield 101.5 (silent
+        corruption) or 101.55 (it's beyond the bound). Removing the bound
+        entirely makes 101.55 reachable, so this also stands as the
+        regression test for the bound itself."""
+        raw = ("," * (_MAX_FREQUENCY_INPUT_CHARS - 5)) + "101.55"
+        assert len(raw) > _MAX_FREQUENCY_INPUT_CHARS
+
+        result = parse_user_frequencies(raw)
+
+        assert result == []
+
+    def test_oversized_comma_free_input_is_dropped_not_corrupted(self):
+        """The case the test above cannot reach, because it has a comma to
+        cut on: with no comma anywhere in the truncated window, there is
+        nothing for rsplit(",", 1)[0] to cut, so it would return the window
+        unchanged and parse the truncated prefix as a fabricated, shorter
+        value instead of dropping it. rpartition(",")[0] must yield an empty
+        head instead, so the value is dropped entirely."""
+        raw = ("0" * (_MAX_FREQUENCY_INPUT_CHARS - 5)) + "101.55"
+        assert len(raw) > _MAX_FREQUENCY_INPUT_CHARS
+        assert "," not in raw
+
+        result = parse_user_frequencies(raw)
+
+        assert result == []
 
 
 # ── User frequencies in ranking ──────────────────────────────────────────────
@@ -789,6 +857,13 @@ class TestUserFrequencyRanking:
     def test_no_match_outside_tolerance(self):
         result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON, user_frequencies=[101.1])
         assert result[0]["frequency_matched"] is False
+
+    def test_decimal_exact_boundary_matches(self):
+        """abs(507.2 - 512.2) is 5.000000000000057 in IEEE-754, not 5.0, a
+        raw float `<=` against FREQUENCY_MATCH_TOLERANCE_MHZ (5.0) rejects
+        this boundary pair even though the two are exactly 5.0 MHz apart."""
+        result = process_and_rank([_UHF_BOUNDARY_SYSTEM], _USER_LAT, _USER_LON, user_frequencies=[512.2])
+        assert result[0]["frequency_matched"] is True
 
     def test_user_freqs_never_set_measured(self):
         result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON, user_frequencies=[95.5])
