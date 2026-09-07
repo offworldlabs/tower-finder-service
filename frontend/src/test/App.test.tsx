@@ -52,6 +52,11 @@ async function search(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByRole("button", { name: /find towers/i }));
 }
 
+function towersRequestUrl(): string | undefined {
+  const mock = globalThis.fetch as unknown as { mock: { calls: [string][] } };
+  return mock.mock.calls.map((c) => c[0]).find((u) => u.includes("/api/towers"));
+}
+
 beforeEach(() => {
   vi.restoreAllMocks();
 });
@@ -109,5 +114,23 @@ describe("App", () => {
         /not in a supported region/i,
       ),
     );
+  });
+  // The seam this ticket exists to close: the form collects frequencies, App
+  // forwards them, api.ts serialises them. A break anywhere in that chain is a
+  // 200 with the parameter silently absent.
+  it("carries entered frequencies through to the tower request", async () => {
+    mockApi({ status: 200, body: { towers: [], query: null, count: 0 } });
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: /add measured frequencies/i }));
+    await user.click(screen.getByRole("button", { name: /add frequency/i }));
+    await user.type(screen.getByLabelText(/^frequency 1/i), "95.5");
+    await user.type(screen.getByLabelText(/^frequency 2/i), "101.1");
+    await search(user);
+
+    await waitFor(() => expect(towersRequestUrl()).toBeDefined());
+    const params = new URL(towersRequestUrl()!, "https://towers.invalid").searchParams;
+    expect(params.get("frequencies")).toBe("95.5,101.1");
   });
 });

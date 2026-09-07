@@ -120,6 +120,33 @@ test.describe("Tower Finder — search form", () => {
     expect(url.searchParams.get("source")).toBe("auto");
   });
 
+  test("measured frequencies are sent as one comma-separated parameter", async ({ page }) => {
+    // parse_user_frequencies splits on ",". The parameter is a scalar `str` on
+    // the route, so a repeated key would reach Starlette and lose all but the
+    // last value, answering 200 with the ranking quietly unchanged.
+    const towersRequest = page.waitForRequest((r) => r.url().includes("/api/towers"));
+    await page.route("**/api/towers**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ towers: [], query: query(), count: 0 }),
+      });
+    });
+
+    await page.getByLabel(/latitude/i).fill("42.38708028093612");
+    await page.getByLabel(/longitude/i).fill("-71.24905416622781");
+
+    await page.getByRole("button", { name: /add measured frequencies/i }).click();
+    await page.getByRole("button", { name: /add frequency/i }).click();
+    await page.getByLabel(/^frequency 1/i).fill("95.5");
+    await page.getByLabel(/^frequency 2/i).fill("101.1");
+
+    await page.locator("button[type='submit']").filter({ hasText: /Find Towers/i }).click();
+
+    const url = new URL((await towersRequest).url());
+    expect(url.searchParams.getAll("frequencies")).toEqual(["95.5,101.1"]);
+  });
+
   test("an explicitly chosen source is sent instead of auto", async ({ page }) => {
     const towersRequest = page.waitForRequest((r) => r.url().includes("/api/towers"));
     await page.route("**/api/towers**", async (route) => {
