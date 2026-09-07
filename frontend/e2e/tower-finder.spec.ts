@@ -275,3 +275,62 @@ test.describe("Tower Finder — map rendering", () => {
     await expect(page.locator(".leaflet-container")).toBeVisible({ timeout: 8000 });
   });
 });
+
+test.describe("Tower Finder — subresources", () => {
+  // Which origins the bundle reaches for, so a reintroduced CDN fails here
+  // rather than in production. It does not test the policy: vite preview sends
+  // no headers, so script-src, connect-src and font-src are unguarded until the
+  // deploy probe asserts a real response (123zgec1bvn).
+  test("loads nothing from a third party except the basemap tiles", async ({ page }) => {
+    const foreign: string[] = [];
+    let sawTile = false;
+    const record = (raw: string) => {
+      // data: and blob: have an opaque origin and an empty hostname, so test
+      // the scheme before anything derived from it.
+      const url = new URL(raw);
+      if (url.protocol === "data:" || url.protocol === "blob:") return;
+      if (url.origin === new URL(BASE).origin) return;
+      // What the CSP source `https://*.basemaps.cartocdn.com` admits: https,
+      // the default port, and at least one label before the dot. Stricter than
+      // the policy on the label count, which is the safe direction; a scheme or
+      // port that the policy would refuse lands in `foreign` instead.
+      const isTile =
+        url.protocol === "https:" &&
+        url.port === "" &&
+        /^[^.]+\.basemaps\.cartocdn\.com$/.test(url.hostname);
+      if (isTile) {
+        sawTile = true;
+        return;
+      }
+      foreign.push(raw);
+    };
+    page.on("request", (r) => record(r.url()));
+
+    // A non-empty result deliberately: the components that could reach for a
+    // CDN are the ones that only mount when there are towers, so an empty list
+    // would exercise none of them.
+    await page.route("**/api/towers**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ towers: [tower()], query: query(), count: 1 }),
+      });
+    });
+
+    await page.goto(BASE);
+    await page.getByLabel(/latitude/i).fill("42.38708028093612");
+    await page.getByLabel(/longitude/i).fill("-71.24905416622781");
+    await page.locator("button[type='submit']").filter({ hasText: /Find Towers/i }).click();
+    // Proves the render actually happened, so an empty `foreign` cannot mean
+    // "the page never loaded".
+    await expect(page.locator("tbody tr")).toHaveCount(1);
+    await expect(page.locator(".leaflet-marker-icon").first()).toBeVisible();
+    await page.waitForLoadState("networkidle");
+    page.removeAllListeners("request");
+
+    // A de-sharded tile URL is not a shape the CSP admits, so it lands in
+    // `foreign` rather than passing quietly.
+    expect(foreign).toEqual([]);
+    expect(sawTile).toBe(true);
+  });
+});

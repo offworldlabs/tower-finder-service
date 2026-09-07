@@ -170,6 +170,40 @@ not to the droplet, and the probe must reach the local listener directly.
 the URL public traffic enters by both before and after the flip; the flip
 changes the origin port behind it, not the address.
 
+**A health check cannot see a broken page.** This vhost serves the SPA as well
+as the API, and the failure mode worth guarding is a page whose document loads
+while its assets do not: `nginx -t` passes, `/api/health` passes, and an
+`id="root"` probe passes, against a blank screen. That is how retina-server's
+attempt at this same swap failed (its PR #260). So check the page too:
+
+```bash
+# --resolve for the same reason the deploy probe uses it: every name resolves to
+# Cloudflare, which pre-flip still forwards to retina-server, so without it you
+# verify the server you are replacing and it passes.
+HOST=towers.retina.fm
+CURL="curl -sk --resolve $HOST:8443:127.0.0.1"
+
+# GET, not -I: FastAPI registers GET only, so HEAD answers 405 and `always`
+# stamps the policy onto that too, passing on a page that was never served.
+$CURL -D- -o /dev/null "https://$HOST:8443/" | grep -i content-security-policy \
+  || echo "NO POLICY ON THE DOCUMENT"
+
+
+# Guarded, not chained: an empty ASSET would otherwise fetch the document
+# again and return the 200 the check is looking for. No `set -e` either, so a
+# failing probe reports rather than closing the operator's session.
+ASSET=$($CURL "https://$HOST:8443/" | grep -o '/assets/[^"]*\.js' | head -1)
+if [ -z "$ASSET" ]; then
+  echo "NO ASSET LINK IN THE DOCUMENT"
+else
+  $CURL -o /dev/null -w '%{http_code}\n' "https://$HOST:8443$ASSET"  # must be 200
+fi
+```
+
+Then open it in a browser once and confirm the console is clean: a CSP that is
+too strict shows up only there, as a blocked subresource, and never as a
+non-200.
+
 **The origin is Cloudflare-only, and stays that way.** retina-server enforces
 Cloudflare Authenticated Origin Pulls (`ssl_verify_client on`) plus a
 DOCKER-USER rule that narrows 80 and 443 to Cloudflare's ranges. The edge keeps

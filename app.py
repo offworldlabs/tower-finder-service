@@ -4,17 +4,18 @@ Run locally with:
     uvicorn app:app --reload
 
 That serves the API only. For the UI, either build it once
-(``cd frontend && npm ci && npm run build``) so the block at the bottom of this
-file picks up ``frontend/dist``, or run ``npm run dev`` alongside — Vite proxies
-/api straight back here.
+(``cd frontend && npm ci && npm run build``) so ``create_app`` picks up
+``frontend/dist``, or run ``npm run dev`` alongside, which proxies /api
+straight back here.
 """
 
 import logging
+import mimetypes
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -22,6 +23,13 @@ from routes.towers import router
 from services.region_lookup import warm_borders
 
 logger = logging.getLogger(__name__)
+
+# Absent from Python 3.12's table, and python:3.12-slim ships no
+# /etc/mime.types, so without this the bundled Inter faces leave the image
+# as application/octet-stream. Untested on purpose: every machine that runs
+# pytest has a system mime.types that already maps it, so a test would pass
+# whether or not this line is here.
+mimetypes.add_type("font/woff2", ".woff2")
 
 
 @asynccontextmanager
@@ -41,31 +49,46 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(
-    title="tower-finder-service",
-    description="Ranks broadcast towers near a node from FCC + Maprad data.",
-    lifespan=lifespan,
-)
-app.include_router(router)
+def create_app() -> FastAPI:
+    """A factory so a test can build one against a different frontend dist.
+
+    The docs pages stay on: whatever is in front decides whether to serve them,
+    and only the 8443 edge refuses them (see its template).
+    """
+    dist = Path(os.getenv("TOWER_FINDER_FRONTEND_DIST", Path(__file__).parent / "frontend" / "dist"))
+    application = FastAPI(
+        title="tower-finder-service",
+        description="Ranks broadcast towers near a node from FCC + Maprad data.",
+        lifespan=lifespan,
+    )
+    application.include_router(router)
+
+    # Mounted AFTER the API router so /api/* keeps winning; the catch-all below
+    # would otherwise swallow it. Absent in a bare checkout where nobody has run
+    # a frontend build, so the API still serves without one.
+    if (dist / "index.html").is_file():
+        application.mount("/assets", StaticFiles(directory=dist / "assets"), name="assets")
+
+        @application.get("/{full_path:path}", include_in_schema=False)
+        async def serve_spa(full_path: str):
+            """Serve the built UI, falling back to index.html for client routes."""
+            try:
+                candidate = (dist / full_path).resolve()
+            except ValueError:
+                # A NUL byte reaches resolve() as ValueError, where is_file()
+                # would have swallowed it. Serve the shell rather than a 500.
+                return FileResponse(dist / "index.html")
+            # resolve() + is_relative_to keeps "../" out of the served tree.
+            if full_path and candidate.is_file() and candidate.is_relative_to(dist.resolve()):
+                return FileResponse(candidate)
+            # No file, and under the API prefix: a 404 a caller can branch on,
+            # where the shell is a 200 that fails to parse. GET only, since so
+            # is this route; other methods already get a 405.
+            if f"/{full_path}".startswith(f"{router.prefix}/") or f"/{full_path}" == router.prefix:
+                raise HTTPException(status_code=404)
+            return FileResponse(dist / "index.html")
+
+    return application
 
 
-# ── Frontend ──────────────────────────────────────────────────────────────────
-#
-# Mounted AFTER the API router so /api/* keeps winning; the catch-all below
-# would otherwise swallow it. Absent in a bare `uvicorn app:app` checkout where
-# nobody has run a frontend build — the API still serves fine, so this stays
-# optional rather than a hard startup requirement.
-
-_DIST = Path(os.getenv("TOWER_FINDER_FRONTEND_DIST", Path(__file__).parent / "frontend" / "dist"))
-
-if (_DIST / "index.html").is_file():
-    app.mount("/assets", StaticFiles(directory=_DIST / "assets"), name="assets")
-
-    @app.get("/{full_path:path}", include_in_schema=False)
-    async def serve_spa(full_path: str):
-        """Serve the built UI, falling back to index.html for client routes."""
-        candidate = (_DIST / full_path).resolve()
-        # resolve() + is_relative_to keeps "../" out of the served tree.
-        if full_path and candidate.is_file() and candidate.is_relative_to(_DIST.resolve()):
-            return FileResponse(candidate)
-        return FileResponse(_DIST / "index.html")
+app = create_app()
