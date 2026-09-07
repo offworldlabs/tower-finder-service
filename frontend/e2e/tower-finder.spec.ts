@@ -29,7 +29,6 @@ function tower(overrides = {}) {
     band: "FM",
     eirp_dbm: 78,
     distance_km: 12.3,
-    distance_class: "Ideal",
     bearing_deg: 145,
     bearing_cardinal: "SE",
     received_power_dbm: -62.1,

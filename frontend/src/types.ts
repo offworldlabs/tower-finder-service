@@ -21,7 +21,6 @@ export interface Tower {
   band: string;
   eirp_dbm: number;
   distance_km: number;
-  distance_class: string;
   bearing_deg: number;
   bearing_cardinal: string;
   received_power_dbm: number;

@@ -89,7 +89,7 @@ def _is_number(value) -> bool:
     # and every comparison against NaN is False, so an unfiltered NaN passes each
     # range check below and is persisted. It surfaces much later and far from
     # here: DEFAULT_LIMIT = nan makes towers[:effective_limit] raise TypeError on
-    # every search, and a NaN distance-class bound silently matches nothing.
+    # every search.
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
     return math.isfinite(value)
@@ -98,15 +98,15 @@ def _is_number(value) -> bool:
 # Fields a ranking.sort_order rule may name: a field belongs here only if it
 # resolves to a real number for every tower.
 #
-# band_priority and distance_priority are special-cased in _sort_key() and always
-# do; the rest are numeric keys of the tower dict built in process_and_rank(),
+# band_priority is special-cased in _sort_key() and always does; the rest are
+# numeric keys of the tower dict built in process_and_rank(),
 # plus coverage_area_added_km2, which services/tower_coverage.py adds. The
 # analyser fields (snr_db, score, power_db, obw_fraction) and the two booleans
 # are numeric-or-None, and _sort_key() reads every field as ``or 0``, so a None
 # or a missing key sorts as zero rather than raising.
 #
 # Deliberately absent: the string fields (callsign, name, state, band,
-# bearing_cardinal, distance_class, licence_*), which _sort_key() would negate
+# bearing_cardinal, licence_*), which _sort_key() would negate
 # and raise TypeError on for a descending rule; and antenna_height_m, which is
 # None whenever the upstream record omits it — it would not raise here, but a
 # tower of unknown height ranking as a 0 m tower is a silent lie either way.
@@ -116,11 +116,15 @@ def _is_number(value) -> bool:
 # switching ranking strategy is a config PUT rather than a code change. Adding a
 # numeric field to the tower dict means adding it here too, or a config naming it
 # is rejected.
+#
+# distance_priority used to be here. Towers no longer carry a distance class
+# ("Too Close" / "Ideal" / "Good" / "Far"), so there is nothing for such a rule
+# to sort on; see _drop_legacy_distance_rules() for how an overlay that still
+# names it is handled.
 _SORTABLE_FIELDS = frozenset(
     {
         # Shared with the monolith's engine.
         "band_priority",
-        "distance_priority",
         "coverage_area_added_km2",
         "received_power_dbm",
         "distance_km",
@@ -149,7 +153,7 @@ def validate_config(cfg: dict) -> str | None:
 
     Everything a search consumes as a number has to be one, and three separate
     parts of the config feed that: the fields a sort_order rule names, the values
-    in the band_priority and distance_priority tables, and search.default_limit.
+    in the band_priority table, and search.default_limit.
     _sort_key() puts the first two into a tuple it sorts on and negates them for
     a descending rule, and default_limit ends up as a slice bound. A string, a
     null or a fractional number in any of those places passes every structural
@@ -179,41 +183,16 @@ def validate_config(cfg: dict) -> str | None:
                 return f"broadcast_bands.{band} range is not ascending: {r!r}"
 
     ranking = cfg.get("ranking", {})
-    for key in ("band_priority", "distance_priority"):
-        table = ranking.get(key)
-        if table is None:
-            continue
+    table = ranking.get("band_priority")
+    if table is not None:
         if not isinstance(table, dict):
-            return f"ranking.{key} must be an object, got {type(table).__name__}"
+            return f"ranking.band_priority must be an object, got {type(table).__name__}"
         # _sort_key() reads these straight into the sort tuple, alongside the
         # literal 99 it falls back to, so a non-numeric value here is compared
         # against an int and raises rather than sorting oddly.
         for name, priority in table.items():
             if not _is_number(priority):
-                return f"ranking.{key}[{name!r}] must be a number, got {priority!r}"
-
-    classes = ranking.get("distance_classes")
-    if classes is not None:
-        if not isinstance(classes, list):
-            return f"ranking.distance_classes must be a list, got {type(classes).__name__}"
-        for i, dc in enumerate(classes):
-            if not isinstance(dc, dict):
-                return f"ranking.distance_classes[{i}] must be an object, got {type(dc).__name__}"
-            # apply_config() indexes these three directly rather than .get()ing
-            # them, so a missing key is a KeyError at apply time, not a default.
-            for key in ("label", "min_km", "max_km"):
-                if key not in dc:
-                    return f"ranking.distance_classes[{i}] is missing {key}"
-            if not isinstance(dc["label"], str) or not dc["label"]:
-                return f"ranking.distance_classes[{i}].label must be a non-empty string"
-            if not _is_number(dc["min_km"]):
-                return f"ranking.distance_classes[{i}].min_km must be a number, got {dc['min_km']!r}"
-            # max_km is nullable: the last class is open-ended.
-            if dc["max_km"] is not None:
-                if not _is_number(dc["max_km"]):
-                    return f"ranking.distance_classes[{i}].max_km must be a number or null, got {dc['max_km']!r}"
-                if dc["max_km"] <= dc["min_km"]:
-                    return f"ranking.distance_classes[{i}] has max_km <= min_km"
+                return f"ranking.band_priority[{name!r}] must be a number, got {priority!r}"
 
     sort_order = ranking.get("sort_order")
     if sort_order is not None:
@@ -259,8 +238,6 @@ CONFIG_SETTINGS = (
     "SENSITIVITY_DBM",
     "BROADCAST_BANDS",
     "BAND_PRIORITY",
-    "DISTANCE_CLASSES",
-    "DISTANCE_PRIORITY",
     "SORT_ORDER",
     "DEFAULT_RADIUS_KM",
     "DEFAULT_LIMIT",
@@ -279,8 +256,7 @@ def apply_config(cfg: dict) -> None:
     needs the failure in order to reject the write.
     """
     global RX_ANTENNA_GAIN_DBI, SENSITIVITY_DBM
-    global BROADCAST_BANDS, BAND_PRIORITY
-    global DISTANCE_CLASSES, DISTANCE_PRIORITY, SORT_ORDER
+    global BROADCAST_BANDS, BAND_PRIORITY, SORT_ORDER
     global DEFAULT_RADIUS_KM, DEFAULT_LIMIT
 
     rx = cfg.get("receiver", {})
@@ -294,25 +270,25 @@ def apply_config(cfg: dict) -> None:
     # objects nested inside it would let anything the handler does to that body
     # afterwards rewrite live ranking state.
     ranking = cfg.get("ranking", {})
-    band_priority = dict(ranking.get("band_priority", {"VHF": 0, "UHF": 1, "FM": 2}))
+    # TV bands tie: a VHF and a UHF tower are ranked on power alone. FM is the
+    # fallback and sorts after every TV tower whatever its power.
+    band_priority = dict(ranking.get("band_priority", {"VHF": 0, "UHF": 0, "FM": 1}))
 
-    distance_classes = []
-    for dc in ranking.get("distance_classes", []):
-        max_km = dc["max_km"] if dc["max_km"] is not None else float("inf")
-        distance_classes.append((dc["label"], dc["min_km"], max_km))
-
-    distance_priority = dict(ranking.get("distance_priority", {}))
-    # Unchanged from before coverage scoring was portable here: a config that
-    # names no sort_order keeps ranking exactly as it did. The monolith leads
-    # its own fallback with coverage_area_added_km2; adopting that here would
-    # silently re-rank every deployment whose config omits the section.
+    # The fallback for a config that names no sort_order. It matches the shipped
+    # tower_config.json so an overlay that omits the section ranks the same way
+    # as a fresh one. Within a band tier the analyser's measured score decides
+    # where there is one (POST /api/towers); it is None on a GET, which
+    # _sort_key() reads as 0 for every tower, so the order there falls through
+    # to modelled received power. The monolith leads its own fallback with
+    # coverage_area_added_km2; adopting that here would silently re-rank every
+    # deployment whose config omits the section.
     sort_order = [
         dict(rule)
         for rule in ranking.get(
             "sort_order",
             [
                 {"field": "band_priority", "ascending": True},
-                {"field": "distance_priority", "ascending": True},
+                {"field": "score", "ascending": False},
                 {"field": "received_power_dbm", "ascending": False},
             ],
         )
@@ -327,8 +303,6 @@ def apply_config(cfg: dict) -> None:
     SENSITIVITY_DBM = sensitivity
     BROADCAST_BANDS = bands
     BAND_PRIORITY = band_priority
-    DISTANCE_CLASSES = distance_classes
-    DISTANCE_PRIORITY = distance_priority
     SORT_ORDER = sort_order
     DEFAULT_RADIUS_KM = radius_km
     DEFAULT_LIMIT = limit
@@ -347,10 +321,42 @@ def reload_config():
     whose every search would raise TypeError deep in the sort.
     """
     cfg = _load_config()
+    _drop_legacy_distance_rules(cfg)
     error = validate_config(cfg)
     if error:
         raise ValueError(f"{_CONFIG_PATH} is not a usable tower config: {error}")
     apply_config(cfg)
+
+
+def _drop_legacy_distance_rules(cfg: dict) -> None:
+    """Strip distance_priority sort rules from a config seeded before distance
+    classes were removed.
+
+    The runtime overlay is a persistent volume, seeded once from whatever
+    default the image shipped at the time and never re-seeded. A default that
+    shipped until 2026-05-28 sorted on distance_priority, so an overlay from
+    then is still on disk in any environment nobody has PUT a config to since.
+    Rejecting it would crash-loop the container on the first deploy after this
+    change, over a rule that has nothing left to sort on. It is dropped here,
+    with a warning, and the file on disk is left as it is: a PUT of the same
+    body is still rejected, so nothing new can be written in this shape.
+
+    The distance_classes and distance_priority tables such an overlay also
+    carries are harmless: validate_config() and apply_config() no longer read
+    them.
+    """
+    ranking = cfg.get("ranking") if isinstance(cfg, dict) else None
+    sort_order = ranking.get("sort_order") if isinstance(ranking, dict) else None
+    if not isinstance(sort_order, list):
+        return
+    kept = [rule for rule in sort_order if not (isinstance(rule, dict) and rule.get("field") == "distance_priority")]
+    if len(kept) != len(sort_order):
+        logger.warning(
+            "%s names distance_priority in ranking.sort_order; towers no longer carry a distance class, "
+            "so the rule is ignored. PUT /api/config to replace it.",
+            _CONFIG_PATH,
+        )
+        ranking["sort_order"] = kept
 
 
 # Seed every setting from the in-code defaults before any file is read, so they
@@ -408,13 +414,6 @@ def classify_band(freq_mhz: float) -> str | None:
             if lo <= freq_mhz <= hi:
                 return band
     return None
-
-
-def classify_distance(distance_km: float) -> str:
-    for label, lo, hi in DISTANCE_CLASSES:
-        if lo <= distance_km < hi:
-            return label
-    return "Far"
 
 
 def watts_to_dbm(watts: float) -> float:
@@ -642,7 +641,6 @@ def process_and_rank(
                 continue
 
             brg = initial_bearing(user_lat, user_lon, tower_lat, tower_lon)
-            dist_class = classify_distance(dist)
 
             # Match against spectrum-analyser measurements (band-specific tolerance).
             measurement = _match_measurement(freq_val, band, measurements) if measurements else None
@@ -664,7 +662,6 @@ def process_and_rank(
                     "bearing_deg": round(brg, 1),
                     "bearing_cardinal": bearing_to_cardinal(brg),
                     "received_power_dbm": round(pwr, 1),
-                    "distance_class": dist_class,
                     "eirp_dbm": round(eirp, 1),
                     "licence_type": licence.get("type") or "",
                     "licence_subtype": licence.get("subtype") or "",
@@ -716,17 +713,14 @@ def process_and_rank(
         for rule in SORT_ORDER:
             # Everything this builds a sort tuple from is constrained to a number
             # by validate_config, on write and on load: the field named here
-            # (_SORTABLE_FIELDS), and the BAND_PRIORITY / DISTANCE_PRIORITY
-            # values read below. Loosening any of those gates reintroduces a
-            # TypeError on every search. The `or 0` covers the fields that are
+            # (_SORTABLE_FIELDS), and the BAND_PRIORITY values read below.
+            # Loosening either gate reintroduces a TypeError on every search. The `or 0` covers the fields that are
             # legitimately absent or None — an unmatched tower's analyser fields,
             # and the coverage annotations when no scorer ran.
             field = rule["field"]
             asc = rule.get("ascending", True)
             if field == "band_priority":
                 val = BAND_PRIORITY.get(t["band"], 99)
-            elif field == "distance_priority":
-                val = DISTANCE_PRIORITY.get(t["distance_class"], 99)
             else:
                 val = t.get(field) or 0
             parts.append(val if asc else -val)

@@ -12,15 +12,9 @@ L.Icon.Default.mergeOptions({
   shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
 });
 
-const ICON_COLORS = {
-  Ideal: "#16a34a",
-  Good: "#ca8a04",
-  Far: "#94a3b8",
-  "Too Close": "#ef4444",
-};
+const TOWER_COLOR = "#0891b2";
 
-function makeTowerIcon(distClass, isHighlighted) {
-  const color = ICON_COLORS[distClass] || "#94a3b8";
+function makeTowerIcon(isHighlighted) {
   const size = isHighlighted ? 16 : 11;
   const border = isHighlighted ? 3 : 2;
   const shadow = isHighlighted
@@ -30,7 +24,7 @@ function makeTowerIcon(distClass, isHighlighted) {
     className: "tower-marker",
     html: `<div style="
       width:${size}px;height:${size}px;
-      background:${color};
+      background:${TOWER_COLOR};
       border:${border}px solid #fff;
       border-radius:50%;
       box-shadow:${shadow};
@@ -113,7 +107,6 @@ export default function TowerMap({ towers, userLocation, highlighted }) {
             key={`${t.rank}-${t.frequency_mhz}`}
             position={[t.latitude, t.longitude]}
             icon={makeTowerIcon(
-              t.distance_class,
               highlighted &&
                 highlighted.callsign === t.callsign &&
                 highlighted.frequency_mhz === t.frequency_mhz
@@ -134,10 +127,6 @@ export default function TowerMap({ towers, userLocation, highlighted }) {
               <br />
               <span className="popup-detail">
                 {t.distance_km} km {t.bearing_cardinal} &middot; {t.received_power_dbm} dBm
-              </span>
-              <br />
-              <span style={{ color: ICON_COLORS[t.distance_class], fontWeight: 600, fontSize: "0.78rem" }}>
-                {t.distance_class}
               </span>
             </Popup>
           </Marker>

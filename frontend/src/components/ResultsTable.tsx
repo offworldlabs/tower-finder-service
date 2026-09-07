@@ -1,19 +1,5 @@
 import "./ResultsTable.css";
 
-const CLASS_COLORS = {
-  Ideal: "#16a34a",
-  Good: "#ca8a04",
-  Far: "#6b7280",
-  "Too Close": "#dc2626",
-};
-
-const CLASS_BG = {
-  Ideal: "rgba(22, 163, 74, 0.08)",
-  Good: "rgba(202, 138, 4, 0.08)",
-  Far: "rgba(107, 114, 128, 0.08)",
-  "Too Close": "rgba(220, 38, 38, 0.08)",
-};
-
 const BAND_COLORS = {
   VHF: "#7c3aed",
   UHF: "#0891b2",
@@ -47,7 +33,6 @@ export default function ResultsTable({ towers, onHover }) {
               <th>Distance</th>
               <th>Bearing</th>
               <th>Rx Power</th>
-              <th>Suitability</th>
             </tr>
           </thead>
           <tbody>
@@ -90,17 +75,6 @@ export default function ResultsTable({ towers, onHover }) {
                   {t.bearing_deg}° <span className="cardinal">{t.bearing_cardinal}</span>
                 </td>
                 <td className="mono power">{t.received_power_dbm} dBm</td>
-                <td>
-                  <span
-                    className="badge"
-                    style={{
-                      color: CLASS_COLORS[t.distance_class] || "#6b7280",
-                      background: CLASS_BG[t.distance_class] || "rgba(107,114,128,0.08)",
-                    }}
-                  >
-                    {t.distance_class}
-                  </span>
-                </td>
               </tr>
             ))}
           </tbody>

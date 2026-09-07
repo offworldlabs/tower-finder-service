@@ -12,7 +12,6 @@ from services.tower_ranking import (
     _match_measurement,
     bearing_to_cardinal,
     classify_band,
-    classify_distance,
     eirp_dbm_from_device,
     fspl,
     haversine,
@@ -192,17 +191,6 @@ class TestParseGeom:
         assert result is not None
 
 
-# ── Distance classification ──────────────────────────────────────────────────
-
-
-class TestClassifyDistance:
-    def test_very_far(self):
-        assert classify_distance(99999) == "Far"
-
-    def test_returns_string(self):
-        assert isinstance(classify_distance(5.0), str)
-
-
 # ── process_and_rank ─────────────────────────────────────────────────────────
 
 # Atlanta, GA — used as our fixed "user" position throughout these tests
@@ -247,7 +235,7 @@ class TestProcessAndRank:
         assert isinstance(t["bearing_cardinal"], str)
         assert isinstance(t["received_power_dbm"], float)
         assert isinstance(t["eirp_dbm"], float)
-        assert isinstance(t["distance_class"], str)
+        assert "distance_class" not in t
         assert t["licence_type"] == "Broadcast"
         assert t["licence_subtype"] == "FM"
         assert t["frequency_matched"] is False
@@ -505,7 +493,6 @@ class TestProcessAndRank:
             "bearing_deg",
             "bearing_cardinal",
             "received_power_dbm",
-            "distance_class",
             "eirp_dbm",
             "licence_type",
             "licence_subtype",
@@ -579,14 +566,6 @@ class TestEirpDbmFromDevice:
 
     def test_no_power_fields_returns_none(self):
         assert eirp_dbm_from_device({}) is None
-
-
-# ── classify_distance fallthrough ────────────────────────────────────────────
-
-
-class TestClassifyDistanceFallthrough:
-    def test_negative_distance_not_in_any_class_returns_far(self):
-        assert classify_distance(-1) == "Far"
 
 
 # ── parse_geom edge cases ─────────────────────────────────────────────────────
