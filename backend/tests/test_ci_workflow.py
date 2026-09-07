@@ -19,7 +19,7 @@ EXPECTED = {
 }
 
 SMOKE_EXPECTED = {
-    "smoke-prod": ("https://towers.retina.fm", "prod"),
+    "smoke-prod": "https://towers.retina.fm",
 }
 
 # Staging and test verify inside the deploy script, against the container,
@@ -47,6 +47,28 @@ EDGE_PROBE_EXPECTED = {
 # production's resolves to Cloudflare, which cannot reach a dark port.
 EDGE_PROBE_RE = re.compile(
     r'--resolve\s+"(?P<host>[\w.-]+):8443:127\.0\.0\.1"[^\n]*\n\s*"https://(?P<url_host>[\w.-]+):8443/api/health"'
+)
+
+# Production reads its environment label off that same edge. Staging and test
+# read theirs inside deploy/smoke-local.sh instead, so only production needs it
+# here; it is the one environment with no droplet-local smoke of its own.
+EDGE_ENV_EXPECTED = {
+    "deploy-prod": "prod",
+}
+
+# The probe that reads the label: a second request to this job's own 8443 edge
+# whose body, unlike the status probe's, is kept and parsed for "environment".
+EDGE_ENV_PROBE_RE = re.compile(
+    r'edge_env="\$\(curl.*?--resolve\s+"(?P<host>[\w.-]+):8443:127\.0\.0\.1"'
+    r'.*?"https://(?P<url_host>[\w.-]+):8443/api/health".*?environment.*?\)"',
+    re.DOTALL,
+)
+
+# The assertion on it. An unparseable body leaves `edge_env` empty, which is
+# not the expected label either, so the same comparison covers both.
+EDGE_ENV_GUARD_RE = re.compile(
+    r'if\s+\[\s+"\$edge_env"\s+!=\s+"(?P<env>[\w-]+)"\s+\];\s*then(?P<body>.*?)\bfi\b',
+    re.DOTALL,
 )
 
 # The line that brings the stack up, allowing for flags between `compose`
@@ -161,14 +183,23 @@ def test_production_waits_for_staging(workflow):
 
 
 @pytest.mark.parametrize("job", sorted(SMOKE_EXPECTED))
-def test_smoke_jobs_target_their_own_environment(job, workflow):
-    """Each smoke job must address its own URL and assert the answer came from
-    the environment it meant to reach."""
-    base_url, expect_env = SMOKE_EXPECTED[job]
+def test_smoke_jobs_target_their_own_public_url(job, workflow):
+    """Each smoke job must address its own environment's public name."""
     assert job in workflow["jobs"], f"{job}: smoke job is missing"
     env = _smoke_env(workflow["jobs"][job])
-    assert env["BASE_URL"] == base_url
-    assert env["EXPECT_ENV"] == expect_env
+    assert env["BASE_URL"] == SMOKE_EXPECTED[job]
+
+
+@pytest.mark.parametrize("job", sorted(SMOKE_EXPECTED))
+def test_the_public_smoke_asserts_no_environment(job, workflow):
+    """`towers.retina.fm` is retina-server's vhost, and it forwards only the
+    tower paths on to this service. `/api/health` there is answered by its own
+    backend, which reports no environment at all, so an environment assertion
+    over the public name can only ever fail. It belongs on this service's own
+    8443 edge, which is where EDGE_ENV_EXPECTED below puts it."""
+    assert "EXPECT_ENV" not in _smoke_env(workflow["jobs"][job])
+    script = _strip_comments((REPO_ROOT / "deploy" / "smoke-test.sh").read_text())
+    assert "EXPECT_ENV" not in script, "deploy/smoke-test.sh still reads EXPECT_ENV"
 
 
 @pytest.mark.parametrize("job", sorted(LOCAL_SMOKE_EXPECTED))
@@ -213,6 +244,32 @@ def test_each_deploy_job_probes_its_own_edge(job, workflow):
     assert match, f"{job}: no direct-origin probe of https://<host>:8443/api/health"
     assert match.group("host") == EDGE_PROBE_EXPECTED[job]
     assert match.group("url_host") == EDGE_PROBE_EXPECTED[job]
+
+
+@pytest.mark.parametrize("job", sorted(EDGE_ENV_EXPECTED))
+def test_production_reads_its_environment_from_its_own_edge(job, workflow):
+    """Which of three near-identical stacks answered is the one thing the
+    public smoke cannot establish, so the deploy job establishes it, against
+    the listener the public name will address once the origin port flips."""
+    script = _ssh_script(workflow["jobs"][job])
+    probe = EDGE_ENV_PROBE_RE.search(script)
+    assert probe, f"{job}: does not read the environment from its own 8443 edge"
+    assert probe.group("host") == EDGE_PROBE_EXPECTED[job]
+    assert probe.group("url_host") == EDGE_PROBE_EXPECTED[job]
+
+
+@pytest.mark.parametrize("job", sorted(EDGE_ENV_EXPECTED))
+def test_a_wrong_environment_on_the_edge_fails_the_deploy(job, workflow):
+    """Reading the label proves nothing on its own: the deploy has to stop when
+    it is not this environment's, and it has to read it before it judges it."""
+    script = _ssh_script(workflow["jobs"][job])
+    probe = EDGE_ENV_PROBE_RE.search(script)
+    assert probe, f"{job}: does not read the environment from its own 8443 edge"
+    guard = EDGE_ENV_GUARD_RE.search(script)
+    assert guard, f"{job}: nothing compares the edge's environment to an expected one"
+    assert guard.group("env") == EDGE_ENV_EXPECTED[job]
+    assert probe.end() <= guard.start(), f"{job}: judges the environment before reading it"
+    assert re.search(r"exit\s+[1-9]\d*", guard.group("body")), f"{job}: a wrong environment does not fail the deploy"
 
 
 @pytest.mark.parametrize("job", sorted(EDGE_PROBE_EXPECTED))

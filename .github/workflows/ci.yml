@@ -235,6 +235,20 @@ jobs:
               docker compose logs --tail=50 edge || true
               exit 1
             fi
+            # Which of three near-identical stacks answered, and the one thing
+            # the public smoke cannot establish: retina-server's
+            # towers.retina.fm vhost forwards only the tower paths here, so
+            # /api/health on 443 is its own backend's and carries no environment.
+            edge_env="$(curl -sk --max-time 10 \
+              --resolve "towers.retina.fm:8443:127.0.0.1" \
+              "https://towers.retina.fm:8443/api/health" \
+              | sed -n 's/.*"environment"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' || true)"
+            if [ "$edge_env" != "prod" ]; then
+              echo "Edge on 8443 reports environment '${edge_env:-?}', expected 'prod'"
+              docker compose logs --tail=50 || true
+              exit 1
+            fi
+            echo "Edge on 8443 reports environment prod"
 
   smoke-prod:
     runs-on: ubuntu-latest
@@ -244,7 +258,6 @@ jobs:
       - name: Smoke test production
         env:
           BASE_URL: https://towers.retina.fm
-          EXPECT_ENV: prod
         run: bash deploy/smoke-test.sh
 
   deploy-test:
