@@ -2,6 +2,15 @@ import { useState, useEffect, useRef } from "react";
 import { fetchElevation } from "../api";
 import "./SearchForm.css";
 
+// Both mirror parse_user_frequencies in services/tower_ranking.py, which keeps
+// at most ten values and only those in 0 < v < 10000. Anything else is dropped
+// there without a word, so the form declines to offer it in the first place.
+// The server's upper bound is exclusive and the input's `max` is inclusive, so
+// exactly 10000 passes the browser and is dropped below; no illuminator sits
+// there.
+const MAX_FREQUENCIES = 10;
+const MAX_FREQUENCY_MHZ = 10000;
+
 /**
  * Location entry for a tower search.
  *
@@ -18,9 +27,17 @@ export default function SearchForm({ onSearch, loading }) {
   const [lon, setLon] = useState("");
   const [altitude, setAltitude] = useState("");
   const [source, setSource] = useState("auto");
+  const [frequencies, setFrequencies] = useState([""]);
+  const [showFrequencies, setShowFrequencies] = useState(false);
   const [geoError, setGeoError] = useState(null);
   const [geoLoading, setGeoLoading] = useState(false);
   const altitudeManual = useRef(false);
+
+  // One reading of the entered rows, so what is submitted and what the collapsed
+  // toggle counts can never disagree.
+  const validFrequencies = frequencies
+    .map((f) => parseFloat(f))
+    .filter((f) => !isNaN(f) && f > 0 && f < MAX_FREQUENCY_MHZ);
 
   // Auto-lookup elevation when lat/lon change and altitude hasn't been set by
   // hand. Debounced and aborted so typing a coordinate doesn't fire one
@@ -57,6 +74,7 @@ export default function SearchForm({ onSearch, loading }) {
       lon: parsedLon,
       altitude: parseFloat(altitude) || 0,
       source,
+      frequencies: validFrequencies,
     });
   }
 
@@ -147,6 +165,65 @@ export default function SearchForm({ onSearch, loading }) {
           </select>
         </label>
       </div>
+
+      <div className="freq-toggle">
+        <button
+          type="button"
+          className="btn-link"
+          onClick={() => setShowFrequencies(!showFrequencies)}
+        >
+          {showFrequencies
+            ? "Hide Measured Frequencies"
+            : validFrequencies.length > 0
+              ? `Measured Frequencies (${validFrequencies.length})`
+              : "Add Measured Frequencies"}
+        </button>
+      </div>
+
+      {showFrequencies && (
+        <div className="freq-section">
+          <span className="freq-label">Measured Frequencies (MHz)</span>
+          <div className="freq-inputs">
+            {frequencies.map((freq, i) => (
+              <div key={i} className="freq-row">
+                <input
+                  type="number"
+                  step="any"
+                  min={0}
+                  max={MAX_FREQUENCY_MHZ}
+                  value={freq}
+                  aria-label={`Frequency ${i + 1} (MHz)`}
+                  onChange={(e) => {
+                    const updated = [...frequencies];
+                    updated[i] = e.target.value;
+                    setFrequencies(updated);
+                  }}
+                  placeholder={`Freq ${i + 1} (MHz)`}
+                />
+                {frequencies.length > 1 && (
+                  <button
+                    type="button"
+                    className="btn-remove-freq"
+                    aria-label={`Remove frequency ${i + 1}`}
+                    onClick={() => setFrequencies(frequencies.filter((_, j) => j !== i))}
+                  >
+                    &times;
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+          {frequencies.length < MAX_FREQUENCIES && (
+            <button
+              type="button"
+              className="btn-add-freq"
+              onClick={() => setFrequencies([...frequencies, ""])}
+            >
+              + Add Frequency
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="form-actions">
         <button type="submit" className="btn-primary" disabled={loading}>
