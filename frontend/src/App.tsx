@@ -14,7 +14,6 @@ const SOURCE_LABELS: Record<string, string> = {
 function SummaryStrip({ towers, query }: { towers: Tower[]; query: TowerQuery | null }) {
   if (!towers.length) return null;
 
-  const ideal = towers.filter((t) => t.distance_class === "Ideal").length;
   const bands = [...new Set(towers.map((t) => t.band))];
   const best = towers[0];
 
@@ -23,10 +22,6 @@ function SummaryStrip({ towers, query }: { towers: Tower[]; query: TowerQuery | 
       <div className="stat-card">
         <span className="stat-value">{towers.length}</span>
         <span className="stat-label">Towers Found</span>
-      </div>
-      <div className="stat-card">
-        <span className="stat-value">{ideal}</span>
-        <span className="stat-label">Ideal Range</span>
       </div>
       <div className="stat-card">
         <span className="stat-value">{bands.join(", ")}</span>

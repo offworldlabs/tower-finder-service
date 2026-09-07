@@ -31,8 +31,6 @@ VALID = {
     "broadcast_bands": {"FM": [[87.8, 108.0]]},
     "ranking": {
         "band_priority": {"FM": 0},
-        "distance_classes": [{"label": "Ideal", "min_km": 0, "max_km": None}],
-        "distance_priority": {"Ideal": 0},
         "sort_order": [{"field": "band_priority", "ascending": True}, {"field": "score", "ascending": False}],
     },
     "search": {"default_radius_km": 80, "default_limit": 25},
@@ -94,10 +92,10 @@ class TestRejectsWithoutWriting:
     def test_structurally_broken_config_is_rejected(self, client, config_path):
         before = config_path.read_text()
 
-        r = _put(client, {"ranking": {"distance_classes": [{"label": "Ideal", "min_km": 8}]}})
+        r = _put(client, {"broadcast_bands": {"FM": 5}})
 
         assert r.status_code == 400
-        assert "max_km" in r.json()["detail"]
+        assert "must be a list" in r.json()["detail"]
         assert config_path.read_text() == before
 
     def test_a_validation_gap_is_caught_by_the_apply(self, client, config_path, monkeypatch):
@@ -107,7 +105,7 @@ class TestRejectsWithoutWriting:
         before = config_path.read_text()
         monkeypatch.setattr(towers_route, "validate_config", lambda body: None)
 
-        r = _put(client, {"ranking": {"distance_classes": [{"label": "Ideal", "min_km": 8}]}})
+        r = _put(client, {"broadcast_bands": {"FM": 5}})
 
         assert r.status_code == 400
         assert "could not be applied" in r.json()["detail"]
@@ -160,7 +158,6 @@ class TestAcceptsAndApplies:
                 "sort_order": [
                     {"field": "coverage_area_added_km2", "ascending": False},
                     {"field": "band_priority", "ascending": True},
-                    {"field": "distance_priority", "ascending": True},
                     {"field": "received_power_dbm", "ascending": False},
                 ]
             }
@@ -170,6 +167,17 @@ class TestAcceptsAndApplies:
 
         assert r.status_code == 200
         assert tower_ranking.SORT_ORDER[0]["field"] == "coverage_area_added_km2"
+
+    def test_distance_priority_sort_rule_is_rejected(self, client, config_path):
+        """Towers no longer carry a distance class, so the pre-2026-05-28
+        default ordering can no longer be written."""
+        before = config_path.read_text()
+
+        r = _put(client, {"ranking": {"sort_order": [{"field": "distance_priority", "ascending": True}]}})
+
+        assert r.status_code == 400
+        assert "distance_priority" in r.json()["detail"]
+        assert config_path.read_text() == before
 
     def test_applied_config_does_not_alias_the_request_body(self, client, config_path):
         """The handler applies the parsed body itself, then serialises it for

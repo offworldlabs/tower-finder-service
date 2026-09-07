@@ -177,12 +177,9 @@ class TestProcessAndRankCoverageIntegration:
             "broadcast_bands": {"FM": [[87.8, 108.0]]},
             "ranking": {
                 "band_priority": {"FM": 0},
-                "distance_classes": [{"label": "Ideal", "min_km": 0, "max_km": None}],
-                "distance_priority": {"Ideal": 0},
                 "sort_order": [
                     {"field": "coverage_area_added_km2", "ascending": False},
                     {"field": "band_priority", "ascending": True},
-                    {"field": "distance_priority", "ascending": True},
                     {"field": "received_power_dbm", "ascending": False},
                 ],
             },
