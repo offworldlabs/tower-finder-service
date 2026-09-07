@@ -28,6 +28,12 @@ MEASUREMENT_TOLERANCE_MHZ: dict[str, float] = {
 # match a tower the same way while both exist.
 FREQUENCY_MATCH_TOLERANCE_MHZ = 5.0
 
+# Records closer than this on the same frequency are one physical transmitter.
+# FCC channel-sharing partners (two callsigns, one ATSC multiplex) and LPFM
+# time-shares are licensed as separate stations at the same coordinates, and the
+# coordinates of one site can differ by a few metres between records.
+SHARED_TRANSMITTER_RADIUS_KM = 0.2
+
 # ── Load configurable settings from tower_config.json ────────────────────
 # Image-shipped default lives next to this module (config/ is image-only); the
 # runtime overlay holds whatever PUT /api/config writes back, so the source
@@ -563,6 +569,60 @@ def parse_user_frequencies(raw: str, max_count: int = 10) -> list[float]:
     return freqs
 
 
+def _merge_shared_transmitters(towers: list) -> list:
+    """Collapse FCC channel-sharing pairs and LPFM time-shares into one row each.
+
+    These are separate FCC licences (separate callsigns) but one physical
+    illuminator: two callsigns broadcasting from the same transmitter on the
+    same frequency, or an LPFM trio time-sharing one channel. Ranking or
+    counting them twice would inflate the result list and put the same signal
+    on the map at the same spot twice. A passive-radar node only needs the
+    frequency and the site to use the signal as an illuminator — the extra
+    callsigns are informational, not a second target.
+
+    Towers are grouped by exact frequency_mhz match, then greedily clustered
+    within a group in input order: a tower joins the first existing cluster
+    whose anchor (its first member) is within SHARED_TRANSMITTER_RADIUS_KM,
+    else it starts a new cluster. Each cluster collapses to its strongest
+    member (by received_power_dbm; ties keep the earliest in input order),
+    with the other members' callsigns attached as `shared_callsigns`.
+
+    Every returned tower carries `shared_callsigns` (empty when it stands
+    alone) so the response schema is stable whether or not a merge happened.
+    """
+    clusters: list[dict] = []
+    for t in towers:
+        freq = t["frequency_mhz"]
+        cluster = next(
+            (
+                c
+                for c in clusters
+                if c["frequency"] == freq
+                and haversine(t["latitude"], t["longitude"], c["anchor"]["latitude"], c["anchor"]["longitude"])
+                <= SHARED_TRANSMITTER_RADIUS_KM
+            ),
+            None,
+        )
+        if cluster is not None:
+            cluster["members"].append(t)
+        else:
+            clusters.append({"frequency": freq, "anchor": t, "members": [t]})
+
+    merged = []
+    for cluster in clusters:
+        members = cluster["members"]
+        primary = members[0]
+        for m in members[1:]:
+            if m["received_power_dbm"] > primary["received_power_dbm"]:
+                primary = m
+        shared_callsigns = sorted({m["callsign"] for m in members if m is not primary and m["callsign"]})
+        collapsed = dict(primary)
+        collapsed["shared_callsigns"] = shared_callsigns
+        merged.append(collapsed)
+
+    return merged
+
+
 def process_and_rank(
     raw_systems: list,
     user_lat: float,
@@ -682,6 +742,11 @@ def process_and_rank(
         if key not in seen or t["received_power_dbm"] > seen[key]["received_power_dbm"]:
             seen[key] = t
     towers = list(seen.values())
+
+    # Collapse FCC channel-sharing pairs and LPFM time-shares (distinct
+    # callsigns, one physical transmitter) into a single row — the
+    # (callsign, frequency) key above cannot catch these since the callsigns differ.
+    towers = _merge_shared_transmitters(towers)
 
     # When the SDR has provided measurements, only rank towers it can actually see.
     # Towers with no matching measurement are invisible to the radar — drop them.

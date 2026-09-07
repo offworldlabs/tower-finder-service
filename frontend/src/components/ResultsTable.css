@@ -112,3 +112,20 @@
   font-size: 0.72rem;
   font-weight: 700;
 }
+
+.results-table .rank-badge {
+  display: inline-block;
+  min-width: 1.6em;
+  padding: 2px 6px;
+  border-radius: 6px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.results-table .shared-callsigns {
+  display: block;
+  color: #6b7280;
+  font-weight: 500;
+  font-size: 0.72rem;
+  margin-top: 2px;
+}

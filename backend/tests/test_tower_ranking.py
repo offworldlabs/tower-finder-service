@@ -239,6 +239,7 @@ class TestProcessAndRank:
         assert t["licence_type"] == "Broadcast"
         assert t["licence_subtype"] == "FM"
         assert t["frequency_matched"] is False
+        assert t["shared_callsigns"] == []
 
     def test_single_fm_tower_distance_reasonable(self):
         result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON)
@@ -504,6 +505,8 @@ class TestProcessAndRank:
             "score",
             "power_db",
             "obw_fraction",
+            # Channel-sharing merge — always present, empty when the tower stands alone
+            "shared_callsigns",
         }
         assert expected_fields.issubset(t.keys())
 
@@ -526,6 +529,88 @@ class TestProcessAndRank:
         callsigns = {t["callsign"] for t in result}
         assert "K001" in callsigns
         assert "K002" in callsigns
+
+
+# ── Shared-transmitter merge (FCC channel-sharing, LPFM time-shares) ─────────
+
+
+class TestSharedTransmitterMerge:
+    # ~150 m of latitude — within SHARED_TRANSMITTER_RADIUS_KM (0.2 km).
+    _NEARBY_LAT_OFFSET = 0.00135
+
+    def test_channel_sharing_pair_merges_to_one_tower(self):
+        # WNTV + WRET-TV: two callsigns, one ATSC multiplex, same transmitter.
+        wntv = _device(183.0, 33.85, -84.388, callsign="WNTV", eirp=10000)
+        wret = _device(183.0, 33.85, -84.388, callsign="WRET-TV", eirp=10000)
+        result = process_and_rank([_system([wntv, wret])], _USER_LAT, _USER_LON)
+        assert len(result) == 1
+        assert result[0]["callsign"] == "WNTV"
+        assert result[0]["shared_callsigns"] == ["WRET-TV"]
+
+    def test_three_way_lpfm_time_share_merges_to_one_tower(self):
+        devices = [
+            _device(101.1, 33.85, -84.388, callsign="WBRU-LP", eirp=100),
+            _device(101.1, 33.85, -84.388, callsign="WFOO-LP", eirp=100),
+            _device(101.1, 33.85, -84.388, callsign="WVVX-LP", eirp=100),
+        ]
+        result = process_and_rank([_system(devices)], _USER_LAT, _USER_LON)
+        assert len(result) == 1
+        t = result[0]
+        assert t["callsign"] in {"WBRU-LP", "WFOO-LP", "WVVX-LP"}
+        others = sorted({"WBRU-LP", "WFOO-LP", "WVVX-LP"} - {t["callsign"]})
+        assert t["shared_callsigns"] == others
+
+    def test_same_frequency_distant_sites_not_merged(self):
+        near = _device(183.0, 33.85, -84.388, callsign="KNEAR")
+        far = _device(183.0, 33.85 + 0.05, -84.388, callsign="KFAR")  # ~5.5 km away
+        result = process_and_rank([_system([near, far])], _USER_LAT, _USER_LON)
+        assert len(result) == 2
+        assert all(t["shared_callsigns"] == [] for t in result)
+
+    def test_same_site_different_frequencies_not_merged(self):
+        a = _device(183.0, 33.85, -84.388, callsign="KAAA")
+        b = _device(189.0, 33.85, -84.388, callsign="KBBB")
+        result = process_and_rank([_system([a, b])], _USER_LAT, _USER_LON)
+        assert len(result) == 2
+        assert all(t["shared_callsigns"] == [] for t in result)
+
+    def test_stronger_signal_is_the_primary(self):
+        weak = _device(183.0, 33.85, -84.388, callsign="WEAK", eirp=1000)
+        strong = _device(183.0, 33.85, -84.388, callsign="STRONG", eirp=100000)
+        merged = process_and_rank([_system([weak, strong])], _USER_LAT, _USER_LON)
+        assert len(merged) == 1
+        assert merged[0]["callsign"] == "STRONG"
+        assert merged[0]["shared_callsigns"] == ["WEAK"]
+
+        # Compare against a run with only the strong device — eirp_dbm must match.
+        solo_device = _device(183.0, 33.85, -84.388, callsign="STRONG", eirp=100000)
+        solo = process_and_rank([_system([solo_device])], _USER_LAT, _USER_LON)
+        assert merged[0]["eirp_dbm"] == solo[0]["eirp_dbm"]
+
+    def test_sites_150m_apart_still_merge(self):
+        a = _device(183.0, 33.85, -84.388, callsign="WNTV")
+        b = _device(183.0, 33.85 + self._NEARBY_LAT_OFFSET, -84.388, callsign="WRET-TV")
+        result = process_and_rank([_system([a, b])], _USER_LAT, _USER_LON)
+        assert len(result) == 1
+        assert result[0]["shared_callsigns"] == ["WRET-TV"]
+
+    def test_ranks_stay_contiguous_after_merge(self):
+        wntv = _device(183.0, 33.85, -84.388, callsign="WNTV")
+        wret = _device(183.0, 33.85, -84.388, callsign="WRET-TV")
+        standalone = _device(95.5, 33.86, -84.388, callsign="KSOLO")
+        result = process_and_rank([_system([wntv, wret, standalone])], _USER_LAT, _USER_LON)
+        assert len(result) == 2
+        assert sorted(t["rank"] for t in result) == [1, 2]
+
+    def test_existing_same_callsign_dedup_still_applies(self):
+        # Same callsign, same site, same frequency — the pre-existing (callsign,
+        # frequency) dedup collapses these before the shared-transmitter merge
+        # ever runs, so there is no self-entry in shared_callsigns.
+        dup1 = _device(183.0, 33.85, -84.388, callsign="WNTV")
+        dup2 = _device(183.0, 33.85, -84.388, callsign="WNTV")
+        result = process_and_rank([_system([dup1, dup2])], _USER_LAT, _USER_LON)
+        assert len(result) == 1
+        assert result[0]["shared_callsigns"] == []
 
 
 # ── _as_float ────────────────────────────────────────────────────────────────
