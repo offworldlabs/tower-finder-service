@@ -11,6 +11,10 @@
         "ascending": true
       },
       {
+        "field": "score",
+        "ascending": false
+      },
+      {
         "field": "received_power_dbm",
         "ascending": false
       }

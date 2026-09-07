@@ -276,7 +276,10 @@ def apply_config(cfg: dict) -> None:
 
     # The fallback for a config that names no sort_order. It matches the shipped
     # tower_config.json so an overlay that omits the section ranks the same way
-    # as a fresh one. The monolith leads its own fallback with
+    # as a fresh one. Within a band tier the analyser's measured score decides
+    # where there is one (POST /api/towers); it is None on a GET, which
+    # _sort_key() reads as 0 for every tower, so the order there falls through
+    # to modelled received power. The monolith leads its own fallback with
     # coverage_area_added_km2; adopting that here would silently re-rank every
     # deployment whose config omits the section.
     sort_order = [
@@ -285,6 +288,7 @@ def apply_config(cfg: dict) -> None:
             "sort_order",
             [
                 {"field": "band_priority", "ascending": True},
+                {"field": "score", "ascending": False},
                 {"field": "received_power_dbm", "ascending": False},
             ],
         )

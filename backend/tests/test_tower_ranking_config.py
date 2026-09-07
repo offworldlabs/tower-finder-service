@@ -330,11 +330,13 @@ class TestApplyConfig:
         assert tower_ranking.SORT_ORDER == _shipped_default()["ranking"]["sort_order"]
         assert tower_ranking.BAND_PRIORITY == _shipped_default()["ranking"]["band_priority"]
 
-    def test_shipped_default_ranks_tv_by_power_then_fm(self):
-        """Band tier first, received power second, with VHF and UHF tied."""
+    def test_shipped_default_ranks_by_band_then_score_then_power(self):
+        """Band tier first, VHF and UHF tied; then measured score, then
+        modelled received power for towers without a measurement."""
         ranking = _shipped_default()["ranking"]
         assert ranking["sort_order"] == [
             {"field": "band_priority", "ascending": True},
+            {"field": "score", "ascending": False},
             {"field": "received_power_dbm", "ascending": False},
         ]
         assert ranking["band_priority"]["VHF"] == ranking["band_priority"]["UHF"]
@@ -387,6 +389,33 @@ class TestShippedRanking:
         assert {t["callsign"] for t in towers[:2]} == {"VHF_TINY", "UHF_TINY"}
         # Not a power tie-break: the FM tower is received far louder and still loses.
         assert towers[-1]["received_power_dbm"] > max(t["received_power_dbm"] for t in towers[:2])
+
+    def test_measured_score_outranks_modelled_power(self):
+        # POST /api/towers: the SDR heard the weak tower better than the
+        # strong one (a hill, say). Its score wins over the FSPL prediction.
+        devices = [
+            _device(freq_mhz=515.0, lat=33.93, lon=-84.388, callsign="UHF_STRONG", eirp=1_000_000.0),
+            _device(freq_mhz=545.0, lat=33.93, lon=-84.388, callsign="UHF_WEAK", eirp=100.0),
+        ]
+        measurements = [
+            {"freq_mhz": 515.0, "band": "UHF", "score": 0.4, "snr_db": None, "obw_fraction": None, "power_db": -60.0},
+            {"freq_mhz": 545.0, "band": "UHF", "score": 0.9, "snr_db": None, "obw_fraction": None, "power_db": -40.0},
+        ]
+        towers = tower_ranking.process_and_rank([_system(devices)], self._LAT, self._LON, measurements=measurements)
+        assert [t["callsign"] for t in towers] == ["UHF_WEAK", "UHF_STRONG"]
+        assert towers[0]["received_power_dbm"] < towers[1]["received_power_dbm"]
+
+    def test_score_never_lifts_fm_above_tv(self):
+        devices = [
+            _device(freq_mhz=95.5, lat=33.93, lon=-84.388, callsign="FM", eirp=100_000.0),
+            _device(freq_mhz=515.0, lat=33.93, lon=-84.388, callsign="UHF", eirp=100.0),
+        ]
+        measurements = [
+            {"freq_mhz": 95.5, "band": "FM", "score": 1.0, "snr_db": 50.0, "obw_fraction": 0.5, "power_db": None},
+            {"freq_mhz": 515.0, "band": "UHF", "score": 0.1, "snr_db": None, "obw_fraction": None, "power_db": -70.0},
+        ]
+        towers = tower_ranking.process_and_rank([_system(devices)], self._LAT, self._LON, measurements=measurements)
+        assert [t["callsign"] for t in towers] == ["UHF", "FM"]
 
     def test_distance_no_longer_decides_the_order(self):
         # Under the old classes an 80 km tower was "Far" and a 20 km one
