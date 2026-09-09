@@ -24,11 +24,13 @@ from services.region_lookup import warm_borders
 
 logger = logging.getLogger(__name__)
 
+# The API's first path segment, for the catch-all below. Empty disables that
+# guard rather than claiming every path.
+_API_SEGMENT = router.prefix.strip("/")
+
 # Absent from Python 3.12's table, and python:3.12-slim ships no
 # /etc/mime.types, so without this the bundled Inter faces leave the image
-# as application/octet-stream. Untested on purpose: every machine that runs
-# pytest has a system mime.types that already maps it, so a test would pass
-# whether or not this line is here.
+# as application/octet-stream.
 mimetypes.add_type("font/woff2", ".woff2")
 
 
@@ -50,11 +52,7 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    """A factory so a test can build one against a different frontend dist.
-
-    The docs pages stay on: whatever is in front decides whether to serve them,
-    and only the 8443 edge refuses them (see its template).
-    """
+    """A factory, so a test can build one against a different frontend dist."""
     dist = Path(os.getenv("TOWER_FINDER_FRONTEND_DIST", Path(__file__).parent / "frontend" / "dist"))
     application = FastAPI(
         title="tower-finder-service",
@@ -72,6 +70,12 @@ def create_app() -> FastAPI:
         @application.get("/{full_path:path}", include_in_schema=False)
         async def serve_spa(full_path: str):
             """Serve the built UI, falling back to index.html for client routes."""
+            # Before every other exit, so an unmatched endpoint is a 404 a caller
+            # can branch on however it is spelled, rather than a 200 that fails
+            # to parse. Segment, not prefix, so a doubled slash still counts.
+            # GET only, since so is this route; other methods get a 405.
+            if _API_SEGMENT and full_path.lstrip("/").split("/", 1)[0] == _API_SEGMENT:
+                raise HTTPException(status_code=404)
             try:
                 candidate = (dist / full_path).resolve()
             except ValueError:
@@ -81,11 +85,6 @@ def create_app() -> FastAPI:
             # resolve() + is_relative_to keeps "../" out of the served tree.
             if full_path and candidate.is_file() and candidate.is_relative_to(dist.resolve()):
                 return FileResponse(candidate)
-            # No file, and under the API prefix: a 404 a caller can branch on,
-            # where the shell is a 200 that fails to parse. GET only, since so
-            # is this route; other methods already get a 405.
-            if f"/{full_path}".startswith(f"{router.prefix}/") or f"/{full_path}" == router.prefix:
-                raise HTTPException(status_code=404)
             return FileResponse(dist / "index.html")
 
     return application

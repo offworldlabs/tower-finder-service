@@ -234,8 +234,11 @@ def test_the_edge_refuses_the_cdn_backed_docs_pages(public_blocks, path):
 
 
 def test_the_docs_refusal_reaches_the_oauth2_redirect(public_blocks):
-    """FastAPI registers /docs/oauth2-redirect whenever the docs are on, and an
-    exact match would leave it proxied."""
+    """FastAPI registers /docs/oauth2-redirect whenever the docs are on. `=` does
+    not reach it, and a bare prefix loses to any regex location added later, so
+    only `^~` refuses it for good."""
     for block in public_blocks:
-        modifier, _ = _location(block, "/docs")
-        assert modifier != "=", "an exact match leaves /docs/oauth2-redirect proxied"
+        found = _location(block, "/docs")
+        assert found is not None, "/docs has no location of its own"
+        modifier, _ = found
+        assert modifier == "^~", f"{modifier or 'a bare prefix'!r} leaves /docs/oauth2-redirect reachable"

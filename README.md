@@ -177,26 +177,27 @@ while its assets do not: `nginx -t` passes, `/api/health` passes, and an
 attempt at this same swap failed (its PR #260). So check the page too:
 
 ```bash
-# --resolve for the same reason the deploy probe uses it: every name resolves to
-# Cloudflare, which pre-flip still forwards to retina-server, so without it you
-# verify the server you are replacing and it passes.
+# --resolve as above.
 HOST=towers.retina.fm
 CURL="curl -sk --resolve $HOST:8443:127.0.0.1"
 
-# GET, not -I: FastAPI registers GET only, so HEAD answers 405 and `always`
-# stamps the policy onto that too, passing on a page that was never served.
-$CURL -D- -o /dev/null "https://$HOST:8443/" | grep -i content-security-policy \
-  || echo "NO POLICY ON THE DOCUMENT"
-
-
-# Guarded, not chained: an empty ASSET would otherwise fetch the document
-# again and return the 200 the check is looking for. No `set -e` either, so a
-# failing probe reports rather than closing the operator's session.
-ASSET=$($CURL "https://$HOST:8443/" | grep -o '/assets/[^"]*\.js' | head -1)
-if [ -z "$ASSET" ]; then
-  echo "NO ASSET LINK IN THE DOCUMENT"
+# Transport first, so an unreachable listener does not read as a missing header.
+if ! $CURL -o /dev/null "https://$HOST:8443/"; then
+  echo "CANNOT REACH THE LISTENER"
 else
-  $CURL -o /dev/null -w '%{http_code}\n' "https://$HOST:8443$ASSET"  # must be 200
+  # GET, not -I: FastAPI registers GET only, so HEAD answers 405 and `always`
+  # stamps the policy onto that too, passing on a page never served.
+  $CURL -D- -o /dev/null "https://$HOST:8443/" | grep -i content-security-policy \
+    || echo "NO POLICY ON THE DOCUMENT"
+
+  # An empty ASSET would otherwise re-fetch the document and return the 200
+  # the check is looking for.
+  ASSET=$($CURL "https://$HOST:8443/" | grep -o '/assets/[^"]*\.js' | head -1)
+  if [ -z "$ASSET" ]; then
+    echo "NO ASSET LINK IN THE DOCUMENT"
+  else
+    $CURL -o /dev/null -w '%{http_code}\n' "https://$HOST:8443$ASSET"  # must be 200
+  fi
 fi
 ```
 
