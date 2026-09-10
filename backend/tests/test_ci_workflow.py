@@ -285,3 +285,122 @@ def test_the_edge_probe_is_reachable_and_fatal(job, workflow):
     assert not EXIT_SUCCESS_RE.search(between), f"{job}: an exit before the edge probe makes it unreachable"
     after = script[probe.end() :]
     assert re.search(r"exit\s+[1-9]\d*", after), f"{job}: a failing edge probe does not fail the deploy"
+
+
+# The edge's config travels in its image (deploy/nginx/Dockerfile) rather than a
+# bind mount, so a template change alters the image and the `up` below recreates
+# the container. Compose never recreates one for a mounted file's contents, and
+# nginx renders its config once, at start.
+COMPOSE = REPO_ROOT / "docker-compose.yml"
+
+PREFLIGHT_RE = re.compile(r"docker compose\b[^\n]*\brun\b[^\n]*\bedge\b[^\n]*\bnginx -t\b")
+RENDER_RE = re.compile(r"\bsed\b[^\n]*\bedge\.conf\.template\b")
+READ_RUNNING_RE = re.compile(r"\bcat /etc/nginx/conf\.d/default\.conf\b")
+
+
+def _guard(script, opener):
+    """(top-level body, nested body) of the `if` whose line contains `opener`.
+
+    Split by indentation because an `exit` that sits inside a nested condition
+    does not make the outer guard fatal, and a body-wide search cannot tell the
+    two apart.
+    """
+    lines = [line for line in script.splitlines() if line.strip()]
+    for i, line in enumerate(lines):
+        if opener in line and line.lstrip().startswith("if "):
+            outer = len(line) - len(line.lstrip())
+            top, nested = [], []
+            for nxt in lines[i + 1 :]:
+                depth = len(nxt) - len(nxt.lstrip())
+                if depth <= outer:
+                    break
+                (top if depth == outer + 2 else nested).append(nxt.strip())
+            return top, nested
+    return None
+
+
+def _redirect(script, pattern, job, missing):
+    """The path a matched command writes to."""
+    match = pattern.search(script)
+    assert match, f"{job}: {missing}"
+    line = script[script.rfind("\n", 0, match.start()) + 1 : script.find("\n", match.start())]
+    target = re.search(r">\s*([^\s;]+)", line)
+    assert target, f"{job}: {missing}: {line.strip()}"
+    return target.group(1)
+
+
+def _position(script, pattern, job, missing):
+    match = pattern.search(script)
+    assert match, f"{job}: {missing}"
+    return match.start()
+
+
+@pytest.mark.parametrize("job", sorted(EDGE_PROBE_EXPECTED))
+def test_a_rejected_template_stops_before_the_running_edge_is_replaced(job, workflow):
+    """`nginx -t` reads the certificates, so it runs on the droplet rather than
+    in the image build. Ordering is the whole point: after the `up` it would
+    report a fault the deploy had already shipped."""
+    script = _ssh_script(workflow["jobs"][job])
+    check = _position(script, PREFLIGHT_RE, job, "nothing syntax-checks the config before the deploy")
+    up = _position(script, DEPLOY_UP_RE, job, "expected 'docker compose ... up -d --build'")
+    assert check < up, f"{job}: the config is checked only after the container it replaces is gone"
+
+
+@pytest.mark.parametrize("job", sorted(EDGE_PROBE_EXPECTED))
+def test_the_running_config_is_compared_against_the_template(job, workflow):
+    """A header is present from the day it is added, so it cannot show which
+    config is loaded. The rendered file can."""
+    script = _ssh_script(workflow["jobs"][job])
+    up = _position(script, DEPLOY_UP_RE, job, "expected 'docker compose ... up -d --build'")
+    render = _position(script, RENDER_RE, job, "nothing renders the template to compare against")
+    read = _position(script, READ_RUNNING_RE, job, "nothing reads the config the edge is running")
+    assert EDGE_PROBE_EXPECTED[job] in RENDER_RE.search(script).group(), (
+        f"{job}: renders another environment's hostname into the expected config"
+    )
+    assert up < read, f"{job}: reads the running config before the deploy replaces it"
+    guard = _guard(script, "diff")
+    assert guard, f"{job}: the rendered and running configs are never compared"
+    top, _ = guard
+    assert any(re.fullmatch(r"exit [1-9]\d*", line) for line in top), (
+        f"{job}: a config that does not match the template does not fail the deploy"
+    )
+    assert render < read, f"{job}: compares against a template rendered after the read"
+    # The two files the steps above wrote, not whatever the diff happens to name:
+    # a comparison of two other paths passes every other assertion here.
+    expected = _redirect(script, RENDER_RE, job, "the rendered template goes nowhere")
+    running = _redirect(script, READ_RUNNING_RE, job, "the running config goes nowhere")
+    assert expected != running, f"{job}: both halves of the comparison are written to {expected}"
+    line = next(text for text in script.splitlines() if "diff" in text and text.lstrip().startswith("if "))
+    assert expected in line and running in line, (
+        f"{job}: the comparison does not name the files this deploy wrote: {line.strip()}"
+    )
+
+
+@pytest.mark.parametrize("job", sorted(EDGE_PROBE_EXPECTED))
+def test_the_document_is_asserted_not_just_the_api(job, workflow):
+    """`/api/health` stays 200 when a frontend build leaves no index.html, and
+    every header carries `always`, so a 404 document satisfies a header check."""
+    script = _ssh_script(workflow["jobs"][job])
+    guard = _guard(script, "edge_doc")
+    assert guard, f"{job}: nothing asserts the status of the document"
+    top, _ = guard
+    assert any(re.fullmatch(r"exit [1-9]\d*", line) for line in top), (
+        f"{job}: a non-200 document does not fail the deploy"
+    )
+    request = re.search(
+        rf'--resolve "{re.escape(EDGE_PROBE_EXPECTED[job])}:8443:127\.0\.0\.1"'
+        rf' "https://{re.escape(EDGE_PROBE_EXPECTED[job])}:8443/"',
+        script,
+    )
+    assert request, f"{job}: the document request does not address this job's own edge"
+
+
+def test_the_edge_config_travels_in_the_image_not_a_bind_mount():
+    """A bind-mounted template is invisible to compose's recreate logic, which
+    is what left both droplets serving a config the deploy had replaced."""
+    compose = yaml.safe_load(COMPOSE.read_text())
+    edge = compose["services"]["edge"]
+    assert "build" in edge, "the edge must be built, or a template change never reaches nginx"
+    assert "image" not in edge, "a stock image cannot carry this repo's template"
+    mounts = [v for v in edge.get("volumes", []) if "edge.conf.template" in v]
+    assert not mounts, f"the template is still bind-mounted, so compose cannot see it change: {mounts}"

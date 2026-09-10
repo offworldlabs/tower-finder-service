@@ -164,6 +164,18 @@ curl -sk --resolve "towers.retina.fm:8443:127.0.0.1" \
   https://towers.retina.fm:8443/api/health   # must be 200
 ```
 
+It then asserts two things a status cannot show. The config the container is
+running is compared with this checkout's template, rendered the same way, so a
+container that never picked the change up fails the deploy rather than serving
+the previous one; and `/` is required to be 200, which `/api/health` does not
+establish, since the app serves the API with or without a built frontend. The
+config travels in the edge's image (`deploy/nginx/Dockerfile`) so that a
+template change alters the image and `docker compose up -d --build` replaces
+the container: a bind-mounted file's contents are invisible to compose, which
+recreates only on a changed definition. `nginx -t` runs against the new image
+before that swap, so a template nginx rejects fails the deploy with the working
+container still up.
+
 `--resolve` rather than DNS on purpose: every name resolves to Cloudflare,
 not to the droplet, and the probe must reach the local listener directly.
 `deploy/smoke-test.sh` still targets `https://towers.retina.fm` over 443 —
