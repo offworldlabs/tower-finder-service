@@ -130,11 +130,40 @@ server {
         return 403 "Origin reachable through Cloudflare only.\n";
     }
 
-    # Mirrors snippets/security-headers-api.conf: no HTML is served here, so the
-    # page-level headers (CSP, frame-ancestors) would be noise.
+    # This vhost serves the SPA as well as the API, so it carries the page
+    # headers too. They reach the browser only by inheritance: `location /`
+    # below must declare no add_header of its own, or nginx drops all of these.
+    #
+    # img-src: the favicon is 'self', the tiles are CARTO, and `data:` carries
+    # leaflet.css's control icons, which Vite inlines under its size limit. No
+    # control mounts them today; the source keeps its `*.`, which matches a
+    # shard and not the apex.
+    # style-src 'unsafe-inline': L.divIcon builds each marker as HTML with a
+    # style attribute.
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.basemaps.cartocdn.com; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'" always;
     add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    # (self), not (): the search form's "Use My Location" calls navigator.geolocation.
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=(self)" always;
+    # `always` on all six: without it nginx drops them below 2xx/3xx, which is
+    # the 403 above, the 429 from limit_req, and its own 502.
+
+    # Swagger UI, its oauth2-redirect shim and ReDoc load from cdn.jsdelivr.net
+    # and bootstrap inline, so this policy renders them blank. Refused here and
+    # not in the app, which also answers on hostnames that send no policy.
+    # ^~ claims the whole /docs prefix, which nothing else uses, and is what
+    # reaches the oauth2-redirect. /openapi.json is untouched: CSP does not
+    # govern JSON. Retiring the last no-policy hostname is the flip's final
+    # step (README, "Own ingress + the flip plan").
+    location ^~ /docs {
+        return 404;
+    }
+
+    location = /redoc {
+        return 404;
+    }
 
     location / {
         limit_req zone=tfs_edge_api burst=60 nodelay;

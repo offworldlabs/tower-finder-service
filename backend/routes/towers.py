@@ -24,10 +24,10 @@ from services.tower_ranking import (
     validate_config,
 )
 
-router = APIRouter()
+router = APIRouter(prefix="/api")
 
 
-@router.get("/api/health")
+@router.get("/health")
 async def health():
     # Read per request, not at import: three near-identical stacks make
     # "which environment answered?" otherwise unanswerable from outside.
@@ -137,7 +137,7 @@ async def _enrich_with_elevation(towers: list) -> None:
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 
-@router.get("/api/towers")
+@router.get("/towers")
 async def find_towers(
     lat: float = Query(..., ge=-90, le=90),
     lon: float = Query(..., ge=-180, le=180),
@@ -186,7 +186,7 @@ async def find_towers(
     }
 
 
-@router.post("/api/towers")
+@router.post("/towers")
 async def find_towers_with_measurements(payload: MeasurementPayload):
     """Tower search enriched with spectrum-analyser measurements from retina-spectrum.
 
@@ -228,7 +228,7 @@ async def find_towers_with_measurements(payload: MeasurementPayload):
     }
 
 
-@router.get("/api/elevation")
+@router.get("/elevation")
 async def get_elevation(
     lat: float = Query(..., ge=-90, le=90),
     lon: float = Query(..., ge=-180, le=180),
@@ -244,13 +244,13 @@ async def get_elevation(
     return {"latitude": lat, "longitude": lon, "elevation_m": elev}
 
 
-@router.get("/api/config")
+@router.get("/config")
 async def get_config():
     with open(_CONFIG_PATH) as f:
         return json.load(f)
 
 
-@router.put("/api/config", dependencies=[Depends(require_admin)])
+@router.put("/config", dependencies=[Depends(require_admin)])
 async def update_config(body: dict):
     # Sanity check: config should be a reasonable size
     raw = json.dumps(body)
