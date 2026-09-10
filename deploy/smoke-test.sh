@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Post-deploy smoke test for tower-finder-service.
 # Hits the public URL (through the Cloudflare tunnel) to validate the full path.
+# Functional checks only. retina-server's vhost for the public name forwards
+# just the tower paths here, so /api/health on 443 is answered by its own
+# backend; which environment replied is asserted on this service's 8443 edge,
+# in the deploy job, and cannot be read over the public name until the flip.
 set -euo pipefail
 
 BASE_URL="${BASE_URL:-https://towers.retina.fm}"
@@ -21,28 +25,10 @@ check_status() {
   fi
 }
 
-check_environment() {
-  local expected="$1"
-  printf "  %-40s " "environment is ${expected}"
-  local actual
-  actual=$(curl -s --connect-timeout 10 --max-time 60 "${BASE_URL}/api/health" \
-    | python3 -c "import json,sys; print(json.load(sys.stdin).get('environment','?'))" 2>/dev/null) \
-    || { echo "FAIL (unreadable)"; FAIL=$((FAIL + 1)); return; }
-  if [ "$actual" = "$expected" ]; then
-    echo "OK"; PASS=$((PASS + 1))
-  else
-    echo "FAIL (${actual} != ${expected})"; FAIL=$((FAIL + 1))
-  fi
-}
-
 echo "── tower-finder-service smoke tests (${BASE_URL}) ──"
 check_status "GET /api/health" "${BASE_URL}/api/health" "200"
 check_status "GET /api/config" "${BASE_URL}/api/config" "200"
 check_status "GET /api/towers (Greenville SC)" "${BASE_URL}/api/towers?lat=34.85&lon=-82.40" "200"
-
-if [ -n "${EXPECT_ENV:-}" ]; then
-  check_environment "$EXPECT_ENV"
-fi
 
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed"

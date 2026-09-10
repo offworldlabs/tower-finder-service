@@ -198,11 +198,9 @@ def test_edge_mounts_the_origin_certificate_read_only():
         certs = mounts["/etc/ssl/cloudflare"]
         assert certs["source"] == "/etc/ssl/cloudflare"
         assert certs["read_only"] is True
-        # Rendered under this name so it replaces the stock server block rather
-        # than sitting beside it; see docker-compose.yml.
-        template = mounts["/etc/nginx/templates/default.conf.template"]
-        assert template["source"].endswith("deploy/nginx/edge.conf.template")
-        assert template["read_only"] is True
+        # The certificates are host state and have to be mounted. The config is
+        # not: it travels in the image, so compose can see it change.
+        assert "/etc/nginx/templates/default.conf.template" not in mounts
 
 
 def test_edge_reaches_the_app_without_retina_s_network():
