@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from app import app
 from core.auth import ENV_VAR
-from tests._helpers import device, system
+from tests._helpers import device, get_towers, system
 
 
 @pytest.fixture()
@@ -148,6 +148,23 @@ def _make_httpx_mock(get_return=None, get_side_effect=None):
     return unittest.mock.patch("httpx.AsyncClient", return_value=mock_ctx)
 
 
+def _status_error_response(status_code):
+    """A response whose raise_for_status() raises for that status.
+
+    The status has to be a real int, not a bare MagicMock: the classification
+    under test compares it.
+    """
+    resp = unittest.mock.MagicMock()
+    resp.raise_for_status = unittest.mock.MagicMock(
+        side_effect=httpx.HTTPStatusError(
+            f"{status_code} error",
+            request=unittest.mock.MagicMock(),
+            response=unittest.mock.MagicMock(status_code=status_code),
+        )
+    )
+    return resp
+
+
 class TestBatchLookupElevations:
     async def test_empty_list_returns_empty_dict(self):
         from routes.towers import _batch_lookup_elevations
@@ -167,38 +184,76 @@ class TestBatchLookupElevations:
 
         assert result == {(33.9, -84.6): 123.4}
 
-    async def test_http_timeout_returns_empty_dict(self):
-        from routes.towers import _batch_lookup_elevations
+    async def test_http_timeout_raises_unavailable(self):
+        from routes.towers import ElevationUnavailable, _batch_lookup_elevations
 
         with _make_httpx_mock(get_side_effect=httpx.TimeoutException("timed out")):
-            result = await _batch_lookup_elevations([(33.9, -84.6)])
+            with pytest.raises(ElevationUnavailable):
+                await _batch_lookup_elevations([(33.9, -84.6)])
 
-        assert result == {}
+    async def test_http_500_error_raises_unavailable(self):
+        from routes.towers import ElevationUnavailable, _batch_lookup_elevations
 
-    async def test_http_500_error_returns_empty_dict(self):
-        from routes.towers import _batch_lookup_elevations
+        with _make_httpx_mock(get_return=_status_error_response(500)):
+            with pytest.raises(ElevationUnavailable):
+                await _batch_lookup_elevations([(33.9, -84.6)])
 
-        mock_resp = unittest.mock.MagicMock()
-        mock_resp.raise_for_status = unittest.mock.MagicMock(
-            side_effect=httpx.HTTPStatusError(
-                "500 Server Error",
-                request=unittest.mock.MagicMock(),
-                response=unittest.mock.MagicMock(),
-            )
-        )
+    async def test_rate_limiting_raises_unavailable(self):
+        """429 is open-meteo's own limit, not a fault in the request: waiting
+        fixes it, so it must not read as a broken route."""
+        from routes.towers import ElevationUnavailable, _batch_lookup_elevations
 
-        with _make_httpx_mock(get_return=mock_resp):
-            result = await _batch_lookup_elevations([(33.9, -84.6)])
+        with _make_httpx_mock(get_return=_status_error_response(429)):
+            with pytest.raises(ElevationUnavailable):
+                await _batch_lookup_elevations([(33.9, -84.6)])
 
-        assert result == {}
+    @pytest.mark.parametrize("status", [400, 404, 422])
+    async def test_a_rejected_request_is_not_reported_as_the_dependency(self, status):
+        """A 4xx is open-meteo rejecting the request we built, so it is ours to
+        answer for. Reporting it as the dependency would answer 503, which the
+        post-deploy smoke passes on, gating a permanently broken route green."""
+        from routes.towers import ElevationUnavailable, _batch_lookup_elevations
 
-    async def test_generic_connection_error_returns_empty_dict(self):
-        from routes.towers import _batch_lookup_elevations
+        with _make_httpx_mock(get_return=_status_error_response(status)):
+            with pytest.raises(httpx.HTTPStatusError) as exc_info:
+                await _batch_lookup_elevations([(33.9, -84.6)])
+        assert not isinstance(exc_info.value, ElevationUnavailable)
+
+    async def test_generic_connection_error_raises_unavailable(self):
+        from routes.towers import ElevationUnavailable, _batch_lookup_elevations
 
         with _make_httpx_mock(get_side_effect=httpx.ConnectError("connection refused")):
-            result = await _batch_lookup_elevations([(33.9, -84.6)])
+            with pytest.raises(ElevationUnavailable):
+                await _batch_lookup_elevations([(33.9, -84.6)])
 
-        assert result == {}
+    async def test_unreadable_body_raises_unavailable(self):
+        """open-meteo answered, with something that will not read as numbers.
+        Still the dependency's failure, not ours."""
+        from routes.towers import ElevationUnavailable, _batch_lookup_elevations
+
+        mock_resp = unittest.mock.MagicMock()
+        mock_resp.raise_for_status = unittest.mock.MagicMock()
+        mock_resp.json.return_value = {"elevation": ["not a number"]}
+
+        with _make_httpx_mock(get_return=mock_resp):
+            with pytest.raises(ElevationUnavailable):
+                await _batch_lookup_elevations([(33.9, -84.6)])
+
+    async def test_a_fault_of_our_own_is_not_reported_as_the_dependency(self):
+        """The classification is what /api/elevation's 503 and the post-deploy
+        smoke both rest on: a bug in the handling above must not reach either
+        of them wearing open-meteo's name."""
+        from routes.towers import ElevationUnavailable, _batch_lookup_elevations
+
+        mock_resp = unittest.mock.MagicMock()
+        mock_resp.raise_for_status = unittest.mock.MagicMock()
+        # A dict where the code indexes a list: the shape a refactor gets wrong.
+        mock_resp.json.return_value = {"elevation": {"0": 123.4}}
+
+        with _make_httpx_mock(get_return=mock_resp):
+            with pytest.raises(Exception) as exc_info:  # noqa: PT011
+                await _batch_lookup_elevations([(33.9, -84.6)])
+        assert not isinstance(exc_info.value, ElevationUnavailable)
 
 
 # ── find_towers service-error paths ─────────────────────────────────────────
@@ -533,14 +588,93 @@ class TestElevationEndpoint:
         assert body["latitude"] == 42.38708028093612
         assert body["longitude"] == -71.24905416622781
 
-    def test_upstream_failure_returns_502(self, client):
+    def test_dependency_failure_returns_503(self, client):
+        """Separate from the 404 below so a caller, and the post-deploy smoke,
+        can tell an upstream outage from a route that has stopped working."""
+        from routes.towers import ElevationUnavailable
+
+        with unittest.mock.patch(
+            "routes.towers._batch_lookup_elevations",
+            new=unittest.mock.AsyncMock(side_effect=ElevationUnavailable("open-meteo unreachable")),
+        ):
+            r = client.get("/api/elevation", params={"lat": 33.9, "lon": -84.6})
+        assert r.status_code == 503
+        assert "Elevation service unavailable" in r.json()["detail"]
+
+    def test_a_point_with_no_data_returns_404(self, client):
+        """open-meteo answered; it just has no DEM coverage here. That is a
+        valid answer about the point, not a failure of the service."""
         with unittest.mock.patch(
             "routes.towers._batch_lookup_elevations",
             new=unittest.mock.AsyncMock(return_value={}),
         ):
             r = client.get("/api/elevation", params={"lat": 33.9, "lon": -84.6})
-        assert r.status_code == 502
-        assert "Elevation lookup failed" in r.json()["detail"]
+        assert r.status_code == 404
+        assert "No elevation data" in r.json()["detail"]
+
+    def test_a_fault_of_our_own_is_a_500_not_a_503(self, client):
+        """The smoke check passes a 503 carrying this detail, so a bug of ours
+        must never produce one: it would gate a broken route green."""
+        with unittest.mock.patch(
+            "routes.towers._batch_lookup_elevations",
+            new=unittest.mock.AsyncMock(side_effect=KeyError(0)),
+        ):
+            r = client.get("/api/elevation", params={"lat": 33.9, "lon": -84.6})
+        assert r.status_code == 500
+
+    def test_a_request_open_meteo_rejects_is_a_500_not_a_503(self, client):
+        """The whole route, not just the classification: open-meteo answering
+        400 means the request we build is wrong, and a 400 is what a renamed
+        parameter or a malformed coordinate list gets. Answering 503 would have
+        the smoke check report the route healthy and pass the deploy."""
+        with _make_httpx_mock(get_return=_status_error_response(400)):
+            r = client.get("/api/elevation", params={"lat": 33.45, "lon": -112.07})
+        assert r.status_code == 500
+        assert "Elevation service unavailable" not in r.text
+
+    def test_towers_still_answers_when_the_lookup_itself_faults(self, client):
+        """Best-effort covers a fault of ours too: /api/towers answers with the
+        towers and a null elevation, not a 500."""
+        raw = [system([device(95.5, 33.9, -84.6, callsign="WFAR", eirp=10000)], "Broadcast", "FM")]
+
+        with (
+            unittest.mock.patch("routes.towers.API_KEY", ""),
+            unittest.mock.patch(
+                "routes.towers.fetch_fcc_broadcast_systems",
+                new=unittest.mock.AsyncMock(return_value=raw),
+            ),
+            unittest.mock.patch(
+                "routes.towers._batch_lookup_elevations",
+                new=unittest.mock.AsyncMock(side_effect=KeyError(0)),
+            ),
+        ):
+            r = client.get("/api/towers", params={"lat": 33.9, "lon": -84.6, "source": "us"})
+        assert r.status_code == 200
+        assert r.json()["towers"], "towers must still be returned"
+        assert all(t["elevation_m"] is None for t in r.json()["towers"])
+
+    def test_towers_still_answers_when_elevation_is_unavailable(self, client):
+        """Enrichment is best-effort: a dependency outage must not take the
+        tower list down with it."""
+        from routes.towers import ElevationUnavailable
+
+        raw = [system([device(95.5, 33.9, -84.6, callsign="WFAR", eirp=10000)], "Broadcast", "FM")]
+
+        with (
+            unittest.mock.patch("routes.towers.API_KEY", ""),
+            unittest.mock.patch(
+                "routes.towers.fetch_fcc_broadcast_systems",
+                new=unittest.mock.AsyncMock(return_value=raw),
+            ),
+            unittest.mock.patch(
+                "routes.towers._batch_lookup_elevations",
+                new=unittest.mock.AsyncMock(side_effect=ElevationUnavailable("down")),
+            ),
+        ):
+            r = client.get("/api/towers", params={"lat": 33.9, "lon": -84.6, "source": "us"})
+        assert r.status_code == 200
+        assert r.json()["towers"], "towers must still be returned"
+        assert all(t["elevation_m"] is None for t in r.json()["towers"])
 
     def test_rejects_out_of_range_latitude(self, client):
         r = client.get("/api/elevation", params={"lat": 91, "lon": 0})
@@ -564,18 +698,7 @@ class TestUserFrequencies:
     ]
 
     def _get(self, client, query):
-        with (
-            unittest.mock.patch("routes.towers.API_KEY", ""),
-            unittest.mock.patch(
-                "routes.towers.fetch_fcc_broadcast_systems",
-                new=unittest.mock.AsyncMock(return_value=self._SYSTEMS),
-            ),
-            unittest.mock.patch(
-                "routes.towers._batch_lookup_elevations",
-                new=unittest.mock.AsyncMock(return_value={}),
-            ),
-        ):
-            return client.get(f"/api/towers?{query}")
+        return get_towers(client, query, self._SYSTEMS)
 
     def test_frequencies_echoed_in_query(self, client):
         r = self._get(client, "lat=33.9&lon=-84.6&source=us&frequencies=1234.5")
@@ -584,7 +707,12 @@ class TestUserFrequencies:
 
     def test_contract_echo_shape(self, client):
         """Byte-for-byte what assert_tower_contract greps for: key name and
-        JSON rendering both count, so this pins the serialized form."""
+        JSON rendering both count, so this pins the serialized form.
+
+        Pinned the same way by SMOKE_FREQ_ECHO in deploy/smoke-common.sh and by
+        TOWER_CONTRACT_ECHO in retina-server's deploy/tower-contract.sh. Change
+        the shape, change all three.
+        """
         r = self._get(client, "lat=33.9&lon=-84.6&source=us&frequencies=1234.5")
         assert '"user_frequencies_mhz":[1234.5]' in r.content.decode()
 
@@ -603,3 +731,51 @@ class TestUserFrequencies:
         r = self._get(client, "lat=33.9&lon=-84.6&source=us&frequencies=abc,,-5")
         assert r.status_code == 200
         assert r.json()["query"]["user_frequencies_mhz"] == []
+
+    def test_repeated_frequencies_key_all_count(self, client):
+        """Starlette keeps only the last occurrence of a repeated key for a
+        scalar-typed query param. requests (used by retina-gui's proxy) sends
+        a list-valued param exactly this way, so a repeated `frequencies` key
+        must not silently drop everything but the last one."""
+        r = self._get(client, "lat=33.9&lon=-84.6&source=us&frequencies=95.5&frequencies=101.1")
+        assert r.status_code == 200
+        assert r.json()["query"]["user_frequencies_mhz"] == [95.5, 101.1]
+
+    def test_many_valid_repeated_frequencies_keys_capped_at_ten(self, client):
+        """Fifteen valid occurrences, well inside every bound, so the
+        response's cap of ten is the only thing that can be limiting it."""
+        many = "&".join(f"frequencies={90 + i}.5" for i in range(15))
+        r = self._get(client, f"lat=33.9&lon=-84.6&source=us&{many}")
+        assert r.status_code == 200
+        assert len(r.json()["query"]["user_frequencies_mhz"]) == 10
+
+    def test_many_repeated_junk_keys_do_not_hide_a_valid_one(self, client):
+        """2000 unparseable occurrences must be absorbed without an error, and
+        without costing the valid value behind them: junk never trips the
+        response cap, so nothing but a ceiling on what is examined could drop
+        it, and there is none."""
+        junk = "&".join(f"frequencies=notafreq{i}" for i in range(2000))
+        query = f"lat=33.9&lon=-84.6&source=us&{junk}&frequencies=95.5"
+        r = self._get(client, query)
+        assert r.status_code == 200
+        assert r.json()["query"]["user_frequencies_mhz"] == [95.5]
+
+    def test_oversized_occurrence_does_not_discard_a_valid_sibling(self, client):
+        """An oversized occurrence must not swallow a valid one beside it, in
+        either order: the answer cannot depend on the order the caller sent
+        them in."""
+        huge = "9" * 5000
+        for query in (
+            f"lat=33.9&lon=-84.6&source=us&frequencies={huge}&frequencies=95.5",
+            f"lat=33.9&lon=-84.6&source=us&frequencies=95.5&frequencies={huge}",
+        ):
+            r = self._get(client, query)
+            assert r.status_code == 200
+            assert r.json()["query"]["user_frequencies_mhz"] == [95.5]
+
+    def test_comma_separated_value_in_a_repeated_key_still_splits(self, client):
+        """The two spellings compose: an occurrence may itself carry the
+        comma-separated form the frontend sends."""
+        r = self._get(client, "lat=33.9&lon=-84.6&source=us&frequencies=95.5,101.1&frequencies=88.1")
+        assert r.status_code == 200
+        assert r.json()["query"]["user_frequencies_mhz"] == [95.5, 101.1, 88.1]

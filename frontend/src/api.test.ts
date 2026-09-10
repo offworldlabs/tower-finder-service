@@ -24,10 +24,9 @@ beforeEach(() => {
 });
 
 describe("fetchTowers frequencies", () => {
-  // The server takes one comma-separated string (parse_user_frequencies splits
-  // on ","). Sending the key repeatedly instead would reach a scalar-typed
-  // Query parameter, and Starlette keeps only the last value, so all but one
-  // frequency would be dropped with a 200 and no warning.
+  // One comma-separated string is the spelling the SPA sends. The route also
+  // accepts the key repeated, so this pins our choice of the two, not the only
+  // form the server understands.
   it("sends the frequencies as a single comma-separated parameter", async () => {
     const mock = stubFetch();
 
