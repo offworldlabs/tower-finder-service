@@ -120,9 +120,9 @@ test.describe("Tower Finder — search form", () => {
   });
 
   test("measured frequencies are sent as one comma-separated parameter", async ({ page }) => {
-    // parse_user_frequencies splits on ",". The parameter is a scalar `str` on
-    // the route, so a repeated key would reach Starlette and lose all but the
-    // last value, answering 200 with the ranking quietly unchanged.
+    // parse_user_frequencies splits on ","; the route accepts the key repeated
+    // as well. This pins the spelling the SPA sends, not the only one that
+    // works.
     const towersRequest = page.waitForRequest((r) => r.url().includes("/api/towers"));
     await page.route("**/api/towers**", async (route) => {
       await route.fulfill({

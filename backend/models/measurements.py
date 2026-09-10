@@ -30,8 +30,12 @@ class MeasurementPayload(BaseModel):
 
     lat: float = Field(..., ge=-90, le=90, description="Receiver latitude")
     lon: float = Field(..., ge=-180, le=180, description="Receiver longitude")
+    # Bounded: process_and_rank pairs every tower with every measurement,
+    # synchronously on the one event loop, so an unbounded list here blocks
+    # every other request. A sweep reports dozens; 2000 is ample headroom.
     measurements: list[Measurement] = Field(
         default_factory=list,
+        max_length=2000,
         description="Signals detected by the spectrum analyser",
     )
     # Optional search parameters — same semantics as the GET /api/towers query params.

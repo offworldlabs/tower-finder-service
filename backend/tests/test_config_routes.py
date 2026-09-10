@@ -11,12 +11,15 @@ carries a valid token.
 """
 
 import json
+import os
+import stat
 
 import pytest
 from core.auth import ENV_VAR
 from fastapi.testclient import TestClient
 from routes import towers as towers_route
 from services import tower_ranking
+from tests._helpers import device, get_towers, system
 
 from app import app
 
@@ -46,15 +49,9 @@ def client(monkeypatch):
 
 @pytest.fixture()
 def config_path(tmp_path, monkeypatch):
-    """A scratch overlay for the route, seeded with the sentinel config.
-
-    routes/towers.py binds _CONFIG_PATH at import, so the route's own name is
-    the one to patch — patching services.tower_ranking._CONFIG_PATH would leave
-    the endpoint writing the real overlay.
-    """
+    """A scratch overlay for the route, seeded with the sentinel config."""
     path = tmp_path / "tower_config.json"
     path.write_text(json.dumps(SENTINEL))
-    monkeypatch.setattr(towers_route, "_CONFIG_PATH", path)
     monkeypatch.setattr(tower_ranking, "_CONFIG_PATH", path)
     return path
 
@@ -114,12 +111,79 @@ class TestRejectsWithoutWriting:
     def test_unwritable_path_reports_the_write_failure(self, client, config_path, monkeypatch):
         """The config has applied but the file has not: a 500, not a silent
         divergence dressed up as success."""
-        monkeypatch.setattr(towers_route, "_CONFIG_PATH", config_path.parent / "missing-dir" / "tower_config.json")
+        monkeypatch.setattr(tower_ranking, "_CONFIG_PATH", config_path.parent / "missing-dir" / "tower_config.json")
 
         r = _put(client, VALID)
 
         assert r.status_code == 500
         assert "could not be written" in r.json()["detail"]
+
+    def test_the_live_config_is_never_opened_for_writing(self, client, config_path, monkeypatch):
+        """The new config goes to a sibling and is renamed over the live file,
+        which is never itself truncated. A direct write that failed part-way
+        would leave invalid JSON, and reload_config() runs at import, so the
+        next container start would crash-loop on a file only reachable inside
+        the volume."""
+        written = []
+        real_open = open
+
+        def recording_open(file, mode="r", *args, **kwargs):
+            if "w" in mode or "a" in mode:
+                written.append(str(file))
+            return real_open(file, mode, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", recording_open)
+
+        r = _put(client, VALID)
+        monkeypatch.undo()
+
+        assert r.status_code == 200
+        assert str(config_path) not in written
+        assert len(written) == 1
+        # Name unique per request, so match its shape rather than the whole path.
+        assert written[0].startswith(f"{config_path}.") and written[0].endswith(".tmp")
+        assert json.loads(config_path.read_text()) == VALID
+        assert not list(config_path.parent.glob("*.tmp"))
+
+    def test_an_undurable_rename_is_not_reported_as_a_failed_write(self, client, config_path, monkeypatch):
+        """The replace succeeded, so the new config is the file. Telling the
+        caller it could not be written would have them retry a change that has
+        already taken effect."""
+        real_fsync = os.fsync
+
+        def failing_dir_fsync(fd):
+            # The directory handle only; the file's own fsync must still run.
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError(5, "Input/output error")
+            return real_fsync(fd)
+
+        monkeypatch.setattr(os, "fsync", failing_dir_fsync)
+
+        r = _put(client, VALID)
+        monkeypatch.undo()
+
+        assert r.status_code == 200
+        assert json.loads(config_path.read_text()) == VALID
+
+    def test_a_failed_write_leaves_the_existing_config_intact(self, client, config_path, monkeypatch):
+        """A write that cannot complete must leave the file that is there."""
+        before = config_path.read_text()
+        real_open = open
+
+        def failing_open(file, mode="r", *args, **kwargs):
+            if "w" in mode:
+                raise OSError(28, "No space left on device")
+            return real_open(file, mode, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", failing_open)
+
+        r = _put(client, VALID)
+        monkeypatch.undo()
+
+        assert r.status_code == 500
+        assert json.loads(config_path.read_text()) == SENTINEL
+        assert config_path.read_text() == before
+        assert not list(config_path.parent.glob("*.tmp"))
 
 
 class TestAcceptsAndApplies:
@@ -186,3 +250,53 @@ class TestAcceptsAndApplies:
 
         assert tower_ranking.BAND_PRIORITY == {"FM": 0}
         assert tower_ranking.SORT_ORDER is not VALID["ranking"]["sort_order"]
+
+
+# ── The route observing a config change, not just tower_ranking's own state ──
+
+
+class TestConfigChangeReachesRoute:
+    """Checking tower_ranking.DEFAULT_LIMIT after a PUT proves the setting
+    changed, not that the route sees it. These round-trip through GET
+    /api/towers to prove the route itself observes the new value on its
+    very next request."""
+
+    def test_put_default_limit_is_seen_by_get_towers(self, client, config_path):
+        towers = [device(95.5 + i * 0.4, 33.9, -84.6, callsign=f"T{i}", eirp=10000) for i in range(3)]
+        raw = [system(towers, licence_type="Broadcast", licence_subtype="FM")]
+        query = "lat=33.9&lon=-84.6&source=us"
+
+        # Establish the baseline rather than inherit it: the defaults loaded at
+        # import come from data/runtime/, which is gitignored, hand-editable and
+        # written by PUT, so a developer's overlay would otherwise decide it.
+        _put(client, dict(VALID, search={"default_radius_km": 80, "default_limit": 25}))
+
+        before = get_towers(client, query, raw)
+        assert len(before.json()["towers"]) == 3
+
+        body = dict(VALID, search={"default_radius_km": 80, "default_limit": 1})
+        r = _put(client, body)
+        assert r.status_code == 200
+
+        after = get_towers(client, query, raw)
+        assert len(after.json()["towers"]) == 1
+        assert after.json()["count"] == 1
+
+    def test_put_default_radius_km_is_seen_by_get_towers(self, client, config_path):
+        near = device(95.5, 33.9, -84.6, callsign="NEAR", eirp=10000)
+        far = device(96.5, 34.4, -84.6, callsign="FAR", eirp=10000)  # ~56 km north of the query point
+        raw = [system([near, far], licence_type="Broadcast", licence_subtype="FM")]
+        query = "lat=33.9&lon=-84.6&source=us"
+
+        # Baseline established here, not inherited: see the test above.
+        _put(client, dict(VALID, search={"default_radius_km": 80, "default_limit": 25}))
+
+        before = get_towers(client, query, raw)
+        assert {t["callsign"] for t in before.json()["towers"]} == {"NEAR", "FAR"}
+
+        body = dict(VALID, search={"default_radius_km": 10, "default_limit": 25})
+        r = _put(client, body)
+        assert r.status_code == 200
+
+        after = get_towers(client, query, raw)
+        assert {t["callsign"] for t in after.json()["towers"]} == {"NEAR"}

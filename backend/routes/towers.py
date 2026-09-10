@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+from uuid import uuid4
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -11,13 +12,11 @@ from clients.fcc import fetch_fcc_broadcast_systems
 from clients.maprad import fetch_broadcast_systems
 from core.auth import require_admin
 from models.measurements import MeasurementPayload
+from services import tower_ranking
 from services.region_lookup import SUPPORTED_REGIONS, UNSUPPORTED_REGION_DETAIL, classify_region
 from services.tower_ranking import (
-    _CONFIG_PATH,
     allowed_bands_for_region,
     apply_config,
-    DEFAULT_LIMIT,
-    DEFAULT_RADIUS_KM,
     parse_user_frequencies,
     process_and_rank,
     reload_config,
@@ -51,6 +50,14 @@ def _detect_source(lat: float, lon: float) -> str:
     raise HTTPException(status_code=422, detail=UNSUPPORTED_REGION_DETAIL)
 
 
+class ElevationUnavailable(Exception):
+    """The elevation dependency could not be reached, or would not answer.
+
+    Distinct from a point it simply has no data for, which is a valid answer
+    and comes back as an absent key.
+    """
+
+
 async def _lookup_elevation(lat: float, lon: float) -> float | None:
     result = await _batch_lookup_elevations([(lat, lon)])
     return result.get((round(lat, 6), round(lon, 6)))
@@ -76,9 +83,20 @@ async def _batch_lookup_elevations(
                 if i < len(elevations) and elevations[i] is not None:
                     result[coord] = float(elevations[i])
             return result
-    except Exception as exc:
+    # Narrow deliberately: a transport fault, a 5xx or 429, or a body that will
+    # not read as numbers is open-meteo's failure. Anything else is a fault in
+    # the code above and must not be dressed up as the dependency being down,
+    # which the post-deploy smoke passes on.
+    except (httpx.HTTPError, ValueError) as exc:
+        # A 4xx is open-meteo rejecting the request we built, which is ours to
+        # answer for: it must reach the caller as a 500. 429 is the exception,
+        # being its rate limit rather than anything wrong with the request.
+        if isinstance(exc, httpx.HTTPStatusError):
+            status = exc.response.status_code
+            if status < 500 and status != 429:
+                raise
         logging.warning("Batch elevation lookup failed: %s", exc)
-        return {}
+        raise ElevationUnavailable(str(exc)) from exc
 
 
 def _resolve_source(source: str, lat: float, lon: float) -> str:
@@ -121,7 +139,15 @@ async def _fetch_raw_towers(source: str, lat: float, lon: float, radius_km: int)
 async def _enrich_with_elevation(towers: list) -> None:
     """Attach ground elevation + total altitude to each tower in place."""
     tower_coords = [(t["latitude"], t["longitude"]) for t in towers]
-    elevations = await _batch_lookup_elevations(tower_coords)
+    try:
+        elevations = await _batch_lookup_elevations(tower_coords)
+    except ElevationUnavailable:
+        elevations = {}
+    except Exception:
+        # Best-effort by design: the tower list is the answer here, so a fault
+        # in the lookup itself must not take it down with it.
+        logging.exception("Elevation enrichment failed")
+        elevations = {}
     for t in towers:
         key = (round(t["latitude"], 6), round(t["longitude"], 6))
         elev = elevations.get(key)
@@ -145,19 +171,31 @@ async def find_towers(
     radius_km: int = Query(0, ge=0, le=300),
     limit: int = Query(0, ge=0, le=200),
     source: str = Query("auto"),
-    frequencies: str = Query(""),
+    frequencies: list[str] = Query(default=[]),
 ):
     source = _resolve_source(source, lat, lon)
 
-    effective_radius = radius_km if radius_km > 0 else DEFAULT_RADIUS_KM
-    effective_limit = limit if limit > 0 else DEFAULT_LIMIT
+    effective_radius = radius_km if radius_km > 0 else tower_ranking.DEFAULT_RADIUS_KM
+    effective_limit = limit if limit > 0 else tower_ranking.DEFAULT_LIMIT
+    # List-typed, not scalar: Starlette keeps only the last occurrence of a
+    # repeated key for a scalar, silently dropping the rest. The occurrences go
+    # to parse_user_frequencies as they are, so nothing here can sever a value
+    # that spans what would otherwise be a join boundary.
     user_freqs = parse_user_frequencies(frequencies)
 
     raw = await _fetch_raw_towers(source, lat, lon, effective_radius)
 
     resolved_altitude = altitude
     if altitude == 0:
-        elev = await _lookup_elevation(lat, lon)
+        # Best-effort, as in _enrich_with_elevation: an elevation we cannot get
+        # leaves the caller's own altitude standing, whoever's fault it was.
+        try:
+            elev = await _lookup_elevation(lat, lon)
+        except ElevationUnavailable:
+            elev = None
+        except Exception:
+            logging.exception("Elevation lookup failed")
+            elev = None
         if elev is not None:
             resolved_altitude = elev
 
@@ -198,8 +236,8 @@ async def find_towers_with_measurements(payload: MeasurementPayload):
     """
     source = _resolve_source(payload.source, payload.lat, payload.lon)
 
-    effective_radius = payload.radius_km if payload.radius_km > 0 else DEFAULT_RADIUS_KM
-    effective_limit = payload.limit if payload.limit > 0 else DEFAULT_LIMIT
+    effective_radius = payload.radius_km if payload.radius_km > 0 else tower_ranking.DEFAULT_RADIUS_KM
+    effective_limit = payload.limit if payload.limit > 0 else tower_ranking.DEFAULT_LIMIT
     measurements = [m.model_dump() for m in payload.measurements]
 
     raw = await _fetch_raw_towers(source, payload.lat, payload.lon, effective_radius)
@@ -238,15 +276,25 @@ async def get_elevation(
     The search form uses this to pre-fill the altitude field as coordinates
     are typed; GET /api/towers resolves altitude itself when none is given.
     """
-    elev = await _lookup_elevation(lat, lon)
+    # 503 and 404 rather than one 502: a caller, and the post-deploy smoke,
+    # must be able to tell "the dependency is down" from "this route is broken".
+    # Only _batch_lookup_elevations' narrow classification keeps that true; a
+    # fault of our own reaches the caller as a 500, which the smoke fails on.
+    try:
+        elev = await _lookup_elevation(lat, lon)
+    except ElevationUnavailable as exc:
+        raise HTTPException(status_code=503, detail="Elevation service unavailable") from exc
     if elev is None:
-        raise HTTPException(status_code=502, detail="Elevation lookup failed")
+        raise HTTPException(status_code=404, detail="No elevation data for this point")
     return {"latitude": lat, "longitude": lon, "elevation_m": elev}
 
 
 @router.get("/config")
 async def get_config():
-    with open(_CONFIG_PATH) as f:
+    # Dotted access, not a by-value import: tests monkeypatch
+    # tower_ranking._CONFIG_PATH to a scratch path, which only takes effect on
+    # a lookup made at call time against the module.
+    with open(tower_ranking._CONFIG_PATH) as f:
         return json.load(f)
 
 
@@ -275,9 +323,33 @@ async def update_config(body: dict):
         logging.exception("Config passed validation but would not apply")
         raise HTTPException(status_code=400, detail=f"Config could not be applied: {exc}") from exc
 
+    # Written to a sibling and renamed, never opened "w" in place: a truncating
+    # write that fails part-way leaves invalid JSON, and reload_config() runs at
+    # import, so the next start would crash-loop on a file only reachable inside
+    # the volume. os.replace is atomic within a filesystem, and the sibling
+    # guarantees that.
+    #
+    # The fsync is load-bearing, not belt-and-braces: without it the rename can
+    # outlive a host crash while the data blocks do not, and a zero-length
+    # tower_config.json is the same crash-loop by another road (_load_config
+    # re-seeds only when the file is absent, not when it is empty).
+    #
+    # Dotted access: see get_config above. A by-value import would write to the
+    # path bound at import time, missing a test's monkeypatch.
+    config_path = tower_ranking._CONFIG_PATH
+    # Unique per request. A shared sibling name lets two writers truncate and
+    # unlink each other's file mid-write; nothing serialises PUTs but the single
+    # worker and this handler having no await, neither of which is a promise.
+    tmp_path = config_path.with_name(f"{config_path.name}.{uuid4().hex}.tmp")
     try:
-        with open(_CONFIG_PATH, "w") as f:
-            f.write(json.dumps(body, indent=2))
+        try:
+            with open(tmp_path, "w") as f:
+                f.write(json.dumps(body, indent=2))
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, config_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
     except OSError as exc:
         # The process has already taken this config but the file has not. Put the
         # two back in step by re-reading whatever is actually on disk. That read
@@ -290,4 +362,16 @@ async def update_config(body: dict):
         except Exception:
             logging.exception("Re-reading the config on disk failed too; in-memory settings are the unwritten config")
         raise HTTPException(status_code=500, detail=f"Config could not be written: {exc}") from exc
+
+    # Past the replace the new config is the file, so failing to make the rename
+    # durable is a warning rather than a failed write: reporting a 500 here would
+    # have the caller retry a change that has already taken effect.
+    try:
+        dir_fd = os.open(config_path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError:
+        logging.warning("Config written, but the rename could not be made durable", exc_info=True)
     return {"status": "updated"}
