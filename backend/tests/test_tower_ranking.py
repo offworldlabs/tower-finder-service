@@ -205,6 +205,11 @@ _USER_LON = -84.388
 _FM_DEVICE = _device(freq_mhz=95.5, lat=33.93, lon=-84.388, callsign="WXYZ")
 _FM_SYSTEM = _system([_FM_DEVICE], licence_type="Broadcast", licence_subtype="FM")
 
+# Same spot, a UHF tower, used to pin the FREQUENCY_MATCH_TOLERANCE_MHZ (5.0)
+# boundary at a decimal pair with float noise (see TestUserFrequencyRanking).
+_UHF_BOUNDARY_DEVICE = _device(freq_mhz=507.2, lat=33.93, lon=-84.388, callsign="WBND")
+_UHF_BOUNDARY_SYSTEM = _system([_UHF_BOUNDARY_DEVICE], licence_type="Broadcast", licence_subtype="TV")
+
 
 class TestProcessAndRank:
     # ── Basic smoke tests ────────────────────────────────────────────────────
@@ -711,6 +716,13 @@ class TestMatchMeasurement:
         # 0.20 MHz offset — safely outside ±0.15 MHz
         assert _match_measurement(95.70, "FM", [m]) is None
 
+    def test_decimal_exact_fm_boundary_matches(self):
+        """abs(88.25 - 88.10) is 0.15000000000000568 in IEEE-754, not 0.15,
+        a raw float `<=` against the 0.15 MHz FM tolerance rejects this
+        boundary pair even though the two are exactly 0.15 MHz apart."""
+        m = _make_measurement(88.25, band="FM")
+        assert _match_measurement(88.10, "FM", [m]) is m
+
     def test_within_uhf_tolerance(self):
         m = _make_measurement(546.0, band="UHF")
         # ±4 MHz tolerance for UHF
@@ -812,6 +824,14 @@ class TestParseUserFrequencies:
     def test_invalid_values_skipped(self):
         assert parse_user_frequencies("abc, 95.5, xyz") == [95.5]
 
+    def test_unicode_decimal_digits_parse_as_the_number_they_spell(self):
+        """float() accepts Unicode decimal digits, so these parse rather than
+        being rejected. Left as-is deliberately: the result is a bounded float
+        used only for ranking and echoed back, so there is nothing for an
+        unusual spelling to exploit, and rejecting it would silently narrow
+        input the service accepts today."""
+        assert parse_user_frequencies("९२.5") == [92.5]  # Devanagari "92.5"
+
     def test_max_10_enforced(self):
         assert len(parse_user_frequencies(",".join(str(i) for i in range(1, 20)))) == 10
 
@@ -820,6 +840,56 @@ class TestParseUserFrequencies:
 
     def test_negative_skipped(self):
         assert parse_user_frequencies("-5, 95.5") == [95.5]
+
+    def test_a_long_junk_run_does_not_hide_a_later_valid_value(self):
+        """Junk never trips max_count, so only a ceiling on how much is
+        examined could stop the scan before 95.5. There is none, by design."""
+        raw = ",".join(["junk"] * 10_000 + ["95.5"])
+        assert parse_user_frequencies(raw) == [95.5]
+
+    def test_a_sparse_comma_grid_still_yields_its_one_value(self):
+        """A client building the list from a fixed channel grid sends mostly
+        empty slots. At 215 bytes this is far inside every transport limit, so
+        the one value set must survive however many empty siblings precede
+        it."""
+        raw = ",".join([""] * 211 + ["95.5"])
+        assert parse_user_frequencies(raw) == [95.5]
+
+    def test_oversized_token_is_read_whole_never_truncated(self):
+        """An absurdly long number is rejected for being out of range, not cut
+        down to a shorter one: 33 nines must yield nothing, never 9.9 or
+        999."""
+        assert parse_user_frequencies("9" * 33) == []
+
+    def test_a_long_winded_spelling_of_a_valid_value_still_counts(self):
+        """95.5 padded to 44 characters is a silly way to write it but an
+        unambiguous one, and the range gate already stops every over-long
+        number."""
+        assert parse_user_frequencies("95." + "5" + "0" * 40) == [95.5]
+
+    def test_an_oversized_value_does_not_discard_its_siblings(self):
+        """An oversized value must discard only itself, so the result cannot
+        depend on the order the caller sent them in."""
+        huge = "9" * 5000
+        assert parse_user_frequencies([huge, "95.5"]) == [95.5]
+        assert parse_user_frequencies(["95.5", huge]) == [95.5]
+
+    def test_occurrence_list_and_comma_string_agree(self):
+        """The comma-separated form predates the repeated key and is still
+        what retina-server's frontend sends; both spellings of the same
+        request must give the same answer, at any length."""
+        assert parse_user_frequencies("95.5,101.1") == parse_user_frequencies(["95.5", "101.1"])
+        assert parse_user_frequencies(["95.5,101.1", "88.1"]) == [95.5, 101.1, 88.1]
+
+        many = ["junk"] * 400 + ["95.5"]
+        assert parse_user_frequencies(",".join(many)) == parse_user_frequencies(many)
+
+    def test_absent_input_is_empty_not_an_error(self):
+        """None reaches this from any caller that models the parameter as
+        optional; it must read as "nothing supplied", not raise."""
+        assert parse_user_frequencies(None) == []
+        assert parse_user_frequencies([]) == []
+        assert parse_user_frequencies("") == []
 
 
 # ── User frequencies in ranking ──────────────────────────────────────────────
@@ -853,6 +923,13 @@ class TestUserFrequencyRanking:
     def test_no_match_outside_tolerance(self):
         result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON, user_frequencies=[101.1])
         assert result[0]["frequency_matched"] is False
+
+    def test_decimal_exact_boundary_matches(self):
+        """abs(507.2 - 512.2) is 5.000000000000057 in IEEE-754, not 5.0, a
+        raw float `<=` against FREQUENCY_MATCH_TOLERANCE_MHZ (5.0) rejects
+        this boundary pair even though the two are exactly 5.0 MHz apart."""
+        result = process_and_rank([_UHF_BOUNDARY_SYSTEM], _USER_LAT, _USER_LON, user_frequencies=[512.2])
+        assert result[0]["frequency_matched"] is True
 
     def test_user_freqs_never_set_measured(self):
         result = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON, user_frequencies=[95.5])

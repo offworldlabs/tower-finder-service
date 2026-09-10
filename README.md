@@ -36,9 +36,9 @@ Optional env vars:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/towers?lat&lon&altitude&radius_km&limit&source` | Ranked towers near (lat, lon) using model-based scoring (EIRP, FSPL). Ranked by band tier first (VHF and UHF tie, FM last), then measured score where a sweep supplied one, then modelled received power. Stations licensed on one transmitter (FCC channel-sharing pairs, LPFM time-shares) are merged into a single row; the partners' callsigns are listed in `shared_callsigns`. |
-| POST | `/api/towers` | Same tower search, enriched with spectrum-analyser measurements. Body: `MeasurementPayload` (see `backend/models/measurements.py`). Only towers the SDR can see are returned — unmatched towers are excluded. Matched towers carry real measured fields (`snr_db`, `score`, `obw_fraction`, `power_db`, `measured=true`). |
-| GET | `/api/elevation?lat&lon` | Ground elevation at a point. The search form pre-fills altitude from this; `GET /api/towers` resolves altitude itself when none is given. 502 if the upstream lookup fails. |
+| GET | `/api/towers?lat&lon&altitude&radius_km&limit&source&frequencies` | Ranked towers near (lat, lon) using model-based scoring (EIRP, FSPL). Ranked by band tier first (VHF and UHF tie, FM last), then measured score where a sweep supplied one, then modelled received power. `frequencies` boosts towers near a frequency the caller names, in MHz; it never drops one. Accepts both spellings a client might send: comma-separated (`frequencies=95.5,101.1`) and repeated (`frequencies=95.5&frequencies=101.1`), including a mix of the two. Up to ten values are used and echoed back as `query.user_frequencies_mhz`. Stations licensed on one transmitter (FCC channel-sharing pairs, LPFM time-shares) are merged into a single row; the partners' callsigns are listed in `shared_callsigns`. |
+| POST | `/api/towers` | Same tower search, enriched with spectrum-analyser measurements. Body: `MeasurementPayload` (see `backend/models/measurements.py`). Only towers the SDR can see are returned — unmatched towers are excluded. Matched towers carry real measured fields (`snr_db`, `score`, `obw_fraction`, `power_db`, `measured=true`). At most 2000 measurements per request, 422 beyond that: ranking pairs every tower with every measurement, synchronously on the one event loop. |
+| GET | `/api/elevation?lat&lon` | Ground elevation at a point. The search form pre-fills altitude from this; `GET /api/towers` resolves altitude itself when none is given. 503 when the upstream cannot be reached, 404 for a point it has no data for: two different facts, so a caller can tell an outage from a gap. `GET /api/towers` treats both as best-effort and still returns towers, with a null elevation. |
 | GET | `/api/config` | Current ranking config (bands, band priority, sort order, defaults). |
 | PUT | `/api/config` | Replace ranking config; sanity-capped at 1 MB. Requires the admin bearer token (see `TOWER_FINDER_ADMIN_TOKEN`). Validated and applied before it is written (400 if either fails), so the file on the persistent volume only ever holds a config the running process has accepted. |
 
@@ -95,7 +95,10 @@ environments, each its own droplet, Compose project and overlay:
   `pytest -m "not integration"`.
 - **Push to `main`**: staging deploys and is smoke-tested first; production
   deploys only after staging succeeds, so a merge no longer reaches
-  production directly.
+  production directly. The smoke checks assert only what they can establish
+  from where they run: the `/api/elevation` check passes on an elevation and
+  on the route reporting its own upstream unavailable, since open-meteo's
+  uptime is not the deploy's to assert, and fails on anything else.
 - **Manual dispatch**: `deploy-test` deploys to `retina-test`, for rehearsing
   a change without touching staging or production.
 

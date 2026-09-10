@@ -311,6 +311,9 @@ jobs:
   smoke-prod:
     runs-on: ubuntu-latest
     needs: [deploy-prod]
+    # Every check carries curl's --max-time plus a retry, so a wholly
+    # unreachable production could otherwise sit here for ~11 minutes.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Smoke test production
