@@ -4,6 +4,7 @@ import math
 import os
 import re
 import shutil
+from collections.abc import Sequence
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -526,40 +527,68 @@ def _polygon_centroid(wkt: str) -> tuple[float, float] | None:
     return sum(lats) / len(lats), sum(lngs) / len(lngs)
 
 
+# Slack added to every tolerance comparison so exact-boundary float noise
+# (abs(88.25 - 88.10) is 0.15000000000000568) doesn't reject a genuine match.
+# 0.5 Hz against tolerances that are kHz to MHz wide.
+_TOLERANCE_SLACK_MHZ = 5e-7
+
+
+def _within_tolerance(diff: float, tolerance: float) -> bool:
+    """Whether diff is within tolerance, boundary included."""
+    return diff <= tolerance + _TOLERANCE_SLACK_MHZ
+
+
 def _match_measurement(freq_mhz: float, band: str, measurements: list[dict]) -> dict | None:
     """Return the closest measurement to freq_mhz within the band-specific tolerance.
 
     If multiple measurements fall within tolerance, the one with the smallest
     frequency difference wins. Returns None when no measurement matches.
     """
-    tolerance = MEASUREMENT_TOLERANCE_MHZ.get(band, 1.0)
+    # Hoisted, not _within_tolerance per measurement: this runs once per
+    # tower-by-measurement pair and a call frame here costs more than the
+    # comparison inside it.
+    limit = MEASUREMENT_TOLERANCE_MHZ.get(band, 1.0) + _TOLERANCE_SLACK_MHZ
     best: dict | None = None
     best_diff = float("inf")
     for m in measurements:
         diff = abs(m["freq_mhz"] - freq_mhz)
-        if diff <= tolerance and diff < best_diff:
+        if diff <= limit and diff < best_diff:
             best = m
             best_diff = diff
     return best
 
 
-def parse_user_frequencies(raw: str, max_count: int = 10) -> list[float]:
-    """Parse a comma-separated string of frequencies in MHz. Returns up to max_count valid values."""
-    if not raw or not raw.strip():
+def parse_user_frequencies(raw: str | Sequence[str], max_count: int = 10) -> list[float]:
+    """Parse frequencies in MHz, returning up to max_count valid values.
+
+    Takes either one comma-separated string or the occurrences a repeated query
+    key produces, each of which may itself be comma-separated. Nothing is
+    joined and nothing is truncated, so a malformed value discards only itself.
+    """
+    if not raw:
         return []
-    freqs = []
-    for part in raw.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        try:
-            val = float(part)
+    occurrences = (raw,) if isinstance(raw, str) else raw
+    freqs: list[float] = []
+    # No ceiling on tokens examined: one would drop a valid value sitting
+    # behind enough empty or unparseable siblings. Cost is bounded by the
+    # request size the transport allows, which is 8 kB through nginx but
+    # 64 kB for a caller reaching the container directly on retina-edge.
+    for occurrence in occurrences:
+        for part in occurrence.split(","):
+            part = part.strip()
+            # Cheaper than letting float() raise: an unparseable token is the
+            # dominant cost of a junk-heavy request, and this rejects most of
+            # them without building an exception.
+            if not part or not (part[0].isdigit() or part[0] in "+-."):
+                continue
+            try:
+                val = float(part)
+            except ValueError:
+                continue
             if 0 < val < 10000:  # reasonable MHz range
                 freqs.append(val)
-        except ValueError:
-            continue
-        if len(freqs) >= max_count:
-            break
+                if len(freqs) >= max_count:
+                    return freqs
     return freqs
 
 
@@ -646,7 +675,9 @@ def process_and_rank(
             measurement = _match_measurement(freq_val, band, measurements) if measurements else None
             freq_matched = measurement is not None
             if not freq_matched and user_frequencies:
-                freq_matched = any(abs(freq_val - uf) <= FREQUENCY_MATCH_TOLERANCE_MHZ for uf in user_frequencies)
+                freq_matched = any(
+                    _within_tolerance(abs(freq_val - uf), FREQUENCY_MATCH_TOLERANCE_MHZ) for uf in user_frequencies
+                )
 
             towers.append(
                 {
