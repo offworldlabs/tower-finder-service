@@ -95,7 +95,10 @@ environments, each its own droplet, Compose project and overlay:
   `pytest -m "not integration"`.
 - **Push to `main`**: staging deploys and is smoke-tested first; production
   deploys only after staging succeeds, so a merge no longer reaches
-  production directly.
+  production directly. The smoke checks assert only what they can establish
+  from where they run: the `/api/elevation` check passes on an elevation and
+  on the route reporting its own upstream unavailable, since open-meteo's
+  uptime is not the deploy's to assert, and fails on anything else.
 - **Manual dispatch**: `deploy-test` deploys to `retina-test`, for rehearsing
   a change without touching staging or production.
 
