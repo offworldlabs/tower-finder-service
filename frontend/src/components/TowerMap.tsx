@@ -4,10 +4,9 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import "./TowerMap.css";
 import { withCartoKey } from "../utils/basemap";
+import { rankTier, RANK_TIERS } from "../utils/rankTier";
 
-const TOWER_COLOR = "#0891b2";
-
-function makeTowerIcon(isHighlighted) {
+function makeTowerIcon(color: string, isHighlighted: boolean) {
   const size = isHighlighted ? 16 : 11;
   const border = isHighlighted ? 3 : 2;
   const shadow = isHighlighted
@@ -17,7 +16,7 @@ function makeTowerIcon(isHighlighted) {
     className: "tower-marker",
     html: `<div style="
       width:${size}px;height:${size}px;
-      background:${TOWER_COLOR};
+      background:${color};
       border:${border}px solid #fff;
       border-radius:50%;
       box-shadow:${shadow};
@@ -95,38 +94,62 @@ export default function TowerMap({ towers, userLocation, highlighted }) {
           </>
         )}
 
-        {towers.map((t) => (
-          <Marker
-            key={`${t.rank}-${t.frequency_mhz}`}
-            position={[t.latitude, t.longitude]}
-            icon={makeTowerIcon(
-              highlighted &&
-                highlighted.callsign === t.callsign &&
-                highlighted.frequency_mhz === t.frequency_mhz
-            )}
-          >
-            <Popup>
-              <span className="popup-callsign">{t.callsign || "Unknown"}</span>
-              <br />
-              <span className="popup-detail">{t.name}</span>
-              <br />
-              <span className="popup-detail">
-                {t.latitude}, {t.longitude}
-                {t.altitude_m != null && ` · ${t.altitude_m} m ASL`}
-              </span>
-              <br />
-              <span className="popup-freq">{t.frequency_mhz} MHz</span>{" "}
-              ({t.band})
-              <br />
-              <span className="popup-detail">
-                {t.distance_km} km {t.bearing_cardinal} &middot; {t.received_power_dbm} dBm
-              </span>
-            </Popup>
-          </Marker>
-        ))}
+        {towers.map((t) => {
+          const tier = rankTier(t.rank, towers.length);
+          return (
+            <Marker
+              key={`${t.rank}-${t.frequency_mhz}`}
+              position={[t.latitude, t.longitude]}
+              icon={makeTowerIcon(
+                tier.color,
+                highlighted &&
+                  highlighted.callsign === t.callsign &&
+                  highlighted.frequency_mhz === t.frequency_mhz
+              )}
+            >
+              <Popup>
+                <span className="popup-callsign">{t.callsign || "Unknown"}</span>
+                <br />
+                <span className="popup-detail">{t.name}</span>
+                <br />
+                <span className="popup-detail">
+                  {t.latitude}, {t.longitude}
+                  {t.altitude_m != null && ` · ${t.altitude_m} m ASL`}
+                </span>
+                <br />
+                <span className="popup-freq">{t.frequency_mhz} MHz</span>{" "}
+                ({t.band})
+                <br />
+                <span className="popup-detail">
+                  {t.distance_km} km {t.bearing_cardinal} &middot; {t.received_power_dbm} dBm
+                </span>
+                <br />
+                <span style={{ color: tier.color, fontWeight: 600, fontSize: "0.78rem" }}>
+                  #{t.rank} · {tier.label}
+                </span>
+                {t.shared_callsigns && t.shared_callsigns.length > 0 && (
+                  <>
+                    <br />
+                    <span className="popup-detail">Shares transmitter with {t.shared_callsigns.join(", ")}</span>
+                  </>
+                )}
+              </Popup>
+            </Marker>
+          );
+        })}
 
         <FitBounds towers={towers} userLocation={userLocation} />
       </MapContainer>
+
+      <div className="map-legend" aria-label="Marker colour by rank">
+        <span className="map-legend-title">Rank</span>
+        {RANK_TIERS.map((tier) => (
+          <span key={tier.tier} className="map-legend-item">
+            <span className="map-legend-swatch" style={{ background: tier.color }} />
+            {tier.label}
+          </span>
+        ))}
+      </div>
     </div>
   );
 }

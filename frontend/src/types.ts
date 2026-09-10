@@ -24,6 +24,9 @@ export interface Tower {
   bearing_deg: number;
   bearing_cardinal: string;
   received_power_dbm: number;
+  /** Other stations licensed on this same transmitter and frequency (FCC
+   *  channel-sharing partners, LPFM time-shares). Empty when it stands alone. */
+  shared_callsigns?: string[];
 }
 
 /** The echo of what the server actually searched — note `source` is the

@@ -1,4 +1,5 @@
 .map-wrap {
+  position: relative;
   background: #fff;
   border-radius: 12px;
   overflow: hidden;
@@ -49,4 +50,42 @@
 .popup-freq {
   font-family: "SF Mono", "Fira Code", monospace;
   font-size: 0.78rem;
+}
+
+/* z-index 1000 is needed to sit above Leaflet's panes. */
+.map-legend {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.92);
+  border-radius: 8px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+  font-size: 0.72rem;
+  color: #374151;
+}
+
+.map-legend-title {
+  font-weight: 600;
+  color: #1a1a2e;
+  margin-right: 2px;
+}
+
+.map-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.map-legend-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.15);
 }

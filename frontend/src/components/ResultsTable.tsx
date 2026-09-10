@@ -1,4 +1,5 @@
 import "./ResultsTable.css";
+import { rankTier } from "../utils/rankTier";
 
 const BAND_COLORS = {
   VHF: "#7c3aed",
@@ -33,50 +34,73 @@ export default function ResultsTable({ towers, onHover }) {
               <th>Distance</th>
               <th>Bearing</th>
               <th>Rx Power</th>
+              <th>Rank Tier</th>
             </tr>
           </thead>
           <tbody>
-            {towers.map((t) => (
-              <tr
-                key={`${t.rank}-${t.frequency_mhz}`}
-                onMouseEnter={() => onHover(t)}
-                onMouseLeave={() => onHover(null)}
-              >
-                <td className="rank">{t.rank}</td>
-                <td className="callsign">{t.callsign || "—"}</td>
-                <td className="location-name" title={`${t.name}${t.state ? `, ${t.state}` : ""}`}>
-                  {t.name}
-                  {t.state ? `, ${t.state}` : ""}
-                </td>
-                <td className="mono">{t.latitude}</td>
-                <td className="mono">{t.longitude}</td>
-                <td className="mono">{t.altitude_m != null ? t.altitude_m : "—"}</td>
-                <td className="mono">{t.antenna_height_m != null ? t.antenna_height_m : "—"}</td>
-                <td className="mono">
-                  {t.frequency_mhz}
-                  {t.frequency_matched && (
-                    <span className="freq-match-badge" title="Matches measured frequency">&#10003;</span>
-                  )}
-                </td>
-                <td>
-                  <span
-                    className="badge"
-                    style={{
-                      color: BAND_COLORS[t.band] || "#6b7280",
-                      background: BAND_BG[t.band] || "rgba(107,114,128,0.08)",
-                    }}
-                  >
-                    {t.band}
-                  </span>
-                </td>
-                <td className="mono">{t.eirp_dbm} dBm</td>
-                <td className="mono">{t.distance_km} km</td>
-                <td>
-                  {t.bearing_deg}° <span className="cardinal">{t.bearing_cardinal}</span>
-                </td>
-                <td className="mono power">{t.received_power_dbm} dBm</td>
-              </tr>
-            ))}
+            {towers.map((t) => {
+              const tier = rankTier(t.rank, towers.length);
+              return (
+                <tr
+                  key={`${t.rank}-${t.frequency_mhz}`}
+                  onMouseEnter={() => onHover(t)}
+                  onMouseLeave={() => onHover(null)}
+                >
+                  <td className="rank">
+                    <span className="rank-badge" style={{ color: tier.color, background: tier.bg }}>
+                      {t.rank}
+                    </span>
+                  </td>
+                  <td className="callsign">
+                    {t.callsign || "—"}
+                    {t.shared_callsigns && t.shared_callsigns.length > 0 && (
+                      <span
+                        className="shared-callsigns"
+                        title="Also licensed on this transmitter (channel sharing)"
+                      >
+                        + {t.shared_callsigns.join(", ")}
+                      </span>
+                    )}
+                  </td>
+                  <td className="location-name" title={`${t.name}${t.state ? `, ${t.state}` : ""}`}>
+                    {t.name}
+                    {t.state ? `, ${t.state}` : ""}
+                  </td>
+                  <td className="mono">{t.latitude}</td>
+                  <td className="mono">{t.longitude}</td>
+                  <td className="mono">{t.altitude_m != null ? t.altitude_m : "—"}</td>
+                  <td className="mono">{t.antenna_height_m != null ? t.antenna_height_m : "—"}</td>
+                  <td className="mono">
+                    {t.frequency_mhz}
+                    {t.frequency_matched && (
+                      <span className="freq-match-badge" title="Matches measured frequency">&#10003;</span>
+                    )}
+                  </td>
+                  <td>
+                    <span
+                      className="badge"
+                      style={{
+                        color: BAND_COLORS[t.band] || "#6b7280",
+                        background: BAND_BG[t.band] || "rgba(107,114,128,0.08)",
+                      }}
+                    >
+                      {t.band}
+                    </span>
+                  </td>
+                  <td className="mono">{t.eirp_dbm} dBm</td>
+                  <td className="mono">{t.distance_km} km</td>
+                  <td>
+                    {t.bearing_deg}° <span className="cardinal">{t.bearing_cardinal}</span>
+                  </td>
+                  <td className="mono power">{t.received_power_dbm} dBm</td>
+                  <td>
+                    <span className="badge" style={{ color: tier.color, background: tier.bg }}>
+                      {tier.label}
+                    </span>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>

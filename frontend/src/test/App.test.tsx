@@ -132,4 +132,42 @@ describe("App", () => {
     const params = new URL(towersRequestUrl()!, "https://towers.invalid").searchParams;
     expect(params.get("frequencies")).toBe("95.5,101.1");
   });
+
+  it("colours ranks by tier and lists channel-sharing partners", async () => {
+    const secondTower = {
+      ...WALTHAM_TOWER,
+      rank: 2,
+      callsign: "WBZ",
+      name: "WBZ-TV",
+      frequency_mhz: 96.1,
+      received_power_dbm: -70,
+      // The server always sends the key, empty when the tower stands alone. A
+      // `length && ...` guard would render that empty array as a literal "0".
+      shared_callsigns: [] as string[],
+    };
+    mockApi({
+      status: 200,
+      body: {
+        towers: [{ ...WALTHAM_TOWER, shared_callsigns: ["WGBH-DT2"] }, secondTower],
+        query: {
+          latitude: 42.38708028093612,
+          longitude: -71.24905416622781,
+          altitude_m: 43,
+          radius_km: 80,
+          source: "us",
+        },
+        count: 2,
+      },
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await search(user);
+
+    await waitFor(() => expect(document.querySelectorAll("tbody tr")).toHaveLength(2));
+    expect(screen.getByRole("cell", { name: /Top 20%/ })).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: /40–60%/ })).toBeInTheDocument();
+    expect(screen.getByText(/\+ WGBH-DT2/)).toBeInTheDocument();
+    // Exact name: a stray "0" from the empty list would make this "WBZ0".
+    expect(screen.getByRole("cell", { name: "WBZ" })).toBeInTheDocument();
+  });
 });

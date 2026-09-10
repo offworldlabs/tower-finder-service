@@ -159,10 +159,12 @@ _USER_LAT = 33.749
 _USER_LON = -84.388
 
 
-def _raw(callsign, eirp_watts):
+def _raw(callsign, eirp_watts, freq_mhz=95.5):
     # Same location for both towers → identical distance_km/fspl, so
-    # received_power_dbm differs only by EIRP.
-    return _device(95.5, 33.85, -84.388, callsign=callsign, eirp=eirp_watts)
+    # received_power_dbm differs only by EIRP. The two must NOT share a
+    # frequency as well: one site + one frequency + two callsigns is an FCC
+    # channel-share, which _merge_shared_transmitters collapses into one row.
+    return _device(freq_mhz, 33.85, -84.388, callsign=callsign, eirp=eirp_watts)
 
 
 class TestProcessAndRankCoverageIntegration:
@@ -190,7 +192,9 @@ class TestProcessAndRankCoverageIntegration:
         monkeypatch.setattr(tower_ranking, "_CONFIG_PATH", fake_path)
         reload_config()
 
-        raw = [_system([_raw("KSTRONG", 10000.0), _raw("KWEAK", 10.0)])]
+        # Adjacent FM channels: 200 kHz moves FSPL by ~0.02 dB against a 30 dB
+        # EIRP gap, so received power is still decided by EIRP alone.
+        raw = [_system([_raw("KSTRONG", 10000.0, 95.5), _raw("KWEAK", 10.0, 95.7)])]
 
         def stub_scorer(towers):
             for t in towers:
