@@ -43,11 +43,12 @@ services:
   # the origin port for the hostname the fleet calls. See "Own ingress + the
   # flip plan" in README.md.
   edge:
-    # Pinned to the minor so patch releases still arrive on a rebuild. The
-    # official image is what renders deploy/nginx/edge.conf.template — its
-    # entrypoint envsubsts /etc/nginx/templates/*.template, so there is no
-    # custom renderer and no image to build here.
-    image: nginx:1.31-alpine
+    # Built rather than stock so the config travels in the image: compose
+    # recreates a container when its image changes and never when a mounted
+    # file's contents do, and nginx renders the template once, at start.
+    # deploy/nginx/Dockerfile carries the version pin.
+    build:
+      context: deploy/nginx
     depends_on:
       - tower-finder-service
     ports:
@@ -55,10 +56,6 @@ services:
       # makes the flip a Cloudflare-side change and nothing else.
       - "8443:8443"
     volumes:
-      # Mounted under the name `default.conf.template` on purpose: the render
-      # then overwrites the image's stock /etc/nginx/conf.d/default.conf instead
-      # of sitting beside it and leaving a second server on :80.
-      - ./deploy/nginx/edge.conf.template:/etc/nginx/templates/default.conf.template:ro
       # The same host path retina-server's nginx mounts: a Cloudflare origin
       # certificate for *.retina.fm plus the origin-pull CA. Read-only — this
       # container never writes there.

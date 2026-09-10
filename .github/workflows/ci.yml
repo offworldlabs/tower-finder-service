@@ -101,6 +101,12 @@ jobs:
             # deploy/env.<env>.example. Guarded rather than chained with &&: a host
             # with no key must build watermarked tiles, not fail its deploy.
             if [ -f /root/.secrets/carto.env ]; then cat /root/.secrets/carto.env >> .env; fi
+            # Syntax-check the new config before anything replaces the running edge:
+            # a template nginx rejects would otherwise leave a crash-looping
+            # container where a working one was. Uses the droplet's real
+            # certificates, which `nginx -t` insists on reading.
+            docker compose build edge
+            docker compose run --rm --no-deps -T edge nginx -t
             docker compose up -d --build
             healthy=""
             for i in $(seq 1 12); do
@@ -141,6 +147,29 @@ jobs:
             done
             if [ -z "$edge_ok" ]; then
               echo "Edge did not answer 200 on https://staging-towers.retina.fm:8443/api/health"
+              docker compose logs --tail=50 edge || true
+              exit 1
+            fi
+            # The whole rendered config, not a sampled header: a header present
+            # since the day it was added proves nothing about which config is
+            # loaded. sed reproduces the entrypoint's envsubst exactly, because
+            # TFS_EDGE_HOST is the template's only variable.
+            sed 's|${TFS_EDGE_HOST}|staging-towers.retina.fm|g' deploy/nginx/edge.conf.template > /tmp/edge-expected.conf
+            if ! docker compose exec -T edge cat /etc/nginx/conf.d/default.conf > /tmp/edge-running.conf; then
+              echo "Could not read the edge's running config."
+              docker compose logs --tail=50 edge || true
+              exit 1
+            fi
+            if ! diff -u /tmp/edge-expected.conf /tmp/edge-running.conf; then
+              echo "The edge is serving a config this deploy did not render."
+              exit 1
+            fi
+            # The document, not only the API: a frontend build that leaves no
+            # index.html keeps /api/health at 200 while / becomes a 404.
+            edge_doc="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 30 \
+              --resolve "staging-towers.retina.fm:8443:127.0.0.1" "https://staging-towers.retina.fm:8443/" || echo unreachable)"
+            if [ "$edge_doc" != "200" ]; then
+              echo "The edge served / as $edge_doc."
               docker compose logs --tail=50 edge || true
               exit 1
             fi
@@ -189,6 +218,12 @@ jobs:
             # deploy/env.<env>.example. Guarded rather than chained with &&: a host
             # with no key must build watermarked tiles, not fail its deploy.
             if [ -f /root/.secrets/carto.env ]; then cat /root/.secrets/carto.env >> .env; fi
+            # Syntax-check the new config before anything replaces the running edge:
+            # a template nginx rejects would otherwise leave a crash-looping
+            # container where a working one was. Uses the droplet's real
+            # certificates, which `nginx -t` insists on reading.
+            docker compose build edge
+            docker compose run --rm --no-deps -T edge nginx -t
             docker compose up -d --build
             # `healthy` rather than an `exit 0` inside the loop: success has to
             # fall through to the edge probe below, which an early exit would
@@ -232,6 +267,29 @@ jobs:
             done
             if [ -z "$edge_ok" ]; then
               echo "Edge did not answer 200 on https://towers.retina.fm:8443/api/health"
+              docker compose logs --tail=50 edge || true
+              exit 1
+            fi
+            # The whole rendered config, not a sampled header: a header present
+            # since the day it was added proves nothing about which config is
+            # loaded. sed reproduces the entrypoint's envsubst exactly, because
+            # TFS_EDGE_HOST is the template's only variable.
+            sed 's|${TFS_EDGE_HOST}|towers.retina.fm|g' deploy/nginx/edge.conf.template > /tmp/edge-expected.conf
+            if ! docker compose exec -T edge cat /etc/nginx/conf.d/default.conf > /tmp/edge-running.conf; then
+              echo "Could not read the edge's running config."
+              docker compose logs --tail=50 edge || true
+              exit 1
+            fi
+            if ! diff -u /tmp/edge-expected.conf /tmp/edge-running.conf; then
+              echo "The edge is serving a config this deploy did not render."
+              exit 1
+            fi
+            # The document, not only the API: a frontend build that leaves no
+            # index.html keeps /api/health at 200 while / becomes a 404.
+            edge_doc="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 30 \
+              --resolve "towers.retina.fm:8443:127.0.0.1" "https://towers.retina.fm:8443/" || echo unreachable)"
+            if [ "$edge_doc" != "200" ]; then
+              echo "The edge served / as $edge_doc."
               docker compose logs --tail=50 edge || true
               exit 1
             fi
@@ -302,6 +360,12 @@ jobs:
             # deploy/env.<env>.example. Guarded rather than chained with &&: a host
             # with no key must build watermarked tiles, not fail its deploy.
             if [ -f /root/.secrets/carto.env ]; then cat /root/.secrets/carto.env >> .env; fi
+            # Syntax-check the new config before anything replaces the running edge:
+            # a template nginx rejects would otherwise leave a crash-looping
+            # container where a working one was. Uses the droplet's real
+            # certificates, which `nginx -t` insists on reading.
+            docker compose build edge
+            docker compose run --rm --no-deps -T edge nginx -t
             docker compose up -d --build
             healthy=""
             for i in $(seq 1 12); do
@@ -342,6 +406,29 @@ jobs:
             done
             if [ -z "$edge_ok" ]; then
               echo "Edge did not answer 200 on https://test-towers.retina.fm:8443/api/health"
+              docker compose logs --tail=50 edge || true
+              exit 1
+            fi
+            # The whole rendered config, not a sampled header: a header present
+            # since the day it was added proves nothing about which config is
+            # loaded. sed reproduces the entrypoint's envsubst exactly, because
+            # TFS_EDGE_HOST is the template's only variable.
+            sed 's|${TFS_EDGE_HOST}|test-towers.retina.fm|g' deploy/nginx/edge.conf.template > /tmp/edge-expected.conf
+            if ! docker compose exec -T edge cat /etc/nginx/conf.d/default.conf > /tmp/edge-running.conf; then
+              echo "Could not read the edge's running config."
+              docker compose logs --tail=50 edge || true
+              exit 1
+            fi
+            if ! diff -u /tmp/edge-expected.conf /tmp/edge-running.conf; then
+              echo "The edge is serving a config this deploy did not render."
+              exit 1
+            fi
+            # The document, not only the API: a frontend build that leaves no
+            # index.html keeps /api/health at 200 while / becomes a 404.
+            edge_doc="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 30 \
+              --resolve "test-towers.retina.fm:8443:127.0.0.1" "https://test-towers.retina.fm:8443/" || echo unreachable)"
+            if [ "$edge_doc" != "200" ]; then
+              echo "The edge served / as $edge_doc."
               docker compose logs --tail=50 edge || true
               exit 1
             fi
