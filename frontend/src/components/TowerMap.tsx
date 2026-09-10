@@ -100,6 +100,10 @@ export default function TowerMap({ towers, userLocation, highlighted }) {
             <Marker
               key={`${t.rank}-${t.frequency_mhz}`}
               position={[t.latitude, t.longitude]}
+              // Co-located stations (shared masts) get identical Leaflet z-indexes,
+              // so DOM order decides and the worst rank would paint on top.
+              // Keep the best-ranked marker visible at every site.
+              zIndexOffset={1000 - t.rank}
               icon={makeTowerIcon(
                 tier.color,
                 highlighted &&
