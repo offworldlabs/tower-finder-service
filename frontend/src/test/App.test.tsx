@@ -164,8 +164,8 @@ describe("App", () => {
     await search(user);
 
     await waitFor(() => expect(document.querySelectorAll("tbody tr")).toHaveLength(2));
-    expect(screen.getByRole("cell", { name: /Top 20%/ })).toBeInTheDocument();
-    expect(screen.getByRole("cell", { name: /40–60%/ })).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: /^Best$/ })).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: /^Middle$/ })).toBeInTheDocument();
     expect(screen.getByText(/\+ WGBH-DT2/)).toBeInTheDocument();
     // Exact name: a stray "0" from the empty list would make this "WBZ0".
     expect(screen.getByRole("cell", { name: "WBZ" })).toBeInTheDocument();
