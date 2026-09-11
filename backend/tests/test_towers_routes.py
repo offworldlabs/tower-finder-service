@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from app import app
 from core.auth import ENV_VAR
-from tests._helpers import device, get_towers, system
+from tests._helpers import device, get_towers, make_httpx_mock, status_error_response, system
 
 
 @pytest.fixture()
@@ -138,33 +138,6 @@ class TestTowerConfig:
 # ── _batch_lookup_elevations ─────────────────────────────────────────────────
 
 
-def _make_httpx_mock(get_return=None, get_side_effect=None):
-    """Return a patch context manager that intercepts httpx.AsyncClient."""
-    mock_client = unittest.mock.AsyncMock()
-    mock_client.get = unittest.mock.AsyncMock(return_value=get_return, side_effect=get_side_effect)
-    mock_ctx = unittest.mock.MagicMock()
-    mock_ctx.__aenter__ = unittest.mock.AsyncMock(return_value=mock_client)
-    mock_ctx.__aexit__ = unittest.mock.AsyncMock(return_value=False)
-    return unittest.mock.patch("httpx.AsyncClient", return_value=mock_ctx)
-
-
-def _status_error_response(status_code):
-    """A response whose raise_for_status() raises for that status.
-
-    The status has to be a real int, not a bare MagicMock: the classification
-    under test compares it.
-    """
-    resp = unittest.mock.MagicMock()
-    resp.raise_for_status = unittest.mock.MagicMock(
-        side_effect=httpx.HTTPStatusError(
-            f"{status_code} error",
-            request=unittest.mock.MagicMock(),
-            response=unittest.mock.MagicMock(status_code=status_code),
-        )
-    )
-    return resp
-
-
 class TestBatchLookupElevations:
     async def test_empty_list_returns_empty_dict(self):
         from routes.towers import _batch_lookup_elevations
@@ -179,7 +152,7 @@ class TestBatchLookupElevations:
         mock_resp.raise_for_status = unittest.mock.MagicMock()
         mock_resp.json.return_value = {"elevation": [123.4]}
 
-        with _make_httpx_mock(get_return=mock_resp):
+        with make_httpx_mock(get_return=mock_resp):
             result = await _batch_lookup_elevations([(33.9, -84.6)])
 
         assert result == {(33.9, -84.6): 123.4}
@@ -187,14 +160,14 @@ class TestBatchLookupElevations:
     async def test_http_timeout_raises_unavailable(self):
         from routes.towers import ElevationUnavailable, _batch_lookup_elevations
 
-        with _make_httpx_mock(get_side_effect=httpx.TimeoutException("timed out")):
+        with make_httpx_mock(get_side_effect=httpx.TimeoutException("timed out")):
             with pytest.raises(ElevationUnavailable):
                 await _batch_lookup_elevations([(33.9, -84.6)])
 
     async def test_http_500_error_raises_unavailable(self):
         from routes.towers import ElevationUnavailable, _batch_lookup_elevations
 
-        with _make_httpx_mock(get_return=_status_error_response(500)):
+        with make_httpx_mock(get_return=status_error_response(500)):
             with pytest.raises(ElevationUnavailable):
                 await _batch_lookup_elevations([(33.9, -84.6)])
 
@@ -203,7 +176,7 @@ class TestBatchLookupElevations:
         fixes it, so it must not read as a broken route."""
         from routes.towers import ElevationUnavailable, _batch_lookup_elevations
 
-        with _make_httpx_mock(get_return=_status_error_response(429)):
+        with make_httpx_mock(get_return=status_error_response(429)):
             with pytest.raises(ElevationUnavailable):
                 await _batch_lookup_elevations([(33.9, -84.6)])
 
@@ -214,7 +187,7 @@ class TestBatchLookupElevations:
         post-deploy smoke passes on, gating a permanently broken route green."""
         from routes.towers import ElevationUnavailable, _batch_lookup_elevations
 
-        with _make_httpx_mock(get_return=_status_error_response(status)):
+        with make_httpx_mock(get_return=status_error_response(status)):
             with pytest.raises(httpx.HTTPStatusError) as exc_info:
                 await _batch_lookup_elevations([(33.9, -84.6)])
         assert not isinstance(exc_info.value, ElevationUnavailable)
@@ -222,7 +195,7 @@ class TestBatchLookupElevations:
     async def test_generic_connection_error_raises_unavailable(self):
         from routes.towers import ElevationUnavailable, _batch_lookup_elevations
 
-        with _make_httpx_mock(get_side_effect=httpx.ConnectError("connection refused")):
+        with make_httpx_mock(get_side_effect=httpx.ConnectError("connection refused")):
             with pytest.raises(ElevationUnavailable):
                 await _batch_lookup_elevations([(33.9, -84.6)])
 
@@ -235,7 +208,7 @@ class TestBatchLookupElevations:
         mock_resp.raise_for_status = unittest.mock.MagicMock()
         mock_resp.json.return_value = {"elevation": ["not a number"]}
 
-        with _make_httpx_mock(get_return=mock_resp):
+        with make_httpx_mock(get_return=mock_resp):
             with pytest.raises(ElevationUnavailable):
                 await _batch_lookup_elevations([(33.9, -84.6)])
 
@@ -250,7 +223,7 @@ class TestBatchLookupElevations:
         # A dict where the code indexes a list: the shape a refactor gets wrong.
         mock_resp.json.return_value = {"elevation": {"0": 123.4}}
 
-        with _make_httpx_mock(get_return=mock_resp):
+        with make_httpx_mock(get_return=mock_resp):
             with pytest.raises(Exception) as exc_info:  # noqa: PT011
                 await _batch_lookup_elevations([(33.9, -84.6)])
         assert not isinstance(exc_info.value, ElevationUnavailable)
@@ -627,7 +600,7 @@ class TestElevationEndpoint:
         400 means the request we build is wrong, and a 400 is what a renamed
         parameter or a malformed coordinate list gets. Answering 503 would have
         the smoke check report the route healthy and pass the deploy."""
-        with _make_httpx_mock(get_return=_status_error_response(400)):
+        with make_httpx_mock(get_return=status_error_response(400)):
             r = client.get("/api/elevation", params={"lat": 33.45, "lon": -112.07})
         assert r.status_code == 500
         assert "Elevation service unavailable" not in r.text
