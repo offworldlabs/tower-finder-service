@@ -42,6 +42,6 @@ describe("rankTier", () => {
   });
 
   it("labels are in order from top to bottom", () => {
-    expect(RANK_TIERS.map((t) => t.label)).toEqual(["Top 20%", "20–40%", "40–60%", "60–80%", "Bottom 20%"]);
+    expect(RANK_TIERS.map((t) => t.label)).toEqual(["Best", "Upper", "Middle", "Lower", "Worst"]);
   });
 });
