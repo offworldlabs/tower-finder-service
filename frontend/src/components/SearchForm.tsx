@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
-import { fetchElevation } from "../api";
+import { fetchElevation, geocodeAddress } from "../api";
+import type { GeocodeResponse } from "../types";
 import "./SearchForm.css";
 
 // Both mirror parse_user_frequencies in services/tower_ranking.py, which keeps
@@ -10,6 +11,17 @@ import "./SearchForm.css";
 // there.
 const MAX_FREQUENCIES = 10;
 const MAX_FREQUENCY_MHZ = 10000;
+
+// A geocoder that could only place the postcode or the town says so, and that
+// matters more here than it would on a map: the ranking grids the search disk
+// into 2 km cells and applies a smooth-earth radio-horizon check, so a
+// city-centre point can sit 10 km from the real site and change which towers
+// come back. The operator is told to narrow it down rather than left to
+// discover the drift from the results.
+const PRECISION_WARNINGS: Record<string, string> = {
+  postcode: "Postcode centre only. Add the street address for a precise fix.",
+  locality: "City centre only. Add the street address for a precise fix.",
+};
 
 /**
  * Location entry for a tower search.
@@ -31,7 +43,14 @@ export default function SearchForm({ onSearch, loading }) {
   const [showFrequencies, setShowFrequencies] = useState(false);
   const [geoError, setGeoError] = useState(null);
   const [geoLoading, setGeoLoading] = useState(false);
+  const [address, setAddress] = useState("");
+  const [addressError, setAddressError] = useState(null);
+  const [addressLoading, setAddressLoading] = useState(false);
+  // The accepted match, kept so the operator can see which of several possible
+  // "123 Main St" the coordinates below actually belong to.
+  const [matched, setMatched] = useState<GeocodeResponse | null>(null);
   const altitudeManual = useRef(false);
+  const geocodeRequest = useRef<AbortController | null>(null);
 
   // One reading of the entered rows, so what is submitted and what the collapsed
   // toggle counts can never disagree.
@@ -64,6 +83,57 @@ export default function SearchForm({ onSearch, loading }) {
     };
   }, [lat, lon]);
 
+  // Same reason the elevation effect aborts: a reply that arrives after the
+  // form is gone would set state on an unmounted component.
+  useEffect(() => () => geocodeRequest.current?.abort(), []);
+
+  /** Drop the confirmation once the coordinates it described no longer hold. */
+  function clearMatch() {
+    setMatched(null);
+    setAddressError(null);
+  }
+
+  async function lookupAddress() {
+    const query = address.trim();
+    if (!query || addressLoading) return;
+
+    // One lookup at a time: the reply fills lat/lon, so two in flight would
+    // race and the slower one would win.
+    geocodeRequest.current?.abort();
+    const controller = new AbortController();
+    geocodeRequest.current = controller;
+    clearMatch();
+    setAddressLoading(true);
+    try {
+      const result = await geocodeAddress(query, controller.signal);
+      if (controller.signal.aborted) return;
+      // Writing the coordinates is what re-triggers the elevation effect above;
+      // six decimals is ~0.1 m, finer than any geocoder claims to be.
+      setLat(result.latitude.toFixed(6));
+      setLon(result.longitude.toFixed(6));
+      setMatched(result);
+    } catch (err) {
+      if (controller.signal.aborted || err?.name === "AbortError") return;
+      // geocodeAddress throws the server's own `detail`; a transport failure
+      // arrives as fetch's TypeError, whose message ("Failed to fetch",
+      // "NetworkError…") differs per browser and tells the operator nothing.
+      setAddressError(
+        err instanceof TypeError || !err?.message ? "Address lookup failed" : err.message,
+      );
+    } finally {
+      if (!controller.signal.aborted) setAddressLoading(false);
+    }
+  }
+
+  function handleAddressKeyDown(e) {
+    // Enter inside this field means "look up", not "run the search" — the
+    // coordinates it is about to fill in are not there yet.
+    if (e.key === "Enter") {
+      e.preventDefault();
+      lookupAddress();
+    }
+  }
+
   function handleSubmit(e) {
     e.preventDefault();
     const parsedLat = parseFloat(lat);
@@ -88,6 +158,7 @@ export default function SearchForm({ onSearch, loading }) {
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         setGeoLoading(false);
+        clearMatch();
         setLat(pos.coords.latitude.toFixed(6));
         setLon(pos.coords.longitude.toFixed(6));
         if (pos.coords.altitude != null) {
@@ -111,6 +182,40 @@ export default function SearchForm({ onSearch, loading }) {
     <form className="search-form" onSubmit={handleSubmit}>
       <h2>Location</h2>
 
+      <div className="address-row">
+        <label>
+          Address
+          <input
+            type="text"
+            value={address}
+            onChange={(e) => {
+              setAddress(e.target.value);
+              clearMatch();
+            }}
+            onKeyDown={handleAddressKeyDown}
+            placeholder="e.g. 1600 Pennsylvania Ave NW, Washington, DC"
+            maxLength={200}
+            autoComplete="street-address"
+          />
+        </label>
+        <button
+          type="button"
+          className="btn-secondary btn-lookup"
+          onClick={lookupAddress}
+          disabled={addressLoading || address.trim() === ""}
+        >
+          {addressLoading ? "Looking up…" : "Look up"}
+        </button>
+      </div>
+
+      {matched && (
+        <p className="address-matched">Matched: {matched.matched_address}</p>
+      )}
+      {matched && PRECISION_WARNINGS[matched.precision] && (
+        <p className="address-warning">{PRECISION_WARNINGS[matched.precision]}</p>
+      )}
+      {addressError && <p className="geo-error">{addressError}</p>}
+
       <div className="field-row">
         <label>
           Latitude
@@ -120,7 +225,10 @@ export default function SearchForm({ onSearch, loading }) {
             min={-90}
             max={90}
             value={lat}
-            onChange={(e) => setLat(e.target.value)}
+            onChange={(e) => {
+              setLat(e.target.value);
+              clearMatch();
+            }}
             placeholder="e.g. 38.8977"
             required
           />
@@ -133,7 +241,10 @@ export default function SearchForm({ onSearch, loading }) {
             min={-180}
             max={180}
             value={lon}
-            onChange={(e) => setLon(e.target.value)}
+            onChange={(e) => {
+              setLon(e.target.value);
+              clearMatch();
+            }}
             placeholder="e.g. -77.0365"
             required
           />

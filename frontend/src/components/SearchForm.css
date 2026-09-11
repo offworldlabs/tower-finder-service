@@ -121,6 +121,35 @@
   margin-top: 8px;
 }
 
+/* Address lookup. The button sits beside the input rather than under it, and
+   keeps its own width at every breakpoint — stretched across a narrow column
+   it reads as the form's primary action, which it is not. */
+.address-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.address-row label {
+  flex: 1;
+  min-width: 0;
+}
+
+.btn-lookup {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  /* Lines its baseline up with the input, which sits above the label's margin. */
+  margin-bottom: 14px;
+}
+
+.address-matched,
+.address-warning {
+  font-size: 0.75rem;
+  color: #6b7280;
+  margin: -8px 0 10px;
+  line-height: 1.4;
+}
+
 /* Frequency inputs */
 .freq-toggle {
   margin-top: 2px;
