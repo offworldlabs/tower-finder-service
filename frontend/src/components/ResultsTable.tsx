@@ -1,5 +1,6 @@
 import "./ResultsTable.css";
 import { rankTier } from "../utils/rankTier";
+import { bearingCardinal, beyondHorizon, formatAreaKm2 } from "../utils/format";
 
 const BAND_COLORS = {
   VHF: "#7c3aed",
@@ -22,6 +23,10 @@ export default function ResultsTable({ towers, onHover }) {
           <thead>
             <tr>
               <th>#</th>
+              {/* The ranking is sorted on detect area, so it sits beside the
+                  rank rather than at the far end of the row. */}
+              <th>Detect Area (km&sup2;)</th>
+              <th>Point</th>
               <th>Callsign</th>
               <th>Location</th>
               <th>Lat</th>
@@ -40,9 +45,14 @@ export default function ResultsTable({ towers, onHover }) {
           <tbody>
             {towers.map((t) => {
               const tier = rankTier(t.rank, towers.length);
+              // Past the horizon the tower is still listed — it just reads as
+              // muted, so a low-ranked but familiar transmitter explains itself.
+              const overHorizon = beyondHorizon(t.distance_km, t.horizon_km);
               return (
                 <tr
                   key={`${t.rank}-${t.frequency_mhz}`}
+                  className={overHorizon ? "beyond-horizon" : undefined}
+                  title={overHorizon ? "Beyond radio horizon" : undefined}
                   onMouseEnter={() => onHover(t)}
                   onMouseLeave={() => onHover(null)}
                 >
@@ -50,6 +60,15 @@ export default function ResultsTable({ towers, onHover }) {
                     <span className="rank-badge" style={{ color: tier.color, background: tier.bg }}>
                       {t.rank}
                     </span>
+                  </td>
+                  <td className="mono detect-area">{formatAreaKm2(t.expected_area_km2)}</td>
+                  <td className="point">
+                    {t.best_azimuth_deg != null && (
+                      <>
+                        {Math.round(t.best_azimuth_deg)}°{" "}
+                        <span className="cardinal">{bearingCardinal(t.best_azimuth_deg)}</span>
+                      </>
+                    )}
                   </td>
                   <td className="callsign">
                     {t.callsign || "—"}

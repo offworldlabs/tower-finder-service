@@ -31,16 +31,215 @@ Optional env vars:
 - `MAPRAD_API_KEY` — required for non-US queries; US can fall back to FCC only.
 - `TOWER_FINDER_RUNTIME_DIR` — where `tower_config.json` is read/written (default `./data/runtime/`). On first start the runtime overlay is seeded from `backend/config/tower_config.json`.
 - `TOWER_FINDER_ADMIN_TOKEN` — shared secret gating `PUT /api/config`, presented as `Authorization: Bearer <token>`. Unset closes the endpoint (503) rather than opening it, so a deploy that omits it cannot silently expose a public config write.
+- `TOWER_FINDER_FEEDBACK_TOKEN`: shared secret gating `POST /api/feedback/tower-outcome`, same bearer shape and the same fail-closed rule. Separate from the admin token on purpose: every node in the fleet holds this one, so a node that is lost or read must not also hand over the ranking config. See "Fleet feedback" below.
 
 ## API
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/towers?lat&lon&altitude&radius_km&limit&source&frequencies` | Ranked towers near (lat, lon) using model-based scoring (EIRP, FSPL). Ranked by band tier first (VHF and UHF tie, FM last), then measured score where a sweep supplied one, then modelled received power. `frequencies` boosts towers near a frequency the caller names, in MHz; it never drops one. Accepts both spellings a client might send: comma-separated (`frequencies=95.5,101.1`) and repeated (`frequencies=95.5&frequencies=101.1`), including a mix of the two. Up to ten values are used and echoed back as `query.user_frequencies_mhz`. Stations licensed on one transmitter (FCC channel-sharing pairs, LPFM time-shares) are merged into a single row; the partners' callsigns are listed in `shared_callsigns`. |
-| POST | `/api/towers` | Same tower search, enriched with spectrum-analyser measurements. Body: `MeasurementPayload` (see `backend/models/measurements.py`). Only towers the SDR can see are returned — unmatched towers are excluded. Matched towers carry real measured fields (`snr_db`, `score`, `obw_fraction`, `power_db`, `measured=true`). At most 2000 measurements per request, 422 beyond that: ranking pairs every tower with every measurement, synchronously on the one event loop. |
+| GET | `/api/towers?lat&lon&altitude&radius_km&limit&source&frequencies` | Ranked towers near (lat, lon). Ranked by expected detection area (`expected_area_km2`, see "Ranking"), then reordered so the top of the list is not ten channels of one mast; every tower also carries `best_azimuth_deg` (where to aim the Yagi), `horizon_km`, and the site annotations `site_id`, `site_channels` and `diversity_penalty`. `query.ranking` names the ordering that ran (`expected_area_mmr`, `expected_area` or `sort_order`). `frequencies` boosts towers near a frequency the caller names, in MHz; it never drops one, and the boosted towers keep the top of the list whatever the diversity pass does inside each group. Accepts both spellings a client might send: comma-separated (`frequencies=95.5,101.1`) and repeated (`frequencies=95.5&frequencies=101.1`), including a mix of the two. Up to ten values are used and echoed back as `query.user_frequencies_mhz`. Stations licensed on one transmitter (FCC channel-sharing pairs, LPFM time-shares) are merged into a single row; the partners' callsigns are listed in `shared_callsigns`. |
+| POST | `/api/towers` | Same tower search, enriched with spectrum-analyser measurements. Body: `MeasurementPayload` (see `backend/models/measurements.py`). Only towers the SDR can see are returned; unmatched towers are excluded. Matched towers carry real measured fields (`snr_db`, `score`, `obw_fraction`, `power_db`, `measured=true`). The sweep also calibrates the model: `query.calibration_offset_db` and `query.calibrated_towers` say whether it could be done and over how many towers, each matched tower says whether its direct path is `measured` or modelled (`direct_power_source`) and what the analyser's `score` discounted it by (`measurement_quality`). See "Ranking". At most 2000 measurements per request, 422 beyond that: ranking pairs every tower with every measurement, synchronously on the one event loop. |
 | GET | `/api/elevation?lat&lon` | Ground elevation at a point. The search form pre-fills altitude from this; `GET /api/towers` resolves altitude itself when none is given. 503 when the upstream cannot be reached, 404 for a point it has no data for: two different facts, so a caller can tell an outage from a gap. `GET /api/towers` treats both as best-effort and still returns towers, with a null elevation. |
-| GET | `/api/config` | Current ranking config (bands, band priority, sort order, defaults). |
+| GET | `/api/config` | Current ranking config (bands, band priority, band offsets, sort order, scoring knobs, defaults). |
 | PUT | `/api/config` | Replace ranking config; sanity-capped at 1 MB. Requires the admin bearer token (see `TOWER_FINDER_ADMIN_TOKEN`). Validated and applied before it is written (400 if either fails), so the file on the persistent volume only ever holds a config the running process has accepted. |
+| POST | `/api/feedback/tower-outcome` | Fleet feedback ingest: what a node (or the archive job) actually got out of a tower we ranked. Body: one `TowerOutcome` or a list of up to 100 (see `backend/models/feedback.py`). Requires the feedback bearer token (see `TOWER_FINDER_FEEDBACK_TOKEN`); unset closes it with a 503. Unknown keys are a 422, so a misspelled field is loud rather than silently dropped. Returns `{"stored": n}`. See "Fleet feedback". |
+| GET | `/api/feedback/summary?limit=` | Per-tower rollup of stored outcomes, busiest first: row and node counts, distinct receiver cells, mean multiplier, callsigns seen, last observation. Requires the admin bearer token, not the feedback one: the rollup names sites and node counts. |
+
+## Ranking
+
+The rank answers "which of these towers lights up the most ground", not "which
+is loudest here". For each tower the service grids a disk around the receiver
+and counts the 2 km cells where a 10 m^2 target at 3 km altitude would be
+detected at 13 dB SNR or better, sweeping 24 Yagi boresights and keeping the
+best one. The terms are the two-way bistatic radar equation (EIRP, the
+`1/(R_t^2 R_r^2)` spreading loss, `lambda^2 sigma / (4 pi)^3`), a noise floor
+raised by whatever of the direct path survives 50 dB of cancellation, the
+band's `B * T` processing gain, a 4/3-earth radio-horizon penalty (20 dB plus
+0.5 dB/km beyond it) and a cut on bistatic angles above 150 degrees. The model
+lives in `backend/services/tower_scoring.py` and is a faithful port of a
+validated reference, vectorised with numpy so a few hundred towers score inside
+the request.
+
+The practical consequence: a megawatt transmitter 5 km away is the loudest
+signal in the band and near the bottom of the list, because its direct path
+swamps the surveillance channel and the geometry it offers is a sliver around
+the baseline. Area rises with distance to roughly 50 km and then falls away as
+path loss and the horizon take over.
+
+Three fields are added to every tower, and nothing that was there before
+changed name, type or meaning: `expected_area_km2`, `best_azimuth_deg` and
+`horizon_km`.
+
+### Diversity ordering
+
+A node tunes one centre frequency at a time, and its Auto-Calibrate tries at
+most three candidates from the top of this list. A San Francisco search returns
+14 channels on Sutro Tower and 7 on Mount Diablo, so a list ordered on area
+alone spends all three candidate slots on one mast: the same direct path, the
+same bearing and the same failure, three times.
+
+So the list is reordered by maximal marginal relevance. Each pick maximises
+`expected_area_km2 * (1 - lambda * max_sim)`, where `max_sim` is the tower's
+highest similarity to anything already picked. That reads as "the best tower
+that is not another view of the one above it".
+Similarity is 1.0 for another channel on the same mast in the same
+band, 0.5 for the same mast in another band, and otherwise a Gaussian in
+bearing and in range (30 degrees, 15 km), halved again across bands. Sites are
+found by greedy clustering within `site_radius_km`, the way channel-sharing
+partners already are, except that this one crosses frequency and band because
+the thing being counted is the mast.
+
+The pass runs only when `ranking.diversity.enabled` is true and the configured
+`sort_order` leads with `expected_area_km2` descending, which is what the
+shipped config does. Rank on anything else and the plain sort applies
+untouched. The user-frequency split survives it either way: a hand-typed
+frequency says which towers the caller asked about, so the matched group is
+diversified within itself and still sorts ahead of the rest.
+
+Every tower carries `site_id` (the site's lead tower's coordinates),
+`site_channels` (how many towers this search found on that site, all bands,
+counted before `limit` truncates the list) and
+`diversity_penalty` (the `lambda * similarity` the tower paid at the moment it
+was picked, 0 for the first pick and whenever the pass did not run).
+`query.ranking` says which of `expected_area_mmr`, `expected_area` or
+`sort_order` produced the order.
+
+### Measurement calibration (POST only)
+
+On `POST /api/towers` the node's own sweep is the best direct-path measurement
+available, and terrain is the largest error in the free-space model. `power_db`
+is always dBFS, the ATSC pilot peak as the node's front end sees it, and is
+present only for TV rows (FM sends null). It carries no absolute scale of its
+own, but the differences between channels within one sweep are real. So the
+median of (measured minus modelled) over the matched TV towers is taken as that
+sweep's fixed offset, at least two of them or no calibration is done, and
+removing it leaves each tower's own residual on the modelled dBm scale. That
+residual becomes the tower's direct-path power inside the model, which changes
+the noise floor rather than the energy reaching the target. The response
+reports `query.calibration_offset_db` (null when there was too little to take
+one) and `query.calibrated_towers`, and each tower says
+`direct_power_source: "measured"` or `"model"`.
+
+The analyser's `score` is not a sort key. It says how well the SDR hears the
+illuminator, which is not what the rank is answering, so on the POST path it
+becomes a quality discount instead: `expected_area_km2` is multiplied by
+`0.5 + 0.5 * score` (clamped to [0, 1]), stamped as `measurement_quality`, so a
+badly resolved channel is demoted rather than deleted. It is deliberately never
+compared between towers: FM's score is an SNR ramp and TV's is absolute dBFS,
+two different scales set upstream in retina-spectrum.
+
+Config, all optional, all in `tower_config.json`:
+
+- `ranking.band_offset_db` ({`VHF`, `UHF`, `FM`}) is a per-band nudge in dB
+  applied to EIRP inside the model. It replaces the old hard band tier, which
+  put every FM station below every TV tower whatever their powers. Shipped as
+  zeros, to be fitted from fleet data.
+- `ranking.band_priority` still exists, is still applied and is still sortable,
+  for an overlay that deliberately ranks on the tier.
+- `ranking.diversity` holds the ordering knobs: `enabled`, `lambda` (how much
+  of a repeat's similarity is charged against it), `same_site_same_band` and
+  `same_site_other_band` (the two same-mast similarities), `bearing_sigma_deg`
+  and `distance_sigma_km` (the Gaussian widths for towers on different sites),
+  `other_band_factor` (what a cross-band pair keeps of that), and
+  `site_radius_km` (how far apart two records can be and still be one mast).
+  The four unit-interval values are validated to [0, 1] and the three widths to
+  strictly positive, because they meet as a `1 - lambda * sim` multiplier and as
+  divisors: outside those ranges the pass promotes the most redundant tower
+  instead of demoting it, or divides by zero, on every search.
+- `scoring` holds the model's knobs: `cancellation_db`, `target_rcs_m2`,
+  `snr_min_db`, `max_bistatic_angle_deg`, `target_alt_km`, `rx_height_m`,
+  `grid_km`, `max_range_km`, `n_azimuths`, `yagi_hpbw_deg`,
+  `yagi_front_to_back_db`, `noise_figure_db` and `band_params`
+  (`bw_hz` / `cpi_s` per band). The receiver antenna gain is not among them: it
+  comes from `receiver.rx_antenna_gain_dbi`, so the model and the link budget
+  cannot disagree about the antenna.
+
+**Migration.** The runtime overlay is a persistent volume, seeded once and never
+re-seeded, so a deployed environment still holds the sort order that shipped
+before this change. On load, an overlay whose `ranking.sort_order` is exactly
+one of the defaults this image has shipped is upgraded in memory to the current
+one, with a warning naming the file; the file itself is left alone, and a PUT
+makes the choice explicit either way. An overlay whose sort order differs at all
+is an operator's decision and is never touched.
+
+`ranking.diversity` needs no such migration and gets none: no overlay on disk
+carries the section, and an absent section takes the in-code default, so every
+environment turns the diversity pass on at the deploy that brings it. An
+operator who does not want it sets `enabled` to false with a PUT. The knobs an
+overlay does name are kept and the rest defaulted, so a partial section is a
+partial override rather than a reset.
+
+## Fleet feedback
+
+The ranking predicts how much area a tower lights up (`expected_area_km2`).
+Nothing ever told it whether that was true. These endpoints close that loop: the
+fleet reports what it actually got out of a tower, and the next request for that
+tower from a nearby receiver is corrected by what came back.
+
+Two producers post the same row shape:
+
+- **Calibration.** A node's Auto-Calibrate tries up to three candidate towers and
+  posts one row per candidate: the `outcome` it reached, `max_evidence` (0 none,
+  1 detections, 2 an active track), `max_detections`, and the gains it settled on.
+- **Archive.** A later retina-server job posts archive-derived aggregates per
+  tower per window: `verified_range_p85_km`, `adsb_match_rate`, `snr_median_db`,
+  `hours_observed`.
+
+Payload (`backend/models/feedback.py`), one object or a list of up to 100:
+
+```bash
+curl -X POST https://towers.retina.fm/api/feedback/tower-outcome \
+  -H "Authorization: Bearer $TOWER_FINDER_FEEDBACK_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"node_id": "node-7", "rx_lat": 34.05, "rx_lon": -118.25,
+       "tx_lat": 34.23, "tx_lon": -118.06, "fc_hz": 98700000,
+       "callsign": "KABC", "source": "calibration",
+       "outcome": "confirmed_track", "max_evidence": 2,
+       "max_detections": 41, "duration_s": 90, "gain_a": 12,
+       "gain_b": 8, "lna_state": 3}'
+# {"stored": 1}
+```
+
+Unknown keys are a 422 rather than being dropped, so a node that misspells a
+field finds out instead of posting rows that weigh nothing. `observed_at` is
+optional; the server dates the row when it is absent, and keeps `received_at`
+separately so a node with a bad clock still lands something orderable.
+
+**Where it lives.** A SQLite file at `<TOWER_FINDER_RUNTIME_DIR>/feedback.db`,
+the same persistent overlay as `tower_config.json` (default
+`./data/runtime/feedback.db`). The table keeps its newest 200,000 rows and drops
+the rest on insert, so nothing has to prune it on a schedule.
+
+**How it enters the ranking.** On each tower search, one query pulls every row
+from receivers within 30 km of the caller, groups them by tower (about 100 m of
+position and 100 kHz of frequency), and turns each row into a log-multiplier:
+calibration outcomes map through a table (`confirmed_track` 1.5,
+`no_confirmed_track` 0.1, `unstable_overload` 0.02; the rest describe the run
+rather than the tower and are ignored), and archive rows are weighted by their
+hours observed, capped at 24. Every tower then carries:
+
+- `feedback_n`: total weight of rows behind the correction (0.0 when there are none).
+- `feedback_factor`: `exp(n / (n + 5) * r̄)`, where `r̄` is the weighted mean
+  log-multiplier. `expected_area_km2` is multiplied by this.
+
+The `n / (n + k)` shrinkage is the point of the design: one node saying "nothing
+there" should nudge a tower, not erase it, while a hundred rows saying it
+converge on what they say. A single confirmed track moves the area about 7%.
+A database that will not open costs the caller the correction, not the tower
+list: the lookup is wrapped, logs a warning, and leaves the towers untouched.
+
+`GET /api/feedback/summary` (admin token) shows what has come back per tower:
+row and node counts, distinct receiver cells, the mean multiplier, the callsigns
+seen and the last observation.
+
+**Provisional, and what is left.** The archive residual should be
+`log((pi * verified_range_p85_km^2) / expected_area_km2)`, but the model area at
+request time is not known at ingest and recomputing it here would fork the
+ranking. Until the request-time area is carried on the row, archive rows store
+their raw fields and stand in the ADS-B match rate as the multiplier
+(`match_rate / 0.5`, clamped to 0.05 ... 3.0). Fitting the correction per band
+and per region, rather than per tower and receiver radius, is future work, as is
+letting a node's own history weigh more than a neighbour's.
 
 ## Layout
 
@@ -49,10 +248,14 @@ Optional env vars:
 | `app.py` | FastAPI entry point |
 | `backend/routes/towers.py` | HTTP routes |
 | `backend/services/tower_ranking.py` | Ranking algorithm + config loader/validator |
+| `backend/services/tower_scoring.py` | Bistatic detection-area model: what the rank is computed from |
 | `backend/services/tower_coverage.py` | Optional n>=2 coverage-area-added scoring, injected into the ranking as a `coverage_scorer` |
 | `backend/clients/fcc.py` | FCC TV/FM Query CGI client |
 | `backend/clients/maprad.py` | Maprad.io broadcast-systems client |
 | `backend/config/tower_config.json` | Default ranking config (image-shipped) |
+| `backend/services/tower_feedback.py` | Fleet feedback store (SQLite) and the `apply_feedback` correction |
+| `backend/routes/feedback.py` | Feedback ingest + admin summary routes |
+| `backend/models/feedback.py` | `TowerOutcome` payload model |
 | `backend/tests/` | pytest suite (176 tests); integration tests require running `capture_fixture.py` first) |
 | `frontend/` | The standalone React UI (Vite). Built into the image and served by `app.py`; `npm test` / `npm run test:e2e` cover it |
 | `pyproject.toml` | Package + tooling config |

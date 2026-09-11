@@ -1,5 +1,7 @@
 """Tests for tower ranking utilities — source detection, band classification, frequency parsing."""
 
+import json
+
 import pytest
 
 from routes.towers import _detect_source
@@ -21,6 +23,7 @@ from services.tower_ranking import (
     process_and_rank,
     watts_to_dbm,
 )
+from tests._helpers import CONSUMER_FIELDS
 from tests._helpers import device as _device
 from tests._helpers import system as _system
 
@@ -512,8 +515,45 @@ class TestProcessAndRank:
             "obw_fraction",
             # Channel-sharing merge — always present, empty when the tower stands alone
             "shared_callsigns",
+            # Detection-area model — always present, 0.0 for a tower it cannot score
+            "expected_area_km2",
+            "best_azimuth_deg",
+            "horizon_km",
+            # Site-aware diversity ordering — always present, whether or not
+            # the MMR pass ran.
+            "site_id",
+            "site_channels",
+            "diversity_penalty",
+            # Direct-path provenance — "model" until a sweep calibrates it.
+            "direct_power_source",
+            "direct_power_dbm_override",
+            "measurement_quality",
         }
         assert expected_fields.issubset(t.keys())
+
+    def test_the_fields_our_consumers_read_keep_their_names_and_types(self):
+        """retina-gui and retina-spectrum read this response.
+
+        The ranking redesign only adds fields. A rename or a type change here
+        is a broken map pin or a blank column in another repo, found at
+        runtime, so the contract is pinned rather than described. The same
+        contract is checked on both routes in test_towers_routes.py, off the
+        same table.
+        """
+        t = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON)[0]
+        for field, expected_type in CONSUMER_FIELDS.items():
+            assert isinstance(t[field], expected_type), f"{field} is {type(t[field]).__name__}"
+        # power_db and altitude_m are nullable: the first comes from a
+        # measurement, the second from the elevation enrichment in the route.
+        assert "power_db" in t
+
+    def test_the_model_fields_are_json_serialisable_numbers(self):
+        """numpy scalars would pass every assertion above and then fail
+        json.dumps in the route, which is a 500 on the towers endpoint."""
+        t = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON)[0]
+        for field in ("expected_area_km2", "best_azimuth_deg", "horizon_km"):
+            assert type(t[field]) is float, field
+        json.dumps({k: v for k, v in t.items() if k != "antenna_height_m"})
 
     def test_no_measurements_fields_are_none(self):
         """When no measurements provided, analyser fields should all be None/False."""
@@ -795,6 +835,172 @@ class TestProcessAndRankMeasurements:
         t = result[0]
         assert t["measured"] is False
         assert t["snr_db"] is None
+
+
+# ── Measurement calibration (POST path) ──────────────────────────────────────
+
+
+def _tv_measurement(freq_mhz: float, power_db: float, score: float = 1.0, band: str = "UHF") -> dict:
+    """A TV row as retina-spectrum sends one: dBFS power, no SNR, no OBW."""
+    return {
+        "freq_mhz": freq_mhz,
+        "band": band,
+        "snr_db": None,
+        "obw_fraction": None,
+        "score": score,
+        "power_db": power_db,
+    }
+
+
+class TestMeasurementCalibration:
+    """The sweep is the best direct-path measurement there is, and terrain is
+    the largest error in the FSPL the model otherwise falls back on.
+
+    power_db is dBFS, so only the differences within one sweep are real: the
+    median residual against the modelled link budget is the sweep's own scale
+    and is removed.
+    """
+
+    _UHF_A = _device(freq_mhz=515.0, lat=33.93, lon=-84.388, callsign="UHFA", eirp=100_000.0)
+    _UHF_B = _device(freq_mhz=545.0, lat=34.10, lon=-84.388, callsign="UHFB", eirp=50_000.0)
+    _UHF_C = _device(freq_mhz=575.0, lat=33.749, lon=-84.15, callsign="UHFC", eirp=20_000.0)
+    _FM = _device(freq_mhz=95.5, lat=33.93, lon=-84.388, callsign="FMX", eirp=100_000.0)
+
+    def _rank(self, devices, measurements):
+        diagnostics: dict = {}
+        towers = process_and_rank(
+            [_system(devices)],
+            _USER_LAT,
+            _USER_LON,
+            measurements=measurements,
+            diagnostics=diagnostics,
+        )
+        return {t["callsign"]: t for t in towers}, diagnostics
+
+    def test_offset_is_the_median_residual_over_matched_tv_towers(self):
+        measurements = [
+            _tv_measurement(515.0, -30.0),
+            _tv_measurement(545.0, -55.0),
+            _tv_measurement(575.0, -40.0),
+        ]
+        by, diagnostics = self._rank([self._UHF_A, self._UHF_B, self._UHF_C], measurements)
+
+        residuals = sorted(t["power_db"] - t["received_power_dbm"] for t in by.values())
+        assert diagnostics["calibration_offset_db"] == pytest.approx(residuals[1])
+        assert diagnostics["calibrated_towers"] == 3
+
+    def test_each_measured_tower_carries_its_own_residual(self):
+        measurements = [_tv_measurement(515.0, -30.0), _tv_measurement(545.0, -55.0)]
+        by, diagnostics = self._rank([self._UHF_A, self._UHF_B], measurements)
+
+        offset = diagnostics["calibration_offset_db"]
+        for t in by.values():
+            assert t["direct_power_dbm_override"] == pytest.approx(t["power_db"] - offset)
+            assert t["direct_power_source"] == "measured"
+
+    def test_one_tv_tower_is_not_a_calibration(self):
+        """One tower's own terrain error, moved onto every other tower in the
+        sweep, is not a measurement of anything."""
+        by, diagnostics = self._rank([self._UHF_A], [_tv_measurement(515.0, -30.0)])
+
+        assert diagnostics["calibration_offset_db"] is None
+        assert diagnostics["calibrated_towers"] == 0
+        assert by["UHFA"]["direct_power_source"] == "model"
+        assert by["UHFA"]["direct_power_dbm_override"] is None
+
+    def test_fm_rows_are_kept_out_of_the_median(self):
+        """FM sends no power_db at all in practice, and its score is an SNR
+        ramp rather than an absolute reading; one that did arrive must not set
+        the scale for the TV channels."""
+        fm_row = {
+            "freq_mhz": 95.5,
+            "band": "FM",
+            "snr_db": 30.0,
+            "obw_fraction": 0.03,
+            "score": 1.0,
+            "power_db": 0.0,
+        }
+        measurements = [_tv_measurement(515.0, -30.0), _tv_measurement(545.0, -55.0), fm_row]
+        by, diagnostics = self._rank([self._UHF_A, self._UHF_B, self._FM], measurements)
+
+        tv_residuals = [by[c]["power_db"] - by[c]["received_power_dbm"] for c in ("UHFA", "UHFB")]
+        assert diagnostics["calibration_offset_db"] == pytest.approx(sum(tv_residuals) / 2)
+
+    def test_a_measured_direct_path_changes_the_modelled_area(self):
+        """The point of the override: what the node actually heard moves the
+        direct-path interference term, which is what the area is sensitive to."""
+        even = [_tv_measurement(515.0, -30.0), _tv_measurement(545.0, -30.0)]
+        lopsided = [_tv_measurement(515.0, -30.0), _tv_measurement(545.0, -70.0)]
+
+        by_even, _ = self._rank([self._UHF_A, self._UHF_B], even)
+        by_lopsided, _ = self._rank([self._UHF_A, self._UHF_B], lopsided)
+
+        # UHFB reads 40 dB quieter in the second sweep, so it keeps more of its
+        # own area and UHFA, now the loud one, loses some.
+        assert by_lopsided["UHFB"]["expected_area_km2"] > by_even["UHFB"]["expected_area_km2"]
+        assert by_lopsided["UHFA"]["expected_area_km2"] < by_even["UHFA"]["expected_area_km2"]
+
+    def test_unmeasured_towers_stay_on_the_model(self):
+        towers = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON)
+
+        assert towers[0]["direct_power_source"] == "model"
+        assert towers[0]["direct_power_dbm_override"] is None
+        assert towers[0]["measurement_quality"] is None
+
+    def test_get_never_calibrates(self):
+        """GET has no sweep. The keys are still there, and still say "model"."""
+        diagnostics: dict = {}
+        process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON, diagnostics=diagnostics)
+
+        assert diagnostics["calibration_offset_db"] is None
+        assert diagnostics["calibrated_towers"] == 0
+
+
+class TestMeasurementQuality:
+    """`score` stopped being a sort key and became a discount.
+
+    It says how well the SDR hears the illuminator, not how much ground the
+    illuminator lights up, so it demotes a badly-resolved channel rather than
+    ranking the list. FM's score is an SNR ramp and TV's is absolute dBFS, so
+    the number is never compared across towers.
+    """
+
+    _UHF_A = TestMeasurementCalibration._UHF_A
+    _UHF_B = TestMeasurementCalibration._UHF_B
+
+    def _area(self, score):
+        measurements = [_tv_measurement(515.0, -30.0, score=score), _tv_measurement(545.0, -30.0)]
+        towers = process_and_rank(
+            [_system([self._UHF_A, self._UHF_B])],
+            _USER_LAT,
+            _USER_LON,
+            measurements=measurements,
+        )
+        return next(t for t in towers if t["callsign"] == "UHFA")
+
+    def test_a_perfect_score_leaves_the_area_alone(self):
+        t = self._area(1.0)
+        assert t["measurement_quality"] == pytest.approx(1.0)
+
+    def test_a_middling_score_discounts_the_area(self):
+        full = self._area(1.0)
+        half = self._area(0.5)
+
+        assert half["measurement_quality"] == pytest.approx(0.75)
+        assert half["expected_area_km2"] == pytest.approx(full["expected_area_km2"] * 0.75)
+
+    def test_the_worst_score_halves_the_area_rather_than_deleting_it(self):
+        full = self._area(1.0)
+        worst = self._area(0.0)
+
+        assert worst["measurement_quality"] == pytest.approx(0.5)
+        assert worst["expected_area_km2"] == pytest.approx(full["expected_area_km2"] * 0.5)
+
+    def test_a_score_outside_the_unit_interval_is_clamped(self):
+        """The scale is set upstream in another repo: a score above 1 must not
+        multiply the area, and a negative one must not make it negative."""
+        assert self._area(5.0)["measurement_quality"] == pytest.approx(1.0)
+        assert self._area(-3.0)["measurement_quality"] == pytest.approx(0.5)
 
 
 def test_allowed_bands_for_region():
