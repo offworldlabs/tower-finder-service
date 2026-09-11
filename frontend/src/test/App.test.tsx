@@ -27,6 +27,11 @@ const WALTHAM_TOWER = {
   bearing_deg: 145,
   bearing_cardinal: "SE",
   received_power_dbm: -62.1,
+  // The expected-area fields the ranking is now sorted on. All optional on the
+  // wire — the "older backend" test below drops them entirely.
+  expected_area_km2: 16900.4,
+  best_azimuth_deg: 240,
+  horizon_km: 180,
 };
 
 function mockApi(towersResponse: { status: number; body: unknown }) {
@@ -169,5 +174,103 @@ describe("App", () => {
     expect(screen.getByText(/\+ WGBH-DT2/)).toBeInTheDocument();
     // Exact name: a stray "0" from the empty list would make this "WBZ0".
     expect(screen.getByRole("cell", { name: "WBZ" })).toBeInTheDocument();
+  });
+
+  it("shows the detect area the rank is built on, and where to point", async () => {
+    mockApi({
+      status: 200,
+      body: {
+        towers: [WALTHAM_TOWER],
+        query: {
+          latitude: 42.38708028093612,
+          longitude: -71.24905416622781,
+          altitude_m: 43,
+          radius_km: 80,
+          source: "us",
+        },
+        count: 1,
+      },
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await search(user);
+
+    await waitFor(() => expect(document.querySelector("tbody tr")).toBeInTheDocument());
+    // Thousands separated, no decimals: 16900.4 km² reads as "16,900".
+    expect(screen.getByRole("cell", { name: "16,900" })).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "240° WSW" })).toBeInTheDocument();
+    // The top pick card says why it is top.
+    expect(document.querySelector(".summary-strip")).toHaveTextContent("16,900 km²");
+  });
+
+  it("leaves the new columns blank when an older backend omits the fields", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { expected_area_km2, best_azimuth_deg, horizon_km, ...legacyTower } = WALTHAM_TOWER;
+    mockApi({
+      status: 200,
+      body: {
+        towers: [legacyTower],
+        query: {
+          latitude: 42.38708028093612,
+          longitude: -71.24905416622781,
+          altitude_m: 43,
+          radius_km: 80,
+          source: "us",
+        },
+        count: 1,
+      },
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await search(user);
+
+    await waitFor(() => expect(document.querySelector("tbody tr")).toBeInTheDocument());
+    // Blank, not "NaN" and not a placeholder that would read as a real zero.
+    expect(document.querySelector("tbody .detect-area")?.textContent).toBe("");
+    expect(document.querySelector("tbody .point")?.textContent).toBe("");
+    // The top pick card keeps exactly its old text.
+    const summary = document.querySelector(".summary-strip");
+    expect(summary).toHaveTextContent("Top Pick — 12.3 km");
+    expect(summary).not.toHaveTextContent("km²");
+  });
+
+  it("mutes towers past the radio horizon rather than hiding them", async () => {
+    const farTower = {
+      ...WALTHAM_TOWER,
+      rank: 2,
+      callsign: "WFAR",
+      name: "WFAR-TV",
+      frequency_mhz: 98.5,
+      distance_km: 220,
+      horizon_km: 180,
+      expected_area_km2: 120,
+    };
+    mockApi({
+      status: 200,
+      body: {
+        towers: [WALTHAM_TOWER, farTower],
+        query: {
+          latitude: 42.38708028093612,
+          longitude: -71.24905416622781,
+          altitude_m: 43,
+          radius_km: 80,
+          source: "us",
+        },
+        count: 2,
+      },
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await search(user);
+
+    await waitFor(() => expect(document.querySelectorAll("tbody tr")).toHaveLength(2));
+    const rows = document.querySelectorAll("tbody tr");
+    // Still listed — an operator needs to see why a familiar transmitter ranks low.
+    expect(rows[1]).toHaveTextContent("WFAR");
+    expect(rows[1]).toHaveClass("beyond-horizon");
+    expect(rows[1]).toHaveAttribute("title", "Beyond radio horizon");
+    // The in-horizon tower is untouched.
+    expect(rows[0]).not.toHaveClass("beyond-horizon");
+    expect(rows[0]).not.toHaveAttribute("title");
   });
 });

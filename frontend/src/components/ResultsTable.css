@@ -129,3 +129,25 @@
   font-size: 0.72rem;
   margin-top: 2px;
 }
+
+.results-table .detect-area {
+  font-weight: 600;
+  color: #1a1a2e;
+}
+
+.results-table .point {
+  white-space: nowrap;
+}
+
+/* Past its own radio horizon: still listed, but visibly discounted. The row
+   carries a "Beyond radio horizon" title so the muting has a stated reason. */
+.results-table tbody tr.beyond-horizon td {
+  color: #9ca3af;
+}
+
+.results-table tbody tr.beyond-horizon .callsign,
+.results-table tbody tr.beyond-horizon .detect-area,
+.results-table tbody tr.beyond-horizon .location-name {
+  color: #9ca3af;
+  font-weight: 500;
+}

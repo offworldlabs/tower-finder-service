@@ -5,6 +5,7 @@ import "leaflet/dist/leaflet.css";
 import "./TowerMap.css";
 import { withCartoKey } from "../utils/basemap";
 import { rankTier, RANK_TIERS } from "../utils/rankTier";
+import { formatAreaKm2 } from "../utils/format";
 
 function makeTowerIcon(color: string, isHighlighted: boolean) {
   const size = isHighlighted ? 16 : 11;
@@ -124,6 +125,16 @@ export default function TowerMap({ towers, userLocation, highlighted }) {
                   {t.distance_km} km {t.bearing_cardinal} &middot; {t.received_power_dbm} dBm
                 </span>
                 <br />
+                {t.expected_area_km2 != null && (
+                  <>
+                    <span className="popup-detail">
+                      Detect area {formatAreaKm2(t.expected_area_km2)} km&sup2;
+                      {t.best_azimuth_deg != null &&
+                        ` · point ${Math.round(t.best_azimuth_deg)}°`}
+                    </span>
+                    <br />
+                  </>
+                )}
                 <span style={{ color: tier.color, fontWeight: 600, fontSize: "0.78rem" }}>
                   #{t.rank} · {tier.label}
                 </span>

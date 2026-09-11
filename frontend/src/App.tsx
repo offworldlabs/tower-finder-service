@@ -3,6 +3,7 @@ import SearchForm from "./components/SearchForm";
 import ResultsTable from "./components/ResultsTable";
 import TowerMap from "./components/TowerMap";
 import { fetchTowers } from "./api";
+import { formatAreaKm2 } from "./utils/format";
 import type { Tower, TowerQuery } from "./types";
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -30,7 +31,14 @@ function SummaryStrip({ towers, query }: { towers: Tower[]; query: TowerQuery | 
       {best && (
         <div className="stat-card">
           <span className="stat-value">{best.callsign || "—"}</span>
-          <span className="stat-label">Top Pick — {best.distance_km} km</span>
+          <span className="stat-label">
+            {/* The detect area is what the rank is sorted on, so the top pick
+                says why it is top. Absent on an older backend: the label then
+                reads exactly as it did before. */}
+            Top Pick — {best.distance_km} km
+            {best.expected_area_km2 != null &&
+              ` · ${formatAreaKm2(best.expected_area_km2)} km²`}
+          </span>
         </div>
       )}
       {query && (
