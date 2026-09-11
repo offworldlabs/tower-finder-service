@@ -12,6 +12,10 @@ dependencies = [
   "uvicorn[standard]>=0.27",
   "httpx>=0.27",
   "shapely>=2.0",
+  # Declared, not inherited: shapely pulls numpy in transitively today, and the
+  # detection-area scoring imports it directly. A shapely release that drops
+  # the dependency would otherwise break the tower endpoint, not the geometry.
+  "numpy>=1.26",
 ]
 
 [project.optional-dependencies]

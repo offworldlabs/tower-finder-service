@@ -252,7 +252,11 @@ class TestValidateConfig:
             "longitude",
         }
         measurement = {"score", "snr_db", "power_db", "obw_fraction", "measured"}
-        assert tower_ranking._SORTABLE_FIELDS == frozenset(monolith | measurement)
+        # The detection-area model's own fields, which the shipped sort_order
+        # now leads with. Dropping one of these turns the shipped config itself
+        # into a 400 on the next PUT.
+        model = {"expected_area_km2", "best_azimuth_deg", "horizon_km"}
+        assert tower_ranking._SORTABLE_FIELDS == frozenset(monolith | measurement | model)
 
     def test_nan_rejected(self):
         # json.loads accepts the bare NaN literal, and every comparison against
@@ -271,6 +275,90 @@ class TestValidateConfig:
 
     def test_bool_is_not_a_number(self):
         assert tower_ranking.validate_config({"receiver": {"rx_antenna_gain_dbi": True}}) is not None
+
+
+class TestValidateScoringSection:
+    """The scoring knobs feed logs, divisors and an array bound.
+
+    Each of these passes every structural check and then raises (or allocates
+    for ever) inside numpy on the next search, which is the same "valid shape,
+    breaks at request time" fault the rest of this validator exists to catch.
+    """
+
+    def test_absent_section_is_valid(self):
+        assert tower_ranking.validate_config({}) is None
+
+    def test_empty_section_is_valid(self):
+        assert tower_ranking.validate_config({"scoring": {}}) is None
+
+    def test_section_must_be_an_object(self):
+        assert "must be an object" in tower_ranking.validate_config({"scoring": [1, 2]})
+
+    def test_shipped_scoring_section_is_valid(self):
+        assert tower_ranking.validate_config({"scoring": _shipped_default()["scoring"]}) is None
+
+    @pytest.mark.parametrize("key", tower_ranking._SCORING_NUMBER_KEYS)
+    def test_number_keys_reject_a_string(self, key):
+        assert tower_ranking.validate_config({"scoring": {key: "lots"}}) is not None
+
+    @pytest.mark.parametrize("key", tower_ranking._SCORING_POSITIVE_KEYS)
+    def test_positive_keys_reject_zero_and_negatives(self, key):
+        assert tower_ranking.validate_config({"scoring": {key: 0}}) is not None
+        assert tower_ranking.validate_config({"scoring": {key: -1}}) is not None
+
+    def test_nan_is_rejected_here_too(self):
+        cfg = json.loads('{"scoring": {"grid_km": NaN}}')
+        assert tower_ranking.validate_config(cfg) is not None
+
+    def test_bistatic_angle_must_be_a_real_angle(self):
+        assert tower_ranking.validate_config({"scoring": {"max_bistatic_angle_deg": 0}}) is not None
+        assert tower_ranking.validate_config({"scoring": {"max_bistatic_angle_deg": 181}}) is not None
+        assert tower_ranking.validate_config({"scoring": {"max_bistatic_angle_deg": 150}}) is None
+
+    def test_n_azimuths_must_be_a_positive_whole_number(self):
+        assert tower_ranking.validate_config({"scoring": {"n_azimuths": 12.5}}) is not None
+        assert tower_ranking.validate_config({"scoring": {"n_azimuths": 0}}) is not None
+        assert tower_ranking.validate_config({"scoring": {"n_azimuths": 36}}) is None
+
+    def test_a_grid_finer_than_the_disk_is_capped(self):
+        # 0.01 km cells over an 80 km disk is 256 million of them: not a slow
+        # search, an OOM-killed container that comes back and does it again.
+        error = tower_ranking.validate_config({"scoring": {"grid_km": 0.01}})
+        assert error is not None and "ceiling" in error
+
+    def test_a_grid_coarser_than_the_disk_is_rejected(self):
+        assert tower_ranking.validate_config({"scoring": {"grid_km": 100, "max_range_km": 80}}) is not None
+
+    def test_band_params_must_carry_both_knobs(self):
+        assert tower_ranking.validate_config({"scoring": {"band_params": {"FM": {"bw_hz": 100e3}}}}) is not None
+        assert tower_ranking.validate_config({"scoring": {"band_params": {"FM": {"cpi_s": 1.0}}}}) is not None
+
+    def test_band_params_must_be_positive(self):
+        cfg = {"scoring": {"band_params": {"FM": {"bw_hz": 0, "cpi_s": 1.0}}}}
+        # 10*log10(0) is -inf, which no amount of EIRP recovers from.
+        assert tower_ranking.validate_config(cfg) is not None
+
+    def test_band_params_must_be_objects(self):
+        assert tower_ranking.validate_config({"scoring": {"band_params": {"FM": 6e6}}}) is not None
+
+
+class TestValidateBandOffsets:
+    def test_absent_is_valid(self):
+        assert tower_ranking.validate_config({"ranking": {}}) is None
+
+    def test_numbers_accepted(self):
+        assert tower_ranking.validate_config({"ranking": {"band_offset_db": {"FM": -3, "UHF": 1.5}}}) is None
+
+    def test_must_be_an_object(self):
+        assert "must be an object" in tower_ranking.validate_config({"ranking": {"band_offset_db": [0, 0, 0]}})
+
+    def test_values_must_be_numbers(self):
+        # Added to EIRP inside the model, so a string raises deep in numpy.
+        assert tower_ranking.validate_config({"ranking": {"band_offset_db": {"FM": "low"}}}) is not None
+
+    def test_nan_rejected(self):
+        cfg = json.loads('{"ranking": {"band_offset_db": {"FM": NaN}}}')
+        assert tower_ranking.validate_config(cfg) is not None
 
 
 class TestApplyConfig:
@@ -318,6 +406,39 @@ class TestApplyConfig:
         assert tower_ranking.BAND_PRIORITY == {"FM": 0}
         assert tower_ranking.SORT_ORDER == [{"field": "distance_km", "ascending": True}]
 
+    def test_the_scoring_section_does_not_alias_the_caller_either(self, restore_config):
+        """band_params nests a dict per band, so this one needs a copy a level
+        deeper than the rest."""
+        body = {
+            "ranking": {"band_offset_db": {"FM": 0.0}},
+            "scoring": {"band_params": {"FM": {"bw_hz": 100e3, "cpi_s": 1.0}}},
+        }
+
+        tower_ranking.apply_config(body)
+
+        body["ranking"]["band_offset_db"]["FM"] = 99.0
+        body["scoring"]["band_params"]["FM"]["cpi_s"] = 99.0
+
+        assert tower_ranking.BAND_OFFSET_DB == {"FM": 0.0}
+        assert tower_ranking.SCORING_PARAMS.band_params == {"FM": {"bw_hz": 100e3, "cpi_s": 1.0}}
+
+    def test_scoring_params_take_the_receiver_gain_at_call_time(self, restore_config):
+        """The model and the FSPL link budget must use the same receiver
+        antenna: rx_gain_dbi is not a scoring knob of its own."""
+        tower_ranking.apply_config({"receiver": {"rx_antenna_gain_dbi": 11.0}})
+
+        assert tower_ranking._scoring_params().rx_gain_dbi == 11.0
+
+        tower_ranking.RX_ANTENNA_GAIN_DBI = 3.0
+        assert tower_ranking._scoring_params().rx_gain_dbi == 3.0
+
+    def test_scoring_knobs_reach_the_model(self, restore_config):
+        tower_ranking.apply_config({"scoring": {"n_azimuths": 8, "max_range_km": 40}})
+
+        params = tower_ranking._scoring_params()
+        assert params.n_azimuths == 8
+        assert params.max_range_km == 40
+
     def test_default_sort_order_matches_the_shipped_file(self, restore_config):
         """A config naming no sort_order ranks the same way as a fresh overlay.
 
@@ -330,27 +451,55 @@ class TestApplyConfig:
         assert tower_ranking.SORT_ORDER == _shipped_default()["ranking"]["sort_order"]
         assert tower_ranking.BAND_PRIORITY == _shipped_default()["ranking"]["band_priority"]
 
-    def test_shipped_default_ranks_by_band_then_score_then_power(self):
-        """Band tier first, VHF and UHF tied; then measured score, then
-        modelled received power for towers without a measurement."""
+    def test_shipped_default_ranks_by_expected_area_then_power(self):
+        """Expected detection area first, modelled received power as the
+        tie-break. The model returns a multiple of the cell area, so towers
+        genuinely do tie, and power is the more informative of the two orders
+        within a tie."""
         ranking = _shipped_default()["ranking"]
         assert ranking["sort_order"] == [
-            {"field": "band_priority", "ascending": True},
-            {"field": "score", "ascending": False},
+            {"field": "expected_area_km2", "ascending": False},
             {"field": "received_power_dbm", "ascending": False},
         ]
-        assert ranking["band_priority"]["VHF"] == ranking["band_priority"]["UHF"]
-        assert ranking["band_priority"]["FM"] > ranking["band_priority"]["UHF"]
         assert "distance_classes" not in ranking
         assert "distance_priority" not in ranking
+
+    def test_band_priority_survives_for_overlays_that_still_sort_on_it(self):
+        """The hard band tier is no longer in the shipped sort_order — the
+        model's band_offset_db is its successor — but the table is still
+        shipped, applied and sortable, so an overlay naming it keeps working."""
+        ranking = _shipped_default()["ranking"]
+        assert ranking["band_priority"]["VHF"] == ranking["band_priority"]["UHF"]
+        assert ranking["band_priority"]["FM"] > ranking["band_priority"]["UHF"]
+        assert "band_priority" in tower_ranking._SORTABLE_FIELDS
+
+    def test_shipped_band_offsets_are_neutral_placeholders(self):
+        """Zero until they are fitted from fleet data: a placeholder that
+        shifts nothing is honest, an invented number is not."""
+        assert _shipped_default()["ranking"]["band_offset_db"] == {"VHF": 0, "UHF": 0, "FM": 0}
+
+    def test_shipped_scoring_section_matches_the_in_code_defaults(self, restore_config):
+        """The section spells out every knob, and the in-code fallback has to
+        agree with it: an overlay that omits the section must score the same
+        way as a fresh one, as with sort_order."""
+        shipped = _shipped_default()
+        tower_ranking.apply_config(shipped)
+        from_file = tower_ranking.SCORING_PARAMS
+
+        tower_ranking.apply_config({})
+        from_code = tower_ranking.SCORING_PARAMS
+
+        assert from_file == from_code
+        assert set(shipped["scoring"]) == set(tower_ranking._SCORING_PARAM_KEYS) | {"band_params"}
 
 
 class TestShippedRanking:
     """What the shipped config ranks on, run through process_and_rank.
 
-    Every tower sits at the same spot ~20 km north of the receiver, so
-    received power is decided by EIRP alone and distance cannot leak into the
-    order.
+    Every tower sits at the same spot ~20 km north of the receiver, so EIRP
+    and band are the only things that vary and distance cannot leak into the
+    order. The rank is the bistatic detection-area model's answer
+    (services/tower_scoring.py); received power only breaks ties.
     """
 
     _LAT, _LON = 33.749, -84.388
@@ -362,10 +511,14 @@ class TestShippedRanking:
     def _rank(self, devices):
         return tower_ranking.process_and_rank([_system(devices)], self._LAT, self._LON)
 
-    def test_tv_towers_rank_by_power_across_vhf_and_uhf(self):
-        # EIRP steps of 20 dB, well clear of the ~9 dB extra path loss UHF
-        # pays over VHF at the same distance, so the intended order is also
-        # the received-power order.
+    def test_every_tower_carries_the_model_fields(self):
+        towers = self._rank([_device(freq_mhz=515.0, lat=33.93, lon=-84.388, callsign="UHF", eirp=100_000.0)])
+        t = towers[0]
+        assert t["expected_area_km2"] > 0
+        assert 0 <= t["best_azimuth_deg"] < 360
+        assert t["horizon_km"] > 0
+
+    def test_towers_are_ordered_by_expected_area(self):
         devices = [
             _device(freq_mhz=185.0, lat=33.93, lon=-84.388, callsign="VHF_WEAK", eirp=1.0),
             _device(freq_mhz=515.0, lat=33.93, lon=-84.388, callsign="UHF_STRONG", eirp=1_000_000.0),
@@ -373,26 +526,61 @@ class TestShippedRanking:
             _device(freq_mhz=545.0, lat=33.93, lon=-84.388, callsign="UHF_WEAK", eirp=100.0),
         ]
         towers = self._rank(devices)
-        # UHF and VHF interleave on power: neither band outranks the other.
+        areas = [t["expected_area_km2"] for t in towers]
+        assert areas == sorted(areas, reverse=True)
+        # UHF and VHF interleave: neither band outranks the other, as before.
         assert [t["callsign"] for t in towers] == ["UHF_STRONG", "VHF_STRONG", "UHF_WEAK", "VHF_WEAK"]
-        powers = [t["received_power_dbm"] for t in towers]
-        assert powers == sorted(powers, reverse=True)
 
-    def test_fm_ranks_after_every_tv_tower_whatever_its_power(self):
+    def test_tv_outranks_fm_at_equal_eirp_and_distance(self):
+        """What the hard band tier was standing in for. It survives as a
+        margin the model produces (~18 dB of processing gain on a 6 MHz
+        channel), not as a rule no amount of power can overcome."""
+        devices = [
+            _device(freq_mhz=95.5, lat=33.93, lon=-84.388, callsign="FM", eirp=100_000.0),
+            _device(freq_mhz=185.0, lat=33.93, lon=-84.388, callsign="VHF", eirp=100_000.0),
+            _device(freq_mhz=515.0, lat=33.93, lon=-84.388, callsign="UHF", eirp=100_000.0),
+        ]
+        towers = self._rank(devices)
+        assert towers[-1]["callsign"] == "FM"
+
+    def test_a_huge_fm_tower_now_outranks_a_tiny_tv_one(self):
+        """The deliberate behaviour change. Under the old band tier a 1 MW FM
+        station ranked below every 10 W TV tower in the list; the model says a
+        usable illuminator beats an unusable one whatever band it is in."""
         devices = [
             _device(freq_mhz=95.5, lat=33.93, lon=-84.388, callsign="FM_HUGE", eirp=1_000_000.0),
             _device(freq_mhz=185.0, lat=33.93, lon=-84.388, callsign="VHF_TINY", eirp=10.0),
             _device(freq_mhz=515.0, lat=33.93, lon=-84.388, callsign="UHF_TINY", eirp=10.0),
         ]
         towers = self._rank(devices)
-        assert towers[-1]["callsign"] == "FM_HUGE"
-        assert {t["callsign"] for t in towers[:2]} == {"VHF_TINY", "UHF_TINY"}
-        # Not a power tie-break: the FM tower is received far louder and still loses.
-        assert towers[-1]["received_power_dbm"] > max(t["received_power_dbm"] for t in towers[:2])
+        assert towers[0]["callsign"] == "FM_HUGE"
+        assert towers[0]["expected_area_km2"] > towers[1]["expected_area_km2"]
 
-    def test_measured_score_outranks_modelled_power(self):
-        # POST /api/towers: the SDR heard the weak tower better than the
-        # strong one (a hill, say). Its score wins over the FSPL prediction.
+    def test_measured_score_no_longer_reorders_the_shipped_ranking(self):
+        """POST /api/towers: the SDR heard the weak tower better than the
+        strong one. That used to win outright. It says how well the receiver
+        hears the illuminator, which is not what the rank is answering any
+        more, so the model's area decides and the score comes back untouched
+        for a client that wants it."""
+        devices = [
+            _device(freq_mhz=515.0, lat=33.93, lon=-84.388, callsign="UHF_STRONG", eirp=1_000_000.0),
+            _device(freq_mhz=545.0, lat=33.93, lon=-84.388, callsign="UHF_WEAK", eirp=100.0),
+        ]
+        measurements = [
+            {"freq_mhz": 515.0, "band": "UHF", "score": 0.4, "snr_db": None, "obw_fraction": None, "power_db": -60.0},
+            {"freq_mhz": 545.0, "band": "UHF", "score": 0.9, "snr_db": None, "obw_fraction": None, "power_db": -40.0},
+        ]
+        towers = tower_ranking.process_and_rank([_system(devices)], self._LAT, self._LON, measurements=measurements)
+        assert [t["callsign"] for t in towers] == ["UHF_STRONG", "UHF_WEAK"]
+        assert towers[0]["expected_area_km2"] > towers[1]["expected_area_km2"]
+        assert [t["score"] for t in towers] == [0.4, 0.9]
+
+    def test_an_operator_can_still_rank_on_the_measured_score(self, restore_config):
+        """Switching ranking strategy stays a config PUT, not a code change."""
+        cfg = _shipped_default()
+        cfg["ranking"]["sort_order"] = [{"field": "score", "ascending": False}]
+        tower_ranking.apply_config(cfg)
+
         devices = [
             _device(freq_mhz=515.0, lat=33.93, lon=-84.388, callsign="UHF_STRONG", eirp=1_000_000.0),
             _device(freq_mhz=545.0, lat=33.93, lon=-84.388, callsign="UHF_WEAK", eirp=100.0),
@@ -403,24 +591,25 @@ class TestShippedRanking:
         ]
         towers = tower_ranking.process_and_rank([_system(devices)], self._LAT, self._LON, measurements=measurements)
         assert [t["callsign"] for t in towers] == ["UHF_WEAK", "UHF_STRONG"]
-        assert towers[0]["received_power_dbm"] < towers[1]["received_power_dbm"]
 
-    def test_score_never_lifts_fm_above_tv(self):
+    def test_a_megawatt_next_door_ranks_below_a_usable_tower_further_out(self):
+        """The reason for the redesign, end to end: the loudest signal in the
+        band is the worst illuminator on the list, because its direct path
+        swamps the surveillance channel. The old power-ordered ranking put it
+        first."""
         devices = [
-            _device(freq_mhz=95.5, lat=33.93, lon=-84.388, callsign="FM", eirp=100_000.0),
-            _device(freq_mhz=515.0, lat=33.93, lon=-84.388, callsign="UHF", eirp=100.0),
+            _device(freq_mhz=515.0, lat=33.755, lon=-84.388, callsign="NEXT_DOOR", eirp=1_000_000.0),
+            _device(freq_mhz=545.0, lat=34.09, lon=-84.388, callsign="ACROSS_TOWN", eirp=100_000.0),
         ]
-        measurements = [
-            {"freq_mhz": 95.5, "band": "FM", "score": 1.0, "snr_db": 50.0, "obw_fraction": 0.5, "power_db": None},
-            {"freq_mhz": 515.0, "band": "UHF", "score": 0.1, "snr_db": None, "obw_fraction": None, "power_db": -70.0},
-        ]
-        towers = tower_ranking.process_and_rank([_system(devices)], self._LAT, self._LON, measurements=measurements)
-        assert [t["callsign"] for t in towers] == ["UHF", "FM"]
+        towers = self._rank(devices)
+        assert [t["callsign"] for t in towers] == ["ACROSS_TOWN", "NEXT_DOOR"]
+        # It is still the loudest thing the receiver hears, by a wide margin.
+        assert towers[1]["received_power_dbm"] > towers[0]["received_power_dbm"]
 
     def test_distance_no_longer_decides_the_order(self):
         # Under the old classes an 80 km tower was "Far" and a 20 km one
-        # "Ideal", and the class outranked power. Now only power counts, so
-        # the far tower wins when it is strong enough to be received louder.
+        # "Ideal", and the class outranked everything. No class survives, and
+        # the model prefers the far tower here on its own terms.
         devices = [
             _device(freq_mhz=515.0, lat=33.93, lon=-84.388, callsign="NEAR_WEAK", eirp=10.0),
             _device(freq_mhz=545.0, lat=34.45, lon=-84.388, callsign="FAR_STRONG", eirp=1_000_000.0),
@@ -491,10 +680,10 @@ class TestReloadConfigValidates:
         with caplog.at_level("WARNING", logger=tower_ranking.__name__):
             tower_ranking.reload_config()
 
-        assert tower_ranking.SORT_ORDER == [
-            {"field": "band_priority", "ascending": True},
-            {"field": "received_power_dbm", "ascending": False},
-        ]
+        # Dropping the distance rule leaves the default that shipped before it
+        # did, which the second migration then upgrades (see
+        # TestLegacyDefaultSortUpgrade below).
+        assert tower_ranking.SORT_ORDER == _shipped_default()["ranking"]["sort_order"]
         assert tower_ranking.BAND_PRIORITY == {"VHF": 0, "UHF": 1, "FM": 2}
         assert tower_ranking.DEFAULT_LIMIT == 9
         assert "distance_priority" in caplog.text
@@ -510,3 +699,107 @@ class TestReloadConfigValidates:
             tower_ranking.reload_config()
 
         assert "distance_priority" not in caplog.text
+
+
+class TestLegacyDefaultSortUpgrade:
+    """An overlay still on a shipped default has to follow the shipped default.
+
+    The overlay volume is seeded once and never re-seeded, so without this a
+    change of default changes nothing anywhere that already has one: every
+    deployment would keep ranking on band tier and received power for good,
+    and the only symptom would be the new ranking never appearing.
+    """
+
+    _NEW_DEFAULT = [
+        {"field": "expected_area_km2", "ascending": False},
+        {"field": "received_power_dbm", "ascending": False},
+    ]
+
+    def _reload(self, tmp_path, monkeypatch, caplog, cfg):
+        path = tmp_path / "tower_config.json"
+        path.write_text(json.dumps(cfg))
+        monkeypatch.setattr(tower_ranking, "_CONFIG_PATH", path)
+        with caplog.at_level("WARNING", logger=tower_ranking.__name__):
+            tower_ranking.reload_config()
+        return path
+
+    @pytest.mark.parametrize(
+        "legacy_sort",
+        [
+            # The default that shipped until this change.
+            [
+                {"field": "band_priority", "ascending": True},
+                {"field": "score", "ascending": False},
+                {"field": "received_power_dbm", "ascending": False},
+            ],
+            # 2026-05-28's.
+            [
+                {"field": "band_priority", "ascending": True},
+                {"field": "score", "ascending": False},
+            ],
+            # And the one before it, as _drop_legacy_distance_rules leaves it.
+            [
+                {"field": "band_priority", "ascending": True},
+                {"field": "received_power_dbm", "ascending": False},
+            ],
+        ],
+    )
+    def test_a_shipped_default_is_upgraded_in_memory(self, legacy_sort, tmp_path, monkeypatch, restore_config, caplog):
+        cfg = {"ranking": {"band_priority": {"VHF": 0, "UHF": 0, "FM": 1}, "sort_order": legacy_sort}}
+        path = self._reload(tmp_path, monkeypatch, caplog, cfg)
+
+        assert tower_ranking.SORT_ORDER == self._NEW_DEFAULT
+        assert "expected detection area" in caplog.text
+        assert str(path) in caplog.text
+        assert json.loads(path.read_text()) == cfg, "the file on disk is not rewritten"
+
+    def test_the_upgrade_does_not_alias_the_default(self, tmp_path, monkeypatch, restore_config, caplog):
+        """Two overlays upgraded in one process must not share rule objects
+        with each other or with the module default."""
+        legacy = [
+            {"field": "band_priority", "ascending": True},
+            {"field": "received_power_dbm", "ascending": False},
+        ]
+        self._reload(tmp_path, monkeypatch, caplog, {"ranking": {"sort_order": legacy}})
+
+        tower_ranking.SORT_ORDER[0]["ascending"] = True
+
+        assert tower_ranking._DEFAULT_SORT_ORDER == self._NEW_DEFAULT
+
+    def test_an_operators_own_sort_order_is_left_alone(self, tmp_path, monkeypatch, restore_config, caplog):
+        """Anything that is not exactly a shipped default is a deliberate
+        choice — including one that merely resembles one."""
+        deliberate = [
+            {"field": "band_priority", "ascending": True},
+            {"field": "distance_km", "ascending": True},
+        ]
+        self._reload(tmp_path, monkeypatch, caplog, {"ranking": {"sort_order": deliberate}})
+
+        assert tower_ranking.SORT_ORDER == deliberate
+        assert "expected detection area" not in caplog.text
+
+    def test_a_near_miss_of_a_default_is_left_alone(self, tmp_path, monkeypatch, restore_config, caplog):
+        # Same fields as the old default, one direction flipped: an operator
+        # who wanted the quietest towers first still gets them.
+        near_miss = [
+            {"field": "band_priority", "ascending": True},
+            {"field": "received_power_dbm", "ascending": True},
+        ]
+        self._reload(tmp_path, monkeypatch, caplog, {"ranking": {"sort_order": near_miss}})
+
+        assert tower_ranking.SORT_ORDER == near_miss
+        assert "expected detection area" not in caplog.text
+
+    def test_the_current_default_is_not_warned_about(self, tmp_path, monkeypatch, restore_config, caplog):
+        self._reload(tmp_path, monkeypatch, caplog, _shipped_default())
+
+        assert tower_ranking.SORT_ORDER == self._NEW_DEFAULT
+        assert "expected detection area" not in caplog.text
+
+    def test_a_config_naming_no_sort_order_is_untouched_and_silent(self, tmp_path, monkeypatch, restore_config, caplog):
+        # apply_config's fallback already is the new default; there is nothing
+        # to migrate and nothing to warn about.
+        self._reload(tmp_path, monkeypatch, caplog, {"search": {"default_limit": 5}})
+
+        assert tower_ranking.SORT_ORDER == self._NEW_DEFAULT
+        assert "expected detection area" not in caplog.text

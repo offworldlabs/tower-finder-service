@@ -5,13 +5,14 @@
       "UHF": 0,
       "FM": 1
     },
+    "band_offset_db": {
+      "VHF": 0,
+      "UHF": 0,
+      "FM": 0
+    },
     "sort_order": [
       {
-        "field": "band_priority",
-        "ascending": true
-      },
-      {
-        "field": "score",
+        "field": "expected_area_km2",
         "ascending": false
       },
       {
@@ -23,6 +24,34 @@
   "receiver": {
     "rx_antenna_gain_dbi": 6.0,
     "sensitivity_dbm": -120.0
+  },
+  "scoring": {
+    "cancellation_db": 50,
+    "target_rcs_m2": 10,
+    "snr_min_db": 13,
+    "max_bistatic_angle_deg": 150,
+    "target_alt_km": 3,
+    "rx_height_m": 10,
+    "grid_km": 2,
+    "max_range_km": 80,
+    "n_azimuths": 24,
+    "yagi_hpbw_deg": 42,
+    "yagi_front_to_back_db": 20,
+    "noise_figure_db": 5,
+    "band_params": {
+      "FM": {
+        "bw_hz": 100000.0,
+        "cpi_s": 1.0
+      },
+      "VHF": {
+        "bw_hz": 6000000.0,
+        "cpi_s": 0.5
+      },
+      "UHF": {
+        "bw_hz": 6000000.0,
+        "cpi_s": 0.5
+      }
+    }
   },
   "broadcast_bands": {
     "FM": [

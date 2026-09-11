@@ -5,7 +5,15 @@ import os
 import re
 import shutil
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
+
+from services.tower_scoring import (
+    DEFAULT_BAND_OFFSET_DB,
+    DEFAULT_BAND_PARAMS,
+    ScoringParams,
+    score_towers,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -147,8 +155,114 @@ _SORTABLE_FIELDS = frozenset(
         "power_db",
         "obw_fraction",
         "measured",
+        # The bistatic detection-area model (services/tower_scoring.py), which
+        # the shipped sort_order now leads with. score_towers() stamps all
+        # three on every tower it is given, so each is a real number whether or
+        # not the model could score the tower.
+        "expected_area_km2",
+        "best_azimuth_deg",
+        "horizon_km",
     }
 )
+
+
+# Keys of the optional `scoring` section, grouped by what validate_config has
+# to prove about them before apply_config builds a ScoringParams. Every one is
+# optional; the dataclass carries the default.
+#
+# The split is not cosmetic. A zero or negative grid_km divides by zero
+# building the grid, a zero max_range_km or target_alt_km puts a 0 inside a
+# log, and a non-integer n_azimuths is a range() bound — each would raise
+# inside the scorer on every search, far from the config that caused it.
+_SCORING_NUMBER_KEYS = (
+    "cancellation_db",
+    "snr_min_db",
+    "noise_figure_db",
+    "yagi_front_to_back_db",
+    "rx_height_m",
+)
+_SCORING_POSITIVE_KEYS = (
+    "target_rcs_m2",
+    "target_alt_km",
+    "grid_km",
+    "max_range_km",
+    "yagi_hpbw_deg",
+)
+
+# Ceiling on the grid the scoring disk is diced into. max_range_km/grid_km is
+# squared into a cell count and every cell is held in memory for the azimuth
+# sweep, so grid_km=0.01 over an 80 km disk is 256 million cells: not a slow
+# search, an OOM-killed container that comes back and does it again.
+_MAX_SCORING_CELLS = 2_000_000
+
+# The scalar knobs apply_config copies out of the `scoring` section, as opposed
+# to band_params (nested) and rx_gain_dbi (receiver.rx_antenna_gain_dbi). An
+# unlisted key in the section is ignored rather than passed to ScoringParams,
+# where it would be a TypeError on an unexpected keyword.
+_SCORING_PARAM_KEYS = (
+    *_SCORING_NUMBER_KEYS,
+    *_SCORING_POSITIVE_KEYS,
+    "max_bistatic_angle_deg",
+    "n_azimuths",
+)
+
+
+def _validate_scoring(scoring: dict) -> str | None:
+    """Return an error message if the `scoring` section is unusable, else None.
+
+    Held to the same standard as the rest: everything the detection-area model
+    puts in a log, a divisor or a range() has to be a number of the right kind
+    here, because the alternative is a TypeError or a ZeroDivisionError inside
+    numpy on every search with nothing pointing back at the config.
+    """
+    for key in _SCORING_NUMBER_KEYS:
+        if key in scoring and not _is_number(scoring[key]):
+            return f"scoring.{key} must be a number, got {scoring[key]!r}"
+
+    for key in _SCORING_POSITIVE_KEYS:
+        if key in scoring and (not _is_number(scoring[key]) or scoring[key] <= 0):
+            return f"scoring.{key} must be a positive number, got {scoring[key]!r}"
+
+    if "max_bistatic_angle_deg" in scoring:
+        angle = scoring["max_bistatic_angle_deg"]
+        if not _is_number(angle) or not 0 < angle <= 180:
+            return f"scoring.max_bistatic_angle_deg must be a number in (0, 180], got {angle!r}"
+
+    if "n_azimuths" in scoring:
+        n_az = scoring["n_azimuths"]
+        # A count, not a measurement: 12.5 boresights is np.arange(12.5) at
+        # best and a silently different sweep at worst.
+        if not _is_number(n_az) or isinstance(n_az, float) or n_az <= 0:
+            return f"scoring.n_azimuths must be a positive whole number, got {n_az!r}"
+
+    grid_km = scoring.get("grid_km", 2.0)
+    max_range_km = scoring.get("max_range_km", 80.0)
+    if _is_number(grid_km) and _is_number(max_range_km) and grid_km > 0:
+        if grid_km > max_range_km:
+            return f"scoring.grid_km ({grid_km!r}) must not exceed scoring.max_range_km ({max_range_km!r})"
+        cells = (2 * int(max_range_km / grid_km) + 1) ** 2
+        if cells > _MAX_SCORING_CELLS:
+            return (
+                f"scoring.grid_km ({grid_km!r}) over scoring.max_range_km ({max_range_km!r}) "
+                f"grids {cells} cells, above the {_MAX_SCORING_CELLS} ceiling"
+            )
+
+    bands = scoring.get("band_params")
+    if bands is not None:
+        if not isinstance(bands, dict):
+            return f"scoring.band_params must be an object, got {type(bands).__name__}"
+        for band, params in bands.items():
+            if not isinstance(params, dict):
+                return f"scoring.band_params.{band} must be an object, got {type(params).__name__}"
+            for key in ("bw_hz", "cpi_s"):
+                # Both go into 10*log10(bw*cpi); zero or negative is -inf or a
+                # math domain error, and a missing one is a KeyError per tower.
+                if key not in params:
+                    return f"scoring.band_params.{band} is missing {key}"
+                if not _is_number(params[key]) or params[key] <= 0:
+                    return f"scoring.band_params.{band}.{key} must be a positive number, got {params[key]!r}"
+
+    return None
 
 
 def validate_config(cfg: dict) -> str | None:
@@ -170,7 +284,7 @@ def validate_config(cfg: dict) -> str | None:
     if not isinstance(cfg, dict):
         return f"config must be an object, got {type(cfg).__name__}"
 
-    for section in ("receiver", "ranking", "search", "broadcast_bands"):
+    for section in ("receiver", "ranking", "search", "broadcast_bands", "scoring"):
         value = cfg.get(section)
         if value is not None and not isinstance(value, dict):
             return f"{section} must be an object, got {type(value).__name__}"
@@ -200,6 +314,20 @@ def validate_config(cfg: dict) -> str | None:
         for name, priority in table.items():
             if not _is_number(priority):
                 return f"ranking.band_priority[{name!r}] must be a number, got {priority!r}"
+
+    offsets = ranking.get("band_offset_db")
+    if offsets is not None:
+        if not isinstance(offsets, dict):
+            return f"ranking.band_offset_db must be an object, got {type(offsets).__name__}"
+        # Added to EIRP inside the scoring model, so a string here raises deep
+        # in numpy on every search rather than being ignored.
+        for name, offset in offsets.items():
+            if not _is_number(offset):
+                return f"ranking.band_offset_db[{name!r}] must be a number, got {offset!r}"
+
+    scoring_error = _validate_scoring(cfg.get("scoring", {}))
+    if scoring_error:
+        return scoring_error
 
     sort_order = ranking.get("sort_order")
     if sort_order is not None:
@@ -245,10 +373,50 @@ CONFIG_SETTINGS = (
     "SENSITIVITY_DBM",
     "BROADCAST_BANDS",
     "BAND_PRIORITY",
+    "BAND_OFFSET_DB",
     "SORT_ORDER",
+    "SCORING_PARAMS",
     "DEFAULT_RADIUS_KM",
     "DEFAULT_LIMIT",
 )
+
+# The sort_order of every default this image has shipped, newest first. An
+# overlay still holding one of these has never been PUT to, so it is expressing
+# "whatever the image ranks on", not a choice — and leaving it alone would mean
+# a deployed volume quietly ranking on the old scheme forever, which is exactly
+# how the distance rules survived their own removal. See
+# _upgrade_legacy_default_sort(). The pre-2026-05-28 default led with
+# distance_priority and reduces to the third entry here once
+# _drop_legacy_distance_rules() has run over it.
+_LEGACY_DEFAULT_SORT_ORDERS = (
+    [
+        {"field": "band_priority", "ascending": True},
+        {"field": "score", "ascending": False},
+        {"field": "received_power_dbm", "ascending": False},
+    ],
+    [
+        {"field": "band_priority", "ascending": True},
+        {"field": "score", "ascending": False},
+    ],
+    [
+        {"field": "band_priority", "ascending": True},
+        {"field": "received_power_dbm", "ascending": False},
+    ],
+)
+
+# What a config naming no sort_order ranks on. Matches the shipped
+# tower_config.json, so an overlay that omits the section ranks the same way as
+# a fresh one.
+#
+# Detection area first, modelled received power as the tie-break: the model
+# returns a multiple of the cell area, so towers genuinely do tie, and power is
+# the more informative of the two orders within a tie. The measured analyser
+# score is deliberately not here any more — it ranked a tower by how well the
+# SDR hears the illuminator, which is what the model says is the wrong question.
+_DEFAULT_SORT_ORDER = [
+    {"field": "expected_area_km2", "ascending": False},
+    {"field": "received_power_dbm", "ascending": False},
+]
 
 
 def apply_config(cfg: dict) -> None:
@@ -263,7 +431,7 @@ def apply_config(cfg: dict) -> None:
     needs the failure in order to reject the write.
     """
     global RX_ANTENNA_GAIN_DBI, SENSITIVITY_DBM
-    global BROADCAST_BANDS, BAND_PRIORITY, SORT_ORDER
+    global BROADCAST_BANDS, BAND_PRIORITY, BAND_OFFSET_DB, SORT_ORDER, SCORING_PARAMS
     global DEFAULT_RADIUS_KM, DEFAULT_LIMIT
 
     rx = cfg.get("receiver", {})
@@ -277,29 +445,28 @@ def apply_config(cfg: dict) -> None:
     # objects nested inside it would let anything the handler does to that body
     # afterwards rewrite live ranking state.
     ranking = cfg.get("ranking", {})
-    # TV bands tie: a VHF and a UHF tower are ranked on power alone. FM is the
-    # fallback and sorts after every TV tower whatever its power.
+    # The old hard tier: TV bands tie, FM sorts after every TV tower whatever
+    # its power. No longer in the shipped sort_order — band_offset_db below is
+    # its successor — but still applied and still sortable, so an overlay that
+    # names it keeps ranking the way it asked to.
     band_priority = dict(ranking.get("band_priority", {"VHF": 0, "UHF": 0, "FM": 1}))
+    # The tier's successor: a per-band EIRP nudge the scoring model applies,
+    # rather than a rank that no power can overcome. band_priority stays
+    # applied and sortable for overlays that still name it.
+    band_offset_db = dict(ranking.get("band_offset_db", DEFAULT_BAND_OFFSET_DB))
 
-    # The fallback for a config that names no sort_order. It matches the shipped
-    # tower_config.json so an overlay that omits the section ranks the same way
-    # as a fresh one. Within a band tier the analyser's measured score decides
-    # where there is one (POST /api/towers); it is None on a GET, which
-    # _sort_key() reads as 0 for every tower, so the order there falls through
-    # to modelled received power. The monolith leads its own fallback with
-    # coverage_area_added_km2; adopting that here would silently re-rank every
-    # deployment whose config omits the section.
-    sort_order = [
-        dict(rule)
-        for rule in ranking.get(
-            "sort_order",
-            [
-                {"field": "band_priority", "ascending": True},
-                {"field": "score", "ascending": False},
-                {"field": "received_power_dbm", "ascending": False},
-            ],
-        )
-    ]
+    sort_order = [dict(rule) for rule in ranking.get("sort_order", _DEFAULT_SORT_ORDER)]
+
+    # Same copy-don't-alias discipline, one level deeper: band_params holds a
+    # dict per band, and assigning those would leave the live scorer reading
+    # the request body PUT /api/config parsed.
+    scoring_cfg = cfg.get("scoring", {})
+    band_params = {band: dict(params) for band, params in scoring_cfg.get("band_params", DEFAULT_BAND_PARAMS).items()}
+    scoring_knobs = {key: scoring_cfg[key] for key in _SCORING_PARAM_KEYS if key in scoring_cfg}
+    # rx_gain_dbi is deliberately not settable here: the scoring model and the
+    # FSPL link budget must use the same receiver antenna, and that lives in
+    # receiver.rx_antenna_gain_dbi. _scoring_params() folds it in at call time.
+    scoring_params = ScoringParams(band_params=band_params, **scoring_knobs)
 
     search = cfg.get("search", {})
     radius_km = search.get("default_radius_km", 80)
@@ -310,9 +477,23 @@ def apply_config(cfg: dict) -> None:
     SENSITIVITY_DBM = sensitivity
     BROADCAST_BANDS = bands
     BAND_PRIORITY = band_priority
+    BAND_OFFSET_DB = band_offset_db
     SORT_ORDER = sort_order
+    SCORING_PARAMS = scoring_params
     DEFAULT_RADIUS_KM = radius_km
     DEFAULT_LIMIT = limit
+
+
+def _scoring_params() -> ScoringParams:
+    """The scoring knobs as one value, resolved at call time.
+
+    The receiver gain and the band offsets live in sections of their own
+    (receiver.rx_antenna_gain_dbi, ranking.band_offset_db) and are folded in
+    here rather than baked into SCORING_PARAMS, so anything that assigns one of
+    those globals — apply_config, or a test — cannot leave the scorer running
+    on a stale copy of it.
+    """
+    return replace(SCORING_PARAMS, rx_gain_dbi=RX_ANTENNA_GAIN_DBI, band_offset_db=dict(BAND_OFFSET_DB))
 
 
 def reload_config():
@@ -329,6 +510,9 @@ def reload_config():
     """
     cfg = _load_config()
     _drop_legacy_distance_rules(cfg)
+    # After the distance rules are dropped, not before: that is what turns the
+    # pre-2026-05-28 default into a shape this can recognise.
+    _upgrade_legacy_default_sort(cfg)
     error = validate_config(cfg)
     if error:
         raise ValueError(f"{_CONFIG_PATH} is not a usable tower config: {error}")
@@ -364,6 +548,42 @@ def _drop_legacy_distance_rules(cfg: dict) -> None:
             _CONFIG_PATH,
         )
         ranking["sort_order"] = kept
+
+
+def _upgrade_legacy_default_sort(cfg: dict) -> None:
+    """Move an untouched overlay onto the current default sort_order.
+
+    The runtime overlay is a persistent volume seeded once and never
+    re-seeded, so changing the shipped default changes nothing in any
+    environment that already has one — every deployment would keep ranking on
+    band tier and received power for good, and the only visible symptom would
+    be that the new ranking never appears. That is worse than the distance
+    rules, which at least failed loudly.
+
+    So an overlay whose sort_order is *exactly* one of the defaults this image
+    has shipped is treated as "whatever the image ranks on" and upgraded in
+    memory. Anything else is an operator's deliberate choice and is left
+    alone, including a list that merely resembles a default.
+
+    The file on disk is not rewritten: reload_config() runs at import and a
+    surprise write into a mounted volume at boot is not something a deploy can
+    undo. The warning says how to make the choice explicit.
+    """
+    ranking = cfg.get("ranking") if isinstance(cfg, dict) else None
+    sort_order = ranking.get("sort_order") if isinstance(ranking, dict) else None
+    if not isinstance(sort_order, list):
+        return
+    if sort_order == _DEFAULT_SORT_ORDER:
+        return
+    if not any(sort_order == legacy for legacy in _LEGACY_DEFAULT_SORT_ORDERS):
+        return
+    logger.warning(
+        "%s still carries a shipped default ranking.sort_order (%s); ranking on expected detection area "
+        "instead for this process. PUT /api/config to make the choice explicit either way.",
+        _CONFIG_PATH,
+        sort_order,
+    )
+    ranking["sort_order"] = [dict(rule) for rule in _DEFAULT_SORT_ORDER]
 
 
 # Seed every setting from the in-code defaults before any file is read, so they
@@ -667,6 +887,12 @@ def process_and_rank(
     Takes raw system records from Maprad/FCC, filters and ranks them
     for passive radar suitability.
 
+    Every returned tower carries ``expected_area_km2``, ``best_azimuth_deg``
+    and ``horizon_km`` from the bistatic detection-area model
+    (services/tower_scoring.py), on top of every field it carried before. The
+    shipped sort_order ranks on the first of those; nothing was renamed or
+    dropped, because retina-gui and retina-spectrum read this response.
+
     Args:
         limit: Max towers to return. 0 means use DEFAULT_LIMIT from config.
         radius_km: Search radius in km. Towers beyond this are excluded.
@@ -789,9 +1015,34 @@ def process_and_rank(
         towers = [t for t in towers if t["measured"]]
 
     # After the measured filter, not before it: scoring is the most expensive
-    # step here and towers the SDR cannot see are about to be discarded. The
-    # scores themselves are unaffected — one call stamps the same values onto
-    # every tower it is given.
+    # step here and towers the SDR cannot see are about to be discarded.
+    # score_towers() is per-tower, so the saving is real, and it never reads
+    # one tower to score another.
+    try:
+        score_towers(towers, user_lat, user_lon, _scoring_params())
+    except Exception as exc:
+        # Fail-soft like the coverage scorer, and for the same reason: a fault
+        # in the model must not take the towers endpoint down with it. The
+        # three fields are part of the response contract, so they are filled in
+        # regardless and the sort falls through to its next rule. score_towers
+        # writes them before it can raise; the setdefault below covers a fault
+        # in building the params, before it was ever called.
+        logger.warning("Detection-area scoring failed: %s", exc)
+        for t in towers:
+            t.setdefault("expected_area_km2", 0.0)
+            t.setdefault("best_azimuth_deg", 0.0)
+            t.setdefault("horizon_km", 0.0)
+
+    # Fleet outcomes correct the modelled area before the sort sees it. The
+    # import is deferred so a fault in the feedback store's module cannot stop
+    # this one importing at app start; apply_feedback itself never raises.
+    from services.tower_feedback import apply_feedback
+
+    apply_feedback(towers, user_lat, user_lon)
+
+    # Same place, same reason as above. The coverage scores themselves are
+    # unaffected by the filter — one call stamps the same values onto every
+    # tower it is given.
     if coverage_scorer is not None:
         try:
             coverage_scorer(towers)

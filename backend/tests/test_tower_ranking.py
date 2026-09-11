@@ -1,5 +1,7 @@
 """Tests for tower ranking utilities — source detection, band classification, frequency parsing."""
 
+import json
+
 import pytest
 
 from routes.towers import _detect_source
@@ -512,8 +514,48 @@ class TestProcessAndRank:
             "obw_fraction",
             # Channel-sharing merge — always present, empty when the tower stands alone
             "shared_callsigns",
+            # Detection-area model — always present, 0.0 for a tower it cannot score
+            "expected_area_km2",
+            "best_azimuth_deg",
+            "horizon_km",
         }
         assert expected_fields.issubset(t.keys())
+
+    def test_the_fields_our_consumers_read_keep_their_names_and_types(self):
+        """retina-gui and retina-spectrum read this response.
+
+        The ranking redesign only adds fields. A rename or a type change here
+        is a broken map pin or a blank column in another repo, found at
+        runtime, so the contract is pinned rather than described.
+        """
+        t = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON)[0]
+        consumed = {
+            "callsign": str,
+            "name": str,
+            "frequency_mhz": float,
+            "band": str,
+            "latitude": float,
+            "longitude": float,
+            "distance_km": float,
+            "bearing_deg": float,
+            "bearing_cardinal": str,
+            "state": str,
+            "received_power_dbm": float,
+            "rank": int,
+        }
+        for field, expected_type in consumed.items():
+            assert isinstance(t[field], expected_type), f"{field} is {type(t[field]).__name__}"
+        # power_db and altitude_m are nullable: the first comes from a
+        # measurement, the second from the elevation enrichment in the route.
+        assert "power_db" in t
+
+    def test_the_model_fields_are_json_serialisable_numbers(self):
+        """numpy scalars would pass every assertion above and then fail
+        json.dumps in the route, which is a 500 on the towers endpoint."""
+        t = process_and_rank([_FM_SYSTEM], _USER_LAT, _USER_LON)[0]
+        for field in ("expected_area_km2", "best_azimuth_deg", "horizon_km"):
+            assert type(t[field]) is float, field
+        json.dumps({k: v for k, v in t.items() if k != "antenna_height_m"})
 
     def test_no_measurements_fields_are_none(self):
         """When no measurements provided, analyser fields should all be None/False."""
