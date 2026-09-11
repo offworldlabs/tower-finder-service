@@ -361,6 +361,58 @@ class TestValidateBandOffsets:
         assert tower_ranking.validate_config(cfg) is not None
 
 
+class TestValidateDiversity:
+    """The MMR knobs meet as a (1 - lambda * sim) multiplier and two Gaussian
+    divisors. Every one of these passes a structural check and then either
+    inverts the pass (a negative multiplier ranks the most redundant tower
+    first) or divides by zero inside it, on every search."""
+
+    def test_absent_section_is_valid(self):
+        assert tower_ranking.validate_config({"ranking": {}}) is None
+
+    def test_empty_section_is_valid(self):
+        assert tower_ranking.validate_config({"ranking": {"diversity": {}}}) is None
+
+    def test_shipped_section_is_valid(self):
+        shipped = _shipped_default()["ranking"]["diversity"]
+        assert tower_ranking.validate_config({"ranking": {"diversity": shipped}}) is None
+
+    def test_section_must_be_an_object(self):
+        error = tower_ranking.validate_config({"ranking": {"diversity": [0.7]}})
+        assert error is not None and "must be an object" in error
+
+    def test_enabled_must_be_a_bool(self):
+        assert tower_ranking.validate_config({"ranking": {"diversity": {"enabled": "yes"}}}) is not None
+        assert tower_ranking.validate_config({"ranking": {"diversity": {"enabled": 1}}}) is not None
+        assert tower_ranking.validate_config({"ranking": {"diversity": {"enabled": False}}}) is None
+
+    @pytest.mark.parametrize("key", tower_ranking._DIVERSITY_UNIT_KEYS)
+    def test_unit_keys_reject_a_string(self, key):
+        assert tower_ranking.validate_config({"ranking": {"diversity": {key: "lots"}}}) is not None
+
+    @pytest.mark.parametrize("key", tower_ranking._DIVERSITY_UNIT_KEYS)
+    def test_unit_keys_reject_values_outside_the_unit_interval(self, key):
+        assert tower_ranking.validate_config({"ranking": {"diversity": {key: 1.5}}}) is not None
+        assert tower_ranking.validate_config({"ranking": {"diversity": {key: -0.1}}}) is not None
+        # Both ends are usable: 0 turns the term off, 1 is total overlap.
+        assert tower_ranking.validate_config({"ranking": {"diversity": {key: 0}}}) is None
+        assert tower_ranking.validate_config({"ranking": {"diversity": {key: 1}}}) is None
+
+    @pytest.mark.parametrize("key", tower_ranking._DIVERSITY_POSITIVE_KEYS)
+    def test_positive_keys_reject_a_string_zero_and_negatives(self, key):
+        assert tower_ranking.validate_config({"ranking": {"diversity": {key: "wide"}}}) is not None
+        assert tower_ranking.validate_config({"ranking": {"diversity": {key: 0}}}) is not None
+        assert tower_ranking.validate_config({"ranking": {"diversity": {key: -5}}}) is not None
+        assert tower_ranking.validate_config({"ranking": {"diversity": {key: 12.5}}}) is None
+
+    def test_nan_rejected(self):
+        cfg = json.loads('{"ranking": {"diversity": {"lambda": NaN}}}')
+        assert tower_ranking.validate_config(cfg) is not None
+
+    def test_bool_is_not_a_number_here_either(self):
+        assert tower_ranking.validate_config({"ranking": {"diversity": {"lambda": True}}}) is not None
+
+
 class TestApplyConfig:
     def test_raises_on_a_shape_it_cannot_apply(self):
         """PUT /api/config depends on this raising, to reject the write."""
@@ -477,6 +529,42 @@ class TestApplyConfig:
         """Zero until they are fitted from fleet data: a placeholder that
         shifts nothing is honest, an invented number is not."""
         assert _shipped_default()["ranking"]["band_offset_db"] == {"VHF": 0, "UHF": 0, "FM": 0}
+
+    def test_the_diversity_section_does_not_alias_the_caller(self, restore_config):
+        body = {"ranking": {"diversity": {"enabled": True, "lambda": 0.4}}}
+
+        tower_ranking.apply_config(body)
+        body["ranking"]["diversity"]["lambda"] = 0.99
+        body["ranking"]["diversity"]["enabled"] = False
+
+        assert tower_ranking.DIVERSITY["lambda"] == 0.4
+        assert tower_ranking.DIVERSITY["enabled"] is True
+
+    def test_a_partial_diversity_section_keeps_the_other_defaults(self, restore_config):
+        tower_ranking.apply_config({"ranking": {"diversity": {"lambda": 0.2}}})
+
+        assert tower_ranking.DIVERSITY["lambda"] == 0.2
+        assert tower_ranking.DIVERSITY["site_radius_km"] == tower_ranking._DEFAULT_DIVERSITY["site_radius_km"]
+        assert set(tower_ranking.DIVERSITY) == set(tower_ranking._DEFAULT_DIVERSITY)
+
+    def test_an_unknown_diversity_key_is_dropped_not_carried(self, restore_config):
+        """The MMR pass reads these by name, so a typo that reached live state
+        would sit there looking like it did something."""
+        tower_ranking.apply_config({"ranking": {"diversity": {"lamda": 0.2}}})
+
+        assert "lamda" not in tower_ranking.DIVERSITY
+        assert tower_ranking.DIVERSITY == tower_ranking._DEFAULT_DIVERSITY
+
+    def test_shipped_diversity_section_matches_the_in_code_defaults(self, restore_config):
+        """As with scoring and sort_order: an overlay that omits the section
+        must order the same way as a fresh one."""
+        tower_ranking.apply_config(_shipped_default())
+        from_file = dict(tower_ranking.DIVERSITY)
+
+        tower_ranking.apply_config({})
+
+        assert from_file == tower_ranking.DIVERSITY
+        assert set(_shipped_default()["ranking"]["diversity"]) == set(tower_ranking._DEFAULT_DIVERSITY)
 
     def test_shipped_scoring_section_matches_the_in_code_defaults(self, restore_config):
         """The section spells out every knob, and the in-code fallback has to
@@ -618,6 +706,159 @@ class TestShippedRanking:
         assert [t["callsign"] for t in towers] == ["FAR_STRONG", "NEAR_WEAK"]
         assert towers[0]["distance_km"] > towers[1]["distance_km"]
         assert "distance_class" not in towers[0]
+
+
+class TestDiversityOrdering:
+    """Site-aware MMR, through process_and_rank on the shipped config.
+
+    A node tunes one centre frequency at a time and Auto-Calibrate tries at most
+    three candidates from the top of the list, so ten channels of one mast in
+    the top ten is three attempts at the same mast, the same direct path and the
+    same failure.
+    """
+
+    _LAT, _LON = 33.749, -84.388
+
+    # Two UHF channels on one mast ~20 km north, plus a weaker tower ~22 km
+    # east. The east tower's area is well below the mast's and well above 30% of
+    # it, so only the same-site penalty (lambda 0.7 x sim 1.0) can lift it above
+    # the mast's second channel.
+    _SITE_A1 = _device(freq_mhz=515.0, lat=33.93, lon=-84.388, callsign="SITE_A1", eirp=100_000.0)
+    _SITE_A2 = _device(freq_mhz=521.0, lat=33.93, lon=-84.388, callsign="SITE_A2", eirp=100_000.0)
+    _EAST = _device(freq_mhz=527.0, lat=33.749, lon=-84.15, callsign="EAST", eirp=3_000.0)
+    # Same mast, other band: the smaller penalty (sim 0.5).
+    _SITE_FM = _device(freq_mhz=95.5, lat=33.93, lon=-84.388, callsign="SITE_FM", eirp=100_000.0)
+
+    @pytest.fixture(autouse=True)
+    def _shipped(self, restore_config):
+        tower_ranking.apply_config(_shipped_default())
+
+    def _diversity(self, **knobs):
+        cfg = _shipped_default()
+        cfg["ranking"]["diversity"] = {**cfg["ranking"]["diversity"], **knobs}
+        tower_ranking.apply_config(cfg)
+
+    def _rank(self, devices, **kwargs):
+        return tower_ranking.process_and_rank([_system(devices)], self._LAT, self._LON, **kwargs)
+
+    def _by_callsign(self, towers):
+        return {t["callsign"]: t for t in towers}
+
+    def test_a_second_channel_on_one_mast_falls_below_a_weaker_tower_elsewhere(self):
+        towers = self._rank([self._SITE_A1, self._SITE_A2, self._EAST])
+
+        assert [t["callsign"] for t in towers] == ["SITE_A1", "EAST", "SITE_A2"]
+        # The demoted channel is genuinely the stronger of the two: this is the
+        # diversity penalty, not the model preferring the east tower.
+        by = self._by_callsign(towers)
+        assert by["SITE_A2"]["expected_area_km2"] > by["EAST"]["expected_area_km2"]
+
+    def test_with_diversity_off_the_plain_sort_stands(self):
+        self._diversity(enabled=False)
+
+        towers = self._rank([self._SITE_A1, self._SITE_A2, self._EAST])
+
+        assert [t["callsign"] for t in towers] == ["SITE_A1", "SITE_A2", "EAST"]
+        areas = [t["expected_area_km2"] for t in towers]
+        assert areas == sorted(areas, reverse=True)
+        assert all(t["diversity_penalty"] == 0.0 for t in towers)
+
+    def test_the_site_fields_are_stamped_whether_or_not_mmr_runs(self):
+        self._diversity(enabled=False)
+
+        towers = self._rank([self._SITE_A1, self._SITE_A2, self._EAST])
+
+        by = self._by_callsign(towers)
+        assert by["SITE_A1"]["site_id"] == by["SITE_A2"]["site_id"]
+        assert by["SITE_A1"]["site_channels"] == 2
+        assert by["EAST"]["site_channels"] == 1
+
+    def test_same_site_other_band_pays_the_smaller_penalty(self):
+        towers = self._rank([self._SITE_A1, self._SITE_A2, self._SITE_FM])
+
+        by = self._by_callsign(towers)
+        # lambda 0.7 x same_site_same_band 1.0, against 0.7 x 0.5 across bands.
+        assert by["SITE_A2"]["diversity_penalty"] == pytest.approx(0.7)
+        assert by["SITE_FM"]["diversity_penalty"] == pytest.approx(0.35)
+
+    def test_the_first_pick_pays_nothing(self):
+        towers = self._rank([self._SITE_A1, self._SITE_A2, self._EAST])
+
+        assert towers[0]["diversity_penalty"] == 0.0
+
+    def test_site_channels_counts_every_band_on_the_mast(self):
+        towers = self._rank([self._SITE_A1, self._SITE_A2, self._SITE_FM, self._EAST])
+
+        by = self._by_callsign(towers)
+        assert by["SITE_FM"]["site_channels"] == 3
+        assert by["SITE_A1"]["site_channels"] == 3
+        assert by["EAST"]["site_channels"] == 1
+
+    def test_the_site_id_is_its_lead_towers_coordinates(self):
+        towers = self._rank([self._SITE_A1, self._SITE_A2])
+
+        assert {t["site_id"] for t in towers} == {"33.9300,-84.3880"}
+
+    def test_the_matched_first_split_survives_the_diversity_pass(self):
+        """A hand-typed frequency says which towers the caller asked about,
+        which is not a preference MMR may trade away."""
+        devices = [self._SITE_A1, self._SITE_A2, self._EAST, self._SITE_FM]
+
+        towers = self._rank(devices, user_frequencies=[95.5])
+
+        assert towers[0]["callsign"] == "SITE_FM"
+        assert towers[0]["frequency_matched"] is True
+        assert all(t["frequency_matched"] is False for t in towers[1:])
+        # And the unmatched group is still diversified among itself.
+        assert [t["callsign"] for t in towers[1:]] == ["SITE_A1", "EAST", "SITE_A2"]
+
+    def test_ranks_stay_contiguous_under_mmr(self):
+        towers = self._rank([self._SITE_A1, self._SITE_A2, self._EAST, self._SITE_FM])
+
+        assert [t["rank"] for t in towers] == [1, 2, 3, 4]
+
+    def test_lambda_zero_reproduces_the_plain_sort(self):
+        """The knob has to be able to turn the pass off by degrees as well as
+        outright: at lambda 0 every penalty is 0 and MMR is the sort."""
+        self._diversity(**{"lambda": 0})
+
+        towers = self._rank([self._SITE_A1, self._SITE_A2, self._EAST])
+
+        assert [t["callsign"] for t in towers] == ["SITE_A1", "SITE_A2", "EAST"]
+        assert all(t["diversity_penalty"] == 0.0 for t in towers)
+
+    def test_a_sort_that_leads_elsewhere_is_left_alone(self, restore_config):
+        """MMR's value is expected_area_km2, so an operator ranking on anything
+        else gets their sort, not a diversity pass over a number their config
+        does not use."""
+        cfg = _shipped_default()
+        cfg["ranking"]["sort_order"] = [{"field": "received_power_dbm", "ascending": False}]
+        tower_ranking.apply_config(cfg)
+
+        towers = self._rank([self._SITE_A1, self._SITE_A2, self._EAST])
+
+        powers = [t["received_power_dbm"] for t in towers]
+        assert powers == sorted(powers, reverse=True)
+        assert all(t["diversity_penalty"] == 0.0 for t in towers)
+
+    def test_diagnostics_name_the_ordering_that_ran(self, restore_config):
+        devices = [self._SITE_A1, self._SITE_A2]
+
+        diagnostics: dict = {}
+        self._rank(devices, diagnostics=diagnostics)
+        assert diagnostics["ranking"] == "expected_area_mmr"
+
+        self._diversity(enabled=False)
+        diagnostics = {}
+        self._rank(devices, diagnostics=diagnostics)
+        assert diagnostics["ranking"] == "expected_area"
+
+        cfg = _shipped_default()
+        cfg["ranking"]["sort_order"] = [{"field": "distance_km", "ascending": True}]
+        tower_ranking.apply_config(cfg)
+        diagnostics = {}
+        self._rank(devices, diagnostics=diagnostics)
+        assert diagnostics["ranking"] == "sort_order"
 
 
 class TestReloadConfigValidates:

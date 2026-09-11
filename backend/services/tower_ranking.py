@@ -4,6 +4,7 @@ import math
 import os
 import re
 import shutil
+import statistics
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -131,6 +132,11 @@ def _is_number(value) -> bool:
 # switching ranking strategy is a config PUT rather than a code change. Adding a
 # numeric field to the tower dict means adding it here too, or a config naming it
 # is rejected.
+#
+# Also absent, and not an oversight: the annotations the ordering itself
+# produces — feedback_factor / feedback_n, diversity_penalty, site_channels,
+# measurement_quality. They are outputs of a rank, so a sort_order naming one
+# would rank on the answer to the question it is being asked.
 #
 # distance_priority used to be here. Towers no longer carry a distance class
 # ("Too Close" / "Ideal" / "Good" / "Far"), so there is nothing for such a rule
@@ -265,6 +271,57 @@ def _validate_scoring(scoring: dict) -> str | None:
     return None
 
 
+# ── ranking.diversity: the MMR knobs ─────────────────────────────────────────
+#
+# A node tunes one centre frequency at a time, and Auto-Calibrate tries at most
+# three candidates from the top of this list. A San Francisco search returns 14
+# channels on Sutro Tower and 7 on Mount Diablo, so a list ordered on area alone
+# spends every candidate slot on one mast: the same direct path, the same
+# geometry and the same failure three times over. The diversity pass reorders so
+# each slot is worth taking.
+_DEFAULT_DIVERSITY = {
+    "enabled": True,
+    "lambda": 0.7,
+    "same_site_same_band": 1.0,
+    "same_site_other_band": 0.5,
+    "bearing_sigma_deg": 30,
+    "distance_sigma_km": 15,
+    "other_band_factor": 0.5,
+    "site_radius_km": 1.0,
+}
+
+# Similarities, and the lambda that scales them. They meet as a
+# (1 - lambda * sim) multiplier on the tower's area: above 1 that multiplier
+# goes negative and the most redundant tower sorts first, below 0 it promotes
+# instead of demoting. Either way the pass does the opposite of its job on a
+# config that looks plausible.
+_DIVERSITY_UNIT_KEYS = ("lambda", "same_site_same_band", "same_site_other_band", "other_band_factor")
+
+# Divisors: two Gaussian widths and the radius the site clustering greedily
+# groups on. Zero divides by zero inside the similarity, and a negative radius
+# makes every tower its own site, silently disabling the same-site rule.
+_DIVERSITY_POSITIVE_KEYS = ("bearing_sigma_deg", "distance_sigma_km", "site_radius_km")
+
+
+def _validate_diversity(diversity) -> str | None:
+    """Return an error message if the `ranking.diversity` section is unusable, else None."""
+    if not isinstance(diversity, dict):
+        return f"ranking.diversity must be an object, got {type(diversity).__name__}"
+
+    if "enabled" in diversity and not isinstance(diversity["enabled"], bool):
+        return f"ranking.diversity.enabled must be true or false, got {diversity['enabled']!r}"
+
+    for key in _DIVERSITY_UNIT_KEYS:
+        if key in diversity and (not _is_number(diversity[key]) or not 0.0 <= diversity[key] <= 1.0):
+            return f"ranking.diversity.{key} must be a number in [0, 1], got {diversity[key]!r}"
+
+    for key in _DIVERSITY_POSITIVE_KEYS:
+        if key in diversity and (not _is_number(diversity[key]) or diversity[key] <= 0):
+            return f"ranking.diversity.{key} must be a positive number, got {diversity[key]!r}"
+
+    return None
+
+
 def validate_config(cfg: dict) -> str | None:
     """Return an error message if the tower config is unusable, else None.
 
@@ -325,6 +382,10 @@ def validate_config(cfg: dict) -> str | None:
             if not _is_number(offset):
                 return f"ranking.band_offset_db[{name!r}] must be a number, got {offset!r}"
 
+    diversity_error = _validate_diversity(ranking.get("diversity", {}))
+    if diversity_error:
+        return diversity_error
+
     scoring_error = _validate_scoring(cfg.get("scoring", {}))
     if scoring_error:
         return scoring_error
@@ -374,6 +435,7 @@ CONFIG_SETTINGS = (
     "BROADCAST_BANDS",
     "BAND_PRIORITY",
     "BAND_OFFSET_DB",
+    "DIVERSITY",
     "SORT_ORDER",
     "SCORING_PARAMS",
     "DEFAULT_RADIUS_KM",
@@ -431,7 +493,7 @@ def apply_config(cfg: dict) -> None:
     needs the failure in order to reject the write.
     """
     global RX_ANTENNA_GAIN_DBI, SENSITIVITY_DBM
-    global BROADCAST_BANDS, BAND_PRIORITY, BAND_OFFSET_DB, SORT_ORDER, SCORING_PARAMS
+    global BROADCAST_BANDS, BAND_PRIORITY, BAND_OFFSET_DB, DIVERSITY, SORT_ORDER, SCORING_PARAMS
     global DEFAULT_RADIUS_KM, DEFAULT_LIMIT
 
     rx = cfg.get("receiver", {})
@@ -454,6 +516,13 @@ def apply_config(cfg: dict) -> None:
     # rather than a rank that no power can overcome. band_priority stays
     # applied and sortable for overlays that still name it.
     band_offset_db = dict(ranking.get("band_offset_db", DEFAULT_BAND_OFFSET_DB))
+
+    # Read key by key rather than copied wholesale: every knob has a default, so
+    # a section naming one of them still gets the rest, and a key the MMR pass
+    # does not read is dropped here instead of sitting in live state looking
+    # like it does something.
+    diversity_cfg = ranking.get("diversity", {})
+    diversity = {key: diversity_cfg.get(key, default) for key, default in _DEFAULT_DIVERSITY.items()}
 
     sort_order = [dict(rule) for rule in ranking.get("sort_order", _DEFAULT_SORT_ORDER)]
 
@@ -478,6 +547,7 @@ def apply_config(cfg: dict) -> None:
     BROADCAST_BANDS = bands
     BAND_PRIORITY = band_priority
     BAND_OFFSET_DB = band_offset_db
+    DIVERSITY = diversity
     SORT_ORDER = sort_order
     SCORING_PARAMS = scoring_params
     DEFAULT_RADIUS_KM = radius_km
@@ -872,6 +942,194 @@ def _merge_shared_transmitters(towers: list) -> list:
     return merged
 
 
+# ── Site-aware diversity ordering ────────────────────────────────────────────
+
+
+def _site_id(lat: float, lon: float) -> str:
+    """A site's stable name: its lead tower's coordinates, to ~11 m."""
+    return f"{lat:.4f},{lon:.4f}"
+
+
+def _assign_sites(towers: list[dict], radius_km: float) -> None:
+    """Stamp ``site_id`` and ``site_channels`` on every tower, in place.
+
+    Greedy clustering in list order, as _merge_shared_transmitters does it: a
+    tower joins the first cluster whose lead is within ``radius_km``, else it
+    leads one. Unlike that merge this crosses frequency and band — the point
+    here is the mast, not the channel, and 14 channels on one mast is exactly
+    what the diversity pass exists to notice.
+    """
+    leads: list[dict] = []
+    counts: dict[str, int] = {}
+    for t in towers:
+        lead = next(
+            (
+                candidate
+                for candidate in leads
+                if haversine(t["latitude"], t["longitude"], candidate["latitude"], candidate["longitude"]) <= radius_km
+            ),
+            None,
+        )
+        if lead is None:
+            leads.append(t)
+            lead = t
+        site = _site_id(lead["latitude"], lead["longitude"])
+        t["site_id"] = site
+        counts[site] = counts.get(site, 0) + 1
+
+    for t in towers:
+        t["site_channels"] = counts[t["site_id"]]
+
+
+def _diversity_similarity(a: dict, b: dict, cfg: dict) -> float:
+    """How much of what ``b`` offers a second pick of ``a`` would repeat, in [0, 1].
+
+    Same mast is the case that matters: one centre frequency at a time means a
+    second channel from the same site buys a new signal but the same direct
+    path, the same bearing and the same terrain. Otherwise the overlap falls off
+    as a Gaussian in bearing and in range — two towers on opposite sides of the
+    receiver illuminate different ground — halved again across bands, where the
+    node has to retune anyway.
+    """
+    same_band = a.get("band") == b.get("band")
+    if haversine(a["latitude"], a["longitude"], b["latitude"], b["longitude"]) <= cfg["site_radius_km"]:
+        return float(cfg["same_site_same_band"] if same_band else cfg["same_site_other_band"])
+
+    # Wrapped: 350 degrees and 10 degrees are 20 apart, not 340.
+    d_bearing = abs((float(a["bearing_deg"]) - float(b["bearing_deg"]) + 180.0) % 360.0 - 180.0)
+    d_dist = abs(float(a["distance_km"]) - float(b["distance_km"]))
+    sim = math.exp(-0.5 * (d_bearing / cfg["bearing_sigma_deg"]) ** 2) * math.exp(
+        -0.5 * (d_dist / cfg["distance_sigma_km"]) ** 2
+    )
+    return float(sim if same_band else sim * cfg["other_band_factor"])
+
+
+def _mmr_order(towers: list[dict], cfg: dict) -> list[dict]:
+    """Reorder by maximal marginal relevance on ``expected_area_km2``.
+
+    Each pick maximises ``area * (1 - lambda * max_sim_to_already_picked)``, so
+    the list reads as "the best tower that is not another view of the one above
+    it". ``diversity_penalty`` records what the winner paid at the moment it was
+    picked, which is the only honest place to record it: the penalty a tower
+    would pay changes with every later pick.
+
+    ``towers`` must arrive in the plain sorted order. The model returns a
+    multiple of the cell area so towers genuinely tie, and a strict comparison
+    below then keeps the configured order within a tie.
+
+    The running ``max_sim`` is what keeps this O(n^2) rather than O(n^3): a new
+    pick can only raise a remaining tower's similarity, never lower it.
+    """
+    remaining = list(towers)
+    max_sim = [0.0] * len(remaining)
+    chosen: list[dict] = []
+
+    while remaining:
+        best_i = 0
+        best_value = None
+        for i, t in enumerate(remaining):
+            value = (t.get("expected_area_km2") or 0.0) * (1.0 - cfg["lambda"] * max_sim[i])
+            if best_value is None or value > best_value:
+                best_i, best_value = i, value
+
+        pick = remaining.pop(best_i)
+        pick["diversity_penalty"] = float(cfg["lambda"] * max_sim.pop(best_i))
+        chosen.append(pick)
+
+        for i, t in enumerate(remaining):
+            max_sim[i] = max(max_sim[i], _diversity_similarity(t, pick, cfg))
+
+    return chosen
+
+
+def _leads_with_expected_area(sort_order: list[dict]) -> bool:
+    """Whether the configured sort ranks on the detection area, descending.
+
+    The MMR value is that one field, so an operator who has ranked on anything
+    else keeps their sort untouched rather than getting a diversity pass over a
+    number their config does not use.
+    """
+    if not sort_order:
+        return False
+    first = sort_order[0]
+    return first.get("field") == "expected_area_km2" and not first.get("ascending", True)
+
+
+# ── Measurement calibration (POST /api/towers) ───────────────────────────────
+
+# The bands whose measurements carry an absolute power reading. retina-spectrum
+# sends power_db only for TV — the ATSC pilot peak, in dBFS — and null for FM,
+# so an FM row has nothing to calibrate the model with.
+_CALIBRATED_BANDS = frozenset({"VHF", "UHF"})
+
+# Fewest matched TV towers an offset may be taken from. One tower is not a
+# calibration: it is that tower's own terrain error, moved onto every other
+# tower in the sweep and then called a measurement.
+_MIN_CALIBRATION_TOWERS = 2
+
+
+def _calibrate_direct_power(towers: list[dict]) -> tuple[float | None, int]:
+    """Refer the sweep's measured powers to the modelled link budget, in place.
+
+    ``power_db`` is dBFS at the node's front end, so it carries no absolute
+    scale — but the differences between channels within one sweep are real, and
+    terrain is the largest error in the FSPL the model otherwise falls back on.
+    The median of (measured - modelled) over the matched TV towers is therefore
+    taken as the sweep's fixed offset (front-end gain, conversion loss, the dBFS
+    reference), and subtracting it leaves each tower's own residual on the
+    modelled dBm scale, which is what ``direct_power_dbm_override`` wants.
+
+    Median rather than mean: one tower behind a ridge is a large one-sided
+    residual, and a mean would spread its terrain across every other tower.
+
+    Returns the offset — None when there was too little to take one — and how
+    many towers it was applied to.
+    """
+    residuals = [
+        t["power_db"] - t["received_power_dbm"]
+        for t in towers
+        if t.get("measured") and t.get("band") in _CALIBRATED_BANDS and _is_number(t.get("power_db"))
+    ]
+    if len(residuals) < _MIN_CALIBRATION_TOWERS:
+        return None, 0
+
+    offset = statistics.median(residuals)
+    calibrated = 0
+    for t in towers:
+        if t.get("measured") and _is_number(t.get("power_db")):
+            t["direct_power_dbm_override"] = t["power_db"] - offset
+            t["direct_power_source"] = "measured"
+            calibrated += 1
+    return offset, calibrated
+
+
+def _apply_measurement_quality(towers: list[dict]) -> None:
+    """Discount a measured tower's area by how good the measurement was.
+
+    ``score`` is no longer a sort key — it says how well the SDR hears the
+    illuminator, not how much ground the illuminator lights up — but a channel
+    the analyser barely resolved is a worse bet than the model alone suggests.
+    It becomes a multiplier in [0.5, 1] rather than an order: half the area at
+    worst, so a poor score demotes a tower without deleting it.
+
+    Deliberately never compared across towers: FM's score is an SNR ramp and
+    TV's is absolute dBFS, so the two are on different scales upstream.
+    """
+    for t in towers:
+        if not t.get("measured"):
+            continue
+        score = t.get("score")
+        if not _is_number(score):
+            continue
+        # Clamped, not trusted: the scale is set upstream in another repo, and a
+        # score above 1 would quietly multiply the area rather than discount it.
+        quality = 0.5 + 0.5 * min(max(float(score), 0.0), 1.0)
+        t["measurement_quality"] = quality
+        area = t.get("expected_area_km2")
+        if _is_number(area):
+            t["expected_area_km2"] = area * quality
+
+
 def process_and_rank(
     raw_systems: list,
     user_lat: float,
@@ -882,6 +1140,7 @@ def process_and_rank(
     user_frequencies: list[float] | None = None,
     allowed_bands: frozenset = ALL_BANDS,
     coverage_scorer=None,
+    diagnostics: dict | None = None,
 ) -> list:
     """
     Takes raw system records from Maprad/FCC, filters and ranks them
@@ -889,8 +1148,11 @@ def process_and_rank(
 
     Every returned tower carries ``expected_area_km2``, ``best_azimuth_deg``
     and ``horizon_km`` from the bistatic detection-area model
-    (services/tower_scoring.py), on top of every field it carried before. The
-    shipped sort_order ranks on the first of those; nothing was renamed or
+    (services/tower_scoring.py), the site-diversity annotations (``site_id``,
+    ``site_channels``, ``diversity_penalty``) and the direct-path provenance
+    (``direct_power_source``, ``direct_power_dbm_override``,
+    ``measurement_quality``), on top of every field it carried before. The
+    shipped sort_order ranks on the detection area; nothing was renamed or
     dropped, because retina-gui and retina-spectrum read this response.
 
     Args:
@@ -915,6 +1177,11 @@ def process_and_rank(
             in place — see services/tower_coverage.py. Run in a try/except:
             scoring must never break the towers endpoint. A config whose
             sort_order does not name a coverage field ignores the annotations.
+        diagnostics: Optional dict filled in with what this call actually did:
+            ``ranking`` (which ordering ran), ``calibration_offset_db`` and
+            ``calibrated_towers``. An out-parameter rather than a richer return
+            type, because the towers list is what every caller already expects
+            back; the routes copy these into the response ``query``.
     """
     effective_radius = radius_km if radius_km > 0 else DEFAULT_RADIUS_KM
     effective_limit = limit if limit > 0 else DEFAULT_LIMIT
@@ -1014,6 +1281,18 @@ def process_and_rank(
         # can see and must not exempt a tower from this filter.
         towers = [t for t in towers if t["measured"]]
 
+    # Direct-path provenance, on every tower whether or not anything measured
+    # it: a client reading direct_power_source must not have to tell "the model"
+    # from "the key is missing", and score_towers reads the override by name.
+    for t in towers:
+        t["direct_power_dbm_override"] = None
+        t["direct_power_source"] = "model"
+        t["measurement_quality"] = None
+
+    # Before the scoring, which is what consumes the override. GET has no sweep
+    # to calibrate from, so it stays on the model.
+    calibration_offset_db, calibrated_towers = _calibrate_direct_power(towers) if measurements else (None, 0)
+
     # After the measured filter, not before it: scoring is the most expensive
     # step here and towers the SDR cannot see are about to be discarded.
     # score_towers() is per-tower, so the saving is real, and it never reads
@@ -1032,6 +1311,12 @@ def process_and_rank(
             t.setdefault("expected_area_km2", 0.0)
             t.setdefault("best_azimuth_deg", 0.0)
             t.setdefault("horizon_km", 0.0)
+
+    # Between the model and the feedback: the analyser says how well this node
+    # heard the channel today, which discounts the modelled area before anything
+    # fleet-wide or order-related is applied to it.
+    if measurements:
+        _apply_measurement_quality(towers)
 
     # Fleet outcomes correct the modelled area before the sort sees it. The
     # import is deferred so a fault in the feedback store's module cannot stop
@@ -1073,10 +1358,37 @@ def process_and_rank(
             parts.append(val if asc else -val)
         return tuple(parts)
 
+    # Once over the whole list, before any split or truncation: site_channels
+    # answers "how many channels does this mast carry in this search", which a
+    # per-group or post-limit count would understate.
+    _assign_sites(towers, DIVERSITY["site_radius_km"])
+    for t in towers:
+        t["diversity_penalty"] = 0.0
+
     towers.sort(key=_sort_key)
+
+    ranks_on_area = _leads_with_expected_area(SORT_ORDER)
+    use_mmr = bool(DIVERSITY["enabled"]) and ranks_on_area
+    if use_mmr:
+        if has_user_freqs:
+            # The matched-first split survives the diversity pass: it decides
+            # which towers a caller asked about, which is not a preference MMR
+            # is entitled to trade away. Each group is diversified on its own.
+            matched = [t for t in towers if t.get("frequency_matched")]
+            unmatched = [t for t in towers if not t.get("frequency_matched")]
+            towers = _mmr_order(matched, DIVERSITY) + _mmr_order(unmatched, DIVERSITY)
+        else:
+            towers = _mmr_order(towers, DIVERSITY)
 
     # Assign ranks
     for i, t in enumerate(towers[:effective_limit], 1):
         t["rank"] = i
+
+    if diagnostics is not None:
+        diagnostics["ranking"] = (
+            "expected_area_mmr" if use_mmr else ("expected_area" if ranks_on_area else "sort_order")
+        )
+        diagnostics["calibration_offset_db"] = calibration_offset_db
+        diagnostics["calibrated_towers"] = calibrated_towers
 
     return towers[:effective_limit]

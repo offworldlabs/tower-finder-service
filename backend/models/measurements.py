@@ -21,7 +21,15 @@ class Measurement(BaseModel):
         description="Occupied bandwidth as a fraction of the channel bandwidth. None for TV channels.",
     )
     score: float = Field(..., description="Composite passive-radar suitability score")
-    power_db: float | None = Field(None, description="Measured signal power in dBFS or dBm. None for FM channels.")
+    # dBFS, never dBm: it is the ATSC pilot peak as the node's front end sees
+    # it, so it carries no absolute scale of its own. POST /api/towers takes a
+    # per-sweep median offset against the modelled link budget and uses the
+    # residual, which is only sound because every row in one sweep shares that
+    # scale — read as dBm it would be tens of dB of nonsense.
+    power_db: float | None = Field(
+        None,
+        description="Measured ATSC pilot power in dBFS, referred to the node's front end. None for FM channels.",
+    )
     band: str = Field(..., description="Band reported by the analyser: FM, VHF, or UHF")
 
 

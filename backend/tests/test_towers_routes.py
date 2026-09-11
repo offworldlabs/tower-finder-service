@@ -8,7 +8,14 @@ from fastapi.testclient import TestClient
 
 from app import app
 from core.auth import ENV_VAR
-from tests._helpers import device, get_towers, system
+from tests._helpers import (
+    CONSUMER_FIELDS,
+    CONSUMER_NULLABLE_FIELDS,
+    device,
+    get_towers,
+    post_towers,
+    system,
+)
 
 
 @pytest.fixture()
@@ -568,6 +575,182 @@ class TestFindTowersWithMeasurements:
             r = client.post("/api/towers", json=payload)
         assert r.status_code == 200
         assert r.json()["query"]["source"] == "au"
+
+
+# ── What the response says about how it was ranked ───────────────────────────
+
+
+class TestRankingDiagnostics:
+    """Both routes say which ordering the caller got, and POST says what the
+    sweep calibrated. A client should not have to infer either from the rows."""
+
+    _LAT, _LON = 33.9, -84.6
+
+    # One mast with two UHF channels plus a tower elsewhere, so the diversity
+    # pass has something to do.
+    _SYSTEMS = [
+        system(
+            [
+                device(515.0, 34.05, -84.6, callsign="MAST1", eirp=100_000),
+                device(521.0, 34.05, -84.6, callsign="MAST2", eirp=100_000),
+                device(527.0, 33.9, -84.35, callsign="EAST", eirp=3_000),
+            ],
+            licence_type="Broadcast",
+        )
+    ]
+
+    @pytest.fixture(autouse=True)
+    def _shipped(self):
+        """Run these against the config the image ships, not whatever overlay
+        the developer's runtime volume holds."""
+        import json
+
+        from services import tower_ranking
+
+        saved = {name: getattr(tower_ranking, name) for name in tower_ranking.CONFIG_SETTINGS}
+        with (tower_ranking._SOURCE_DEFAULT_DIR / "tower_config.json").open() as f:
+            tower_ranking.apply_config(json.load(f))
+        try:
+            yield
+        finally:
+            for name, value in saved.items():
+                setattr(tower_ranking, name, value)
+
+    def _measurements(self):
+        return [
+            {"freq_mhz": f, "band": "UHF", "snr_db": None, "obw_fraction": None, "score": 0.9, "power_db": p}
+            for f, p in ((515.0, -30.0), (521.0, -32.0), (527.0, -45.0))
+        ]
+
+    def test_get_names_the_ordering(self, client):
+        r = get_towers(client, f"lat={self._LAT}&lon={self._LON}&source=us", self._SYSTEMS)
+
+        assert r.status_code == 200
+        assert r.json()["query"]["ranking"] == "expected_area_mmr"
+
+    def test_get_names_the_plain_sort_when_diversity_is_off(self, client):
+        from services import tower_ranking
+
+        tower_ranking.DIVERSITY = {**tower_ranking.DIVERSITY, "enabled": False}
+
+        r = get_towers(client, f"lat={self._LAT}&lon={self._LON}&source=us", self._SYSTEMS)
+
+        assert r.json()["query"]["ranking"] == "expected_area"
+
+    def test_post_names_the_ordering_and_the_calibration(self, client):
+        payload = {"lat": self._LAT, "lon": self._LON, "source": "us", "measurements": self._measurements()}
+
+        r = post_towers(client, payload, self._SYSTEMS)
+
+        assert r.status_code == 200
+        query = r.json()["query"]
+        assert query["ranking"] == "expected_area_mmr"
+        assert isinstance(query["calibration_offset_db"], float)
+        assert query["calibrated_towers"] == 3
+        # The pre-existing keys are untouched.
+        assert query["measurement_count"] == 3
+        assert query["source"] == "us"
+
+    def test_post_reports_no_calibration_when_the_sweep_is_too_thin(self, client):
+        one = [self._measurements()[0]]
+        payload = {"lat": self._LAT, "lon": self._LON, "source": "us", "measurements": one}
+
+        r = post_towers(client, payload, self._SYSTEMS)
+
+        query = r.json()["query"]
+        assert query["calibration_offset_db"] is None
+        assert query["calibrated_towers"] == 0
+
+    def test_get_rows_carry_the_diversity_annotations(self, client):
+        r = get_towers(client, f"lat={self._LAT}&lon={self._LON}&source=us", self._SYSTEMS)
+
+        towers = {t["callsign"]: t for t in r.json()["towers"]}
+        assert towers["MAST1"]["site_id"] == towers["MAST2"]["site_id"]
+        assert towers["MAST1"]["site_channels"] == 2
+        assert towers["EAST"]["site_channels"] == 1
+        # The mast's second channel is the one that pays for the repeat.
+        assert [t["callsign"] for t in r.json()["towers"]] == ["MAST1", "EAST", "MAST2"]
+        assert towers["MAST2"]["diversity_penalty"] == pytest.approx(0.7)
+
+    def test_post_rows_say_where_the_direct_path_came_from(self, client):
+        payload = {"lat": self._LAT, "lon": self._LON, "source": "us", "measurements": self._measurements()}
+
+        r = post_towers(client, payload, self._SYSTEMS)
+
+        for t in r.json()["towers"]:
+            assert t["direct_power_source"] == "measured"
+            assert t["measurement_quality"] == pytest.approx(0.95)
+
+
+class TestConsumerFieldContract:
+    """retina-gui and retina-spectrum read both routes.
+
+    Phase 2 only adds fields and changes order, so every field those consumers
+    read must still be there, with the same type, on GET and on POST alike.
+    """
+
+    _LAT, _LON = 33.9, -84.6
+    _SYSTEMS = [system([device(515.0, 34.05, -84.6, callsign="WTEST", eirp=100_000)], licence_type="Broadcast")]
+    _MEASUREMENT = {
+        "freq_mhz": 515.0,
+        "band": "UHF",
+        "snr_db": None,
+        "obw_fraction": None,
+        "score": 0.9,
+        "power_db": -30.0,
+    }
+
+    def _assert_contract(self, tower):
+        for field, expected_type in CONSUMER_FIELDS.items():
+            assert field in tower, f"{field} is missing"
+            assert isinstance(tower[field], expected_type), f"{field} is {type(tower[field]).__name__}"
+        for field in CONSUMER_NULLABLE_FIELDS:
+            assert field in tower, f"{field} is missing"
+
+    def test_get_row_keeps_every_consumed_field(self, client):
+        r = get_towers(client, f"lat={self._LAT}&lon={self._LON}&source=us", self._SYSTEMS)
+
+        assert r.status_code == 200
+        self._assert_contract(r.json()["towers"][0])
+
+    def test_post_row_keeps_every_consumed_field(self, client):
+        payload = {"lat": self._LAT, "lon": self._LON, "source": "us", "measurements": [self._MEASUREMENT]}
+
+        r = post_towers(client, payload, self._SYSTEMS)
+
+        assert r.status_code == 200
+        self._assert_contract(r.json()["towers"][0])
+
+    def test_ranks_stay_contiguous_from_one(self, client):
+        systems = [
+            system(
+                [
+                    device(515.0, 34.05, -84.6, callsign="A", eirp=100_000),
+                    device(521.0, 34.05, -84.6, callsign="B", eirp=100_000),
+                    device(527.0, 33.9, -84.35, callsign="C", eirp=3_000),
+                ],
+                licence_type="Broadcast",
+            )
+        ]
+
+        r = get_towers(client, f"lat={self._LAT}&lon={self._LON}&source=us", systems)
+
+        ranks = [t["rank"] for t in r.json()["towers"]]
+        assert ranks == list(range(1, len(ranks) + 1))
+
+    def test_the_query_and_count_keys_are_still_there(self, client):
+        r = get_towers(client, f"lat={self._LAT}&lon={self._LON}&source=us", self._SYSTEMS)
+
+        body = r.json()
+        assert body["count"] == len(body["towers"])
+        assert set(body["query"]) >= {
+            "latitude",
+            "longitude",
+            "altitude_m",
+            "radius_km",
+            "source",
+            "user_frequencies_mhz",
+        }
 
 
 # ── /api/elevation ───────────────────────────────────────────────────────────

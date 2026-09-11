@@ -10,6 +10,16 @@
       "UHF": 0,
       "FM": 0
     },
+    "diversity": {
+      "enabled": true,
+      "lambda": 0.7,
+      "same_site_same_band": 1.0,
+      "same_site_other_band": 0.5,
+      "bearing_sigma_deg": 30,
+      "distance_sigma_km": 15,
+      "other_band_factor": 0.5,
+      "site_radius_km": 1.0
+    },
     "sort_order": [
       {
         "field": "expected_area_km2",
