@@ -199,6 +199,9 @@ async def find_towers(
         if elev is not None:
             resolved_altitude = elev
 
+    # Filled in by process_and_rank; echoed back so a client can tell which
+    # ordering it got rather than inferring it from the rows.
+    diagnostics: dict = {}
     towers = process_and_rank(
         raw,
         lat,
@@ -207,6 +210,7 @@ async def find_towers(
         radius_km=effective_radius,
         user_frequencies=user_freqs,
         allowed_bands=allowed_bands_for_region(source),
+        diagnostics=diagnostics,
     )
     await _enrich_with_elevation(towers)
 
@@ -219,6 +223,7 @@ async def find_towers(
             "radius_km": effective_radius,
             "source": source,
             "user_frequencies_mhz": user_freqs,
+            "ranking": diagnostics.get("ranking"),
         },
         "count": len(towers),
     }
@@ -242,6 +247,7 @@ async def find_towers_with_measurements(payload: MeasurementPayload):
 
     raw = await _fetch_raw_towers(source, payload.lat, payload.lon, effective_radius)
 
+    diagnostics: dict = {}
     towers = process_and_rank(
         raw,
         payload.lat,
@@ -250,6 +256,7 @@ async def find_towers_with_measurements(payload: MeasurementPayload):
         radius_km=effective_radius,
         measurements=measurements,
         allowed_bands=allowed_bands_for_region(source),
+        diagnostics=diagnostics,
     )
     await _enrich_with_elevation(towers)
 
@@ -261,6 +268,12 @@ async def find_towers_with_measurements(payload: MeasurementPayload):
             "radius_km": effective_radius,
             "source": source,
             "measurement_count": len(measurements),
+            "ranking": diagnostics.get("ranking"),
+            # Null when the sweep carried fewer than two matched TV channels:
+            # the node can then tell "the model was corrected by what you sent"
+            # from "there was not enough to correct it with".
+            "calibration_offset_db": diagnostics.get("calibration_offset_db"),
+            "calibrated_towers": diagnostics.get("calibrated_towers", 0),
         },
         "count": len(towers),
     }
