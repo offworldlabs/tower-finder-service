@@ -1,4 +1,4 @@
-"""Admin authentication for the service's write endpoints.
+"""Bearer authentication for the service's write endpoints.
 
 The monolith gates `PUT /api/config` with a session-backed `require_admin` that
 resolves a user row from its users database. This service is stateless and has
@@ -11,6 +11,12 @@ disabled itself when the variable was missing would reinstate the exposure it
 exists to close, on the first deploy that forgot to set it. That is the opposite
 of the monolith's WS_AUTH_TOKEN convention, which fails open because an unset
 token there means a local development socket rather than a public write.
+
+Fleet feedback ingest gets its own secret (TOWER_FINDER_FEEDBACK_TOKEN) rather
+than reusing the admin one: every node in the fleet has to hold the feedback
+token, so a node that is lost or read would otherwise also hand over the ranking
+config. Both guards share the compare below so only one of them can be the
+constant-time one.
 """
 
 import hmac
@@ -19,23 +25,21 @@ import os
 from fastapi import HTTPException, Request
 
 ENV_VAR = "TOWER_FINDER_ADMIN_TOKEN"
+FEEDBACK_ENV_VAR = "TOWER_FINDER_FEEDBACK_TOKEN"
 
 
-def _configured_token() -> str:
+def _configured_token(env_var: str) -> str:
     # Read per request rather than binding at import. Tests set the variable
     # after this module is first imported, and reading late keeps the guard
     # honest when the process environment is changed under it.
-    return os.getenv(ENV_VAR, "").strip()
+    return os.getenv(env_var, "").strip()
 
 
-async def require_admin(request: Request) -> None:
-    """Reject anything not presenting the configured admin bearer token."""
-    configured = _configured_token()
+def _require_bearer(request: Request, env_var: str, disabled_detail: str) -> None:
+    """Reject anything not presenting the bearer token configured in `env_var`."""
+    configured = _configured_token(env_var)
     if not configured:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Config writes are disabled: {ENV_VAR} is not set",
-        )
+        raise HTTPException(status_code=503, detail=disabled_detail)
 
     scheme, _, presented = request.headers.get("authorization", "").partition(" ")
     presented = presented.strip()
@@ -49,3 +53,13 @@ async def require_admin(request: Request) -> None:
     # Constant-time either way: a plain == leaks the secret a byte at a time.
     if not hmac.compare_digest(presented.encode("utf-8"), configured.encode("utf-8")):
         raise HTTPException(status_code=401, detail="unauthorized")
+
+
+async def require_admin(request: Request) -> None:
+    """Reject anything not presenting the configured admin bearer token."""
+    _require_bearer(request, ENV_VAR, f"Config writes are disabled: {ENV_VAR} is not set")
+
+
+async def require_feedback_token(request: Request) -> None:
+    """Reject anything not presenting the configured fleet-feedback bearer token."""
+    _require_bearer(request, FEEDBACK_ENV_VAR, f"Feedback is disabled: {FEEDBACK_ENV_VAR} is not set")

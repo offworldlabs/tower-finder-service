@@ -20,6 +20,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from routes.geocode import router as geocode_router
+from routes.feedback import router as feedback_router
 from routes.towers import router
 from services.region_lookup import warm_borders
 
@@ -62,6 +63,9 @@ def create_app() -> FastAPI:
     )
     application.include_router(router)
     application.include_router(geocode_router)
+    # Shares the /api first segment with the router above, so the SPA catch-all
+    # keeps 404-ing unknown feedback paths rather than serving index.html.
+    application.include_router(feedback_router)
 
     # Mounted AFTER the API router so /api/* keeps winning; the catch-all below
     # would otherwise swallow it. Absent in a bare checkout where nobody has run
