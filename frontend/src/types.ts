@@ -52,3 +52,18 @@ export interface ElevationResponse {
   longitude: number;
   elevation_m: number;
 }
+
+/** /api/geocode response */
+export interface GeocodeResponse {
+  /** Echo of what was asked for, so a late reply can be told from a current one. */
+  query: string;
+  latitude: number;
+  longitude: number;
+  matched_address: string;
+  provider: "census" | "nominatim";
+  /** How specific the match is. Anything other than "street" is a centroid:
+   *  the ranking grids its disk in 2 km cells and applies a radio-horizon
+   *  check, so a city-centre point can sit 10 km from the real site and come
+   *  back with a different answer. The form says so when it does. */
+  precision: "street" | "postcode" | "locality";
+}

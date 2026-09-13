@@ -30,6 +30,7 @@ API, so a deployed service is a single container with no separate web host.
 Optional env vars:
 - `MAPRAD_API_KEY` — required for non-US queries; US can fall back to FCC only.
 - `TOWER_FINDER_RUNTIME_DIR` — where `tower_config.json` is read/written (default `./data/runtime/`). On first start the runtime overlay is seeded from `backend/config/tower_config.json`.
+- `TOWER_FINDER_GEOCODER_CONTACT` — contact string in the `User-Agent` `POST /api/geocode` sends to Nominatim (default the repo URL). Nominatim's usage policy requires an identifying contact and one request per second; unidentified traffic gets blocked, and it is the fallback for city and ZIP lookups.
 - `TOWER_FINDER_ADMIN_TOKEN` — shared secret gating `PUT /api/config`, presented as `Authorization: Bearer <token>`. Unset closes the endpoint (503) rather than opening it, so a deploy that omits it cannot silently expose a public config write.
 
 ## API
@@ -39,6 +40,7 @@ Optional env vars:
 | GET | `/api/towers?lat&lon&altitude&radius_km&limit&source&frequencies` | Ranked towers near (lat, lon) using model-based scoring (EIRP, FSPL). Ranked by band tier first (VHF and UHF tie, FM last), then measured score where a sweep supplied one, then modelled received power. `frequencies` boosts towers near a frequency the caller names, in MHz; it never drops one. Accepts both spellings a client might send: comma-separated (`frequencies=95.5,101.1`) and repeated (`frequencies=95.5&frequencies=101.1`), including a mix of the two. Up to ten values are used and echoed back as `query.user_frequencies_mhz`. Stations licensed on one transmitter (FCC channel-sharing pairs, LPFM time-shares) are merged into a single row; the partners' callsigns are listed in `shared_callsigns`. |
 | POST | `/api/towers` | Same tower search, enriched with spectrum-analyser measurements. Body: `MeasurementPayload` (see `backend/models/measurements.py`). Only towers the SDR can see are returned — unmatched towers are excluded. Matched towers carry real measured fields (`snr_db`, `score`, `obw_fraction`, `power_db`, `measured=true`). At most 2000 measurements per request, 422 beyond that: ranking pairs every tower with every measurement, synchronously on the one event loop. |
 | GET | `/api/elevation?lat&lon` | Ground elevation at a point. The search form pre-fills altitude from this; `GET /api/towers` resolves altitude itself when none is given. 503 when the upstream cannot be reached, 404 for a point it has no data for: two different facts, so a caller can tell an outage from a gap. `GET /api/towers` treats both as best-effort and still returns towers, with a null elevation. |
+| POST | `/api/geocode` | Address, place or ZIP → a point, for the search box. Body `{"query": "..."}`, 1–200 characters once stripped. Tries the US Census geocoder first (authoritative for street addresses, unkeyed, no usage policy) and falls back to Nominatim, which is the only one of the two that answers a city or a bare ZIP. `precision` (`street`/`postcode`/`locality`) says how far to trust the point; the form warns on anything below street level, since a city-centre fix can sit 10 km from the real site. 404 when both answered and neither knew it, 503 when one could not be reached and no other matched — a search box has to tell "check the spelling" from "try again". Unauthenticated, so it is capped at four concurrent lookups, caches for 24 h, and holds Nominatim to its one request per second. The query text is never logged. |
 | GET | `/api/config` | Current ranking config (bands, band priority, sort order, defaults). |
 | PUT | `/api/config` | Replace ranking config; sanity-capped at 1 MB. Requires the admin bearer token (see `TOWER_FINDER_ADMIN_TOKEN`). Validated and applied before it is written (400 if either fails), so the file on the persistent volume only ever holds a config the running process has accepted. |
 
@@ -48,6 +50,8 @@ Optional env vars:
 | --- | --- |
 | `app.py` | FastAPI entry point |
 | `backend/routes/towers.py` | HTTP routes |
+| `backend/routes/geocode.py` | `POST /api/geocode` |
+| `backend/services/geocode.py` | Address lookup: Census then Nominatim, with the cache, fan-out cap and throttle |
 | `backend/services/tower_ranking.py` | Ranking algorithm + config loader/validator |
 | `backend/services/tower_coverage.py` | Optional n>=2 coverage-area-added scoring, injected into the ranking as a `coverage_scorer` |
 | `backend/clients/fcc.py` | FCC TV/FM Query CGI client |
