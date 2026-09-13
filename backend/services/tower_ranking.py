@@ -170,10 +170,30 @@ def validate_config(cfg: dict) -> str | None:
     if not isinstance(cfg, dict):
         return f"config must be an object, got {type(cfg).__name__}"
 
-    for section in ("receiver", "ranking", "search", "broadcast_bands"):
+    for section in ("receiver", "ranking", "search", "broadcast_bands", "propagation"):
         value = cfg.get(section)
         if value is not None and not isinstance(value, dict):
             return f"{section} must be an object, got {type(value).__name__}"
+
+    propagation = cfg.get("propagation", {})
+    if "model" in propagation and propagation["model"] not in PROPAGATION_MODELS:
+        allowed = ", ".join(PROPAGATION_MODELS)
+        return f"propagation.model must be one of {allowed}, got {propagation['model']!r}"
+    if "environment" in propagation and propagation["environment"] not in ENVIRONMENTS:
+        allowed = ", ".join(ENVIRONMENTS)
+        return f"propagation.environment must be one of {allowed}, got {propagation['environment']!r}"
+    for key in ("rx_height_m", "beam_tilt_deg", "max_underbeam_loss_db"):
+        if key in propagation and (not _is_number(propagation[key]) or propagation[key] < 0):
+            return f"propagation.{key} must be a non-negative number, got {propagation[key]!r}"
+    beamwidths = propagation.get("vertical_beamwidth_deg")
+    if beamwidths is not None:
+        if not isinstance(beamwidths, dict):
+            return f"propagation.vertical_beamwidth_deg must be an object of band: degrees, got {type(beamwidths).__name__}"
+        # A zero here is a division by zero inside underbeam_loss() on every
+        # search; a negative one makes the derating grow the wrong way.
+        for band, width in beamwidths.items():
+            if not _is_number(width) or width <= 0:
+                return f"propagation.vertical_beamwidth_deg[{band!r}] must be a positive number, got {width!r}"
 
     receiver = cfg.get("receiver", {})
     for key in ("rx_antenna_gain_dbi", "sensitivity_dbm"):
@@ -248,7 +268,21 @@ CONFIG_SETTINGS = (
     "SORT_ORDER",
     "DEFAULT_RADIUS_KM",
     "DEFAULT_LIMIT",
+    "PROPAGATION_MODEL",
+    "ENVIRONMENT",
+    "RX_HEIGHT_M",
+    "BEAM_TILT_DEG",
+    "VERTICAL_BEAMWIDTH_DEG",
+    "MAX_UNDERBEAM_LOSS_DB",
 )
+
+PROPAGATION_MODELS = ("hata", "free_space")
+ENVIRONMENTS = ("open", "suburban", "urban")
+
+# Vertical half-power beamwidth of a typical broadcast transmit antenna, by
+# band. A high-gain UHF panel array is a degree or two; VHF high-band a few;
+# an FM multi-bay ring is wider. Unknown bands fall back to the VHF figure.
+DEFAULT_VERTICAL_BEAMWIDTH_DEG = {"FM": 8.0, "VHF": 4.0, "UHF": 2.0}
 
 
 def apply_config(cfg: dict) -> None:
@@ -265,6 +299,8 @@ def apply_config(cfg: dict) -> None:
     global RX_ANTENNA_GAIN_DBI, SENSITIVITY_DBM
     global BROADCAST_BANDS, BAND_PRIORITY, SORT_ORDER
     global DEFAULT_RADIUS_KM, DEFAULT_LIMIT
+    global PROPAGATION_MODEL, ENVIRONMENT, RX_HEIGHT_M
+    global BEAM_TILT_DEG, VERTICAL_BEAMWIDTH_DEG, MAX_UNDERBEAM_LOSS_DB
 
     rx = cfg.get("receiver", {})
     rx_gain = rx.get("rx_antenna_gain_dbi", 6.0)
@@ -305,6 +341,21 @@ def apply_config(cfg: dict) -> None:
     radius_km = search.get("default_radius_km", 80)
     limit = search.get("default_limit", 20)
 
+    # An overlay written before this section existed gets the terrestrial
+    # model, not free space: the point of the change is that every deployment
+    # stops quoting free-space numbers, and a config PUT is not the trigger
+    # for that. Free space is one line of config away for anyone who wants it.
+    propagation = cfg.get("propagation", {})
+    model = propagation.get("model", "hata")
+    environment = propagation.get("environment", "suburban")
+    rx_height = float(propagation.get("rx_height_m", 5.0))
+    beam_tilt = float(propagation.get("beam_tilt_deg", 1.0))
+    beamwidths = {
+        **DEFAULT_VERTICAL_BEAMWIDTH_DEG,
+        **{band: float(w) for band, w in propagation.get("vertical_beamwidth_deg", {}).items()},
+    }
+    max_underbeam = float(propagation.get("max_underbeam_loss_db", 20.0))
+
     # Nothing above this line touches module state, and nothing below it can fail.
     RX_ANTENNA_GAIN_DBI = rx_gain
     SENSITIVITY_DBM = sensitivity
@@ -313,6 +364,12 @@ def apply_config(cfg: dict) -> None:
     SORT_ORDER = sort_order
     DEFAULT_RADIUS_KM = radius_km
     DEFAULT_LIMIT = limit
+    PROPAGATION_MODEL = model
+    ENVIRONMENT = environment
+    RX_HEIGHT_M = rx_height
+    BEAM_TILT_DEG = beam_tilt
+    VERTICAL_BEAMWIDTH_DEG = beamwidths
+    MAX_UNDERBEAM_LOSS_DB = max_underbeam
 
 
 def reload_config():
@@ -410,9 +467,114 @@ def fspl(distance_km: float, freq_mhz: float) -> float:
     return 20 * math.log10(d_m) + 20 * math.log10(f_hz) - 147.55
 
 
-def received_power(eirp_dbm: float, distance_km: float, freq_mhz: float) -> float:
-    """Estimated received power (dBm) at a small directional antenna."""
-    return eirp_dbm + RX_ANTENNA_GAIN_DBI - fspl(distance_km, freq_mhz)
+# Okumura-Hata's stated validity. Inputs are clamped to it rather than refused:
+# a 320 m mast or an FM frequency is a real tower, and the formula's excess over
+# free space at the edge of its range is a better estimate for it than free
+# space is. Below 1 km the excess is held at its 1 km value, so the loss keeps
+# falling with distance the way free space does instead of flattening out.
+HATA_FREQ_MHZ = (150.0, 1500.0)
+HATA_TX_HEIGHT_M = (30.0, 200.0)
+HATA_RX_HEIGHT_M = (1.0, 10.0)
+HATA_MIN_DISTANCE_KM = 1.0
+
+
+def _clamp(value: float, bounds: tuple[float, float]) -> float:
+    return min(bounds[1], max(bounds[0], value))
+
+
+def hata_excess_loss(
+    distance_km: float,
+    freq_mhz: float,
+    tx_height_m: float,
+    rx_height_m: float,
+    environment: str,
+) -> float:
+    """Okumura-Hata loss in excess of free space, in dB, never negative.
+
+    Free space is the floor because a tower you can see is at least free
+    space away and the open-area correction can dip below it at short range
+    from a tall mast. Everything beyond that floor is what a low receive
+    antenna pays for terrain and clutter that the free-space model ignores,
+    which is the whole difference between a tower's licensed EIRP and what a
+    receiver a few metres off the ground hears: the earlier model was 20 to
+    50 dB optimistic against measurements on a real installation.
+
+    `environment` is Okumura's own vocabulary: "urban" (small/medium city
+    form), "suburban", or "open" (nothing within a few hundred metres).
+    """
+    d = max(distance_km, HATA_MIN_DISTANCE_KM)
+    f = _clamp(freq_mhz, HATA_FREQ_MHZ)
+    hb = _clamp(tx_height_m, HATA_TX_HEIGHT_M)
+    hm = _clamp(rx_height_m, HATA_RX_HEIGHT_M)
+    log_f = math.log10(f)
+    log_hb = math.log10(hb)
+    a_hm = (1.1 * log_f - 0.7) * hm - (1.56 * log_f - 0.8)
+    urban = 69.55 + 26.16 * log_f - 13.82 * log_hb - a_hm + (44.9 - 6.55 * log_hb) * math.log10(d)
+    if environment == "suburban":
+        loss = urban - 2 * (math.log10(f / 28.0)) ** 2 - 5.4
+    elif environment == "open":
+        loss = urban - 4.78 * log_f**2 + 18.33 * log_f - 40.94
+    else:
+        loss = urban
+    return max(0.0, loss - fspl(d, f))
+
+
+def path_loss(distance_km: float, freq_mhz: float, tx_height_m: float | None) -> tuple[float, float]:
+    """(total path loss dB, the part of it in excess of free space).
+
+    The excess is 0 under the free-space model, and under the terrestrial
+    model when the tower's height is unknown it is computed for a 100 m mast,
+    the same stand-in the sensitivity filter has always relied on implicitly:
+    a tower with no height on record is still a tower, and refusing to model
+    it would rank it on free space alone, above every tower that does have one.
+    """
+    free = fspl(distance_km, freq_mhz)
+    if PROPAGATION_MODEL == "free_space" or distance_km <= 0 or freq_mhz <= 0:
+        return free, 0.0
+    height = tx_height_m if tx_height_m is not None and tx_height_m > 0 else 100.0
+    excess = hata_excess_loss(distance_km, freq_mhz, height, RX_HEIGHT_M, ENVIRONMENT)
+    return free + excess, excess
+
+
+def underbeam_loss(distance_km: float, tx_height_m: float | None, band: str | None) -> float:
+    """dB the licensed EIRP overstates a receiver sitting under the main beam.
+
+    A broadcast antenna's power is concentrated in a beam a few degrees
+    tall, aimed a degree or so below horizontal so it lands on the coverage
+    area, not the sky. A receiver close to a tall mast sits well below that
+    beam: 3 km from a 300 m mast is 6 degrees down, where a UHF panel array is
+    20 dB or more below its peak. The model is a parabolic main lobe in dB,
+    12 * (angle / half-power beamwidth)^2, capped at `max_underbeam_loss_db`
+    to stand in for the null fill and sidelobes real arrays are built with.
+    Distance is ground range and height is above ground: the site's own
+    elevation above the receiver is not known here, so a hilltop mast is
+    derated less than it should be, never more.
+    """
+    if MAX_UNDERBEAM_LOSS_DB <= 0 or distance_km <= 0 or tx_height_m is None or tx_height_m <= 0:
+        return 0.0
+    depression_deg = math.degrees(math.atan2(tx_height_m, distance_km * 1000.0))
+    below_beam = depression_deg - BEAM_TILT_DEG
+    if below_beam <= 0:
+        return 0.0
+    beamwidth = VERTICAL_BEAMWIDTH_DEG.get(band or "", DEFAULT_VERTICAL_BEAMWIDTH_DEG["VHF"])
+    return min(MAX_UNDERBEAM_LOSS_DB, 12.0 * (below_beam / beamwidth) ** 2)
+
+
+def received_power(
+    eirp_dbm: float,
+    distance_km: float,
+    freq_mhz: float,
+    tx_height_m: float | None = None,
+    band: str | None = None,
+) -> float:
+    """Estimated received power (dBm) at a small directional antenna.
+
+    What a receiver with `receiver.rx_antenna_gain_dbi` of gain, pointed at the
+    tower and polarisation-matched, hears at the configured height. Not what an
+    indoor whip hears: that installation-specific loss is the node's to measure.
+    """
+    loss, _ = path_loss(distance_km, freq_mhz, tx_height_m)
+    return eirp_dbm + RX_ANTENNA_GAIN_DBI - loss - underbeam_loss(distance_km, tx_height_m, band)
 
 
 def classify_band(freq_mhz: float) -> str | None:
@@ -652,6 +814,52 @@ def _merge_shared_transmitters(towers: list) -> list:
     return merged
 
 
+# Grid cell for the mast lookup below, in degrees. Wider than the borrowing
+# radius, so a mast within that radius is always in the record's own cell or one
+# of the eight around it, and the lookup reads nine cells instead of every mast.
+_MAST_CELL_DEG = 0.01
+
+
+def _mast_cell(lat: float, lon: float) -> tuple[int, int]:
+    return (math.floor(lat / _MAST_CELL_DEG), math.floor(lon / _MAST_CELL_DEG))
+
+
+def _mast_heights(raw_systems: list) -> dict[tuple[int, int], list[tuple[float, float, float]]]:
+    """(lat, lon, antenna height) of every record that carries a height, by grid cell."""
+    masts: dict[tuple[int, int], list[tuple[float, float, float]]] = {}
+    for system in raw_systems:
+        for device in system.get("devices") or []:
+            height = _as_float(device.get("antennaHeight"))
+            if not height or height <= 0:
+                continue
+            coords = parse_geom((device.get("location") or {}).get("geom"))
+            if coords is not None:
+                masts.setdefault(_mast_cell(*coords), []).append((coords[0], coords[1], height))
+    return masts
+
+
+def _borrowed_mast_height(
+    lat: float, lon: float, masts: dict[tuple[int, int], list[tuple[float, float, float]]]
+) -> float | None:
+    """Tallest height on record within SHARED_TRANSMITTER_RADIUS_KM, or None.
+
+    The same radius the channel-sharing merge uses to call two records one
+    transmitter: records of one mast differ by metres between sources, and a
+    rounding bucket would split them at its edges, which is why the grid here
+    is only an index and the radius is what decides.
+    """
+    cell_lat, cell_lon = _mast_cell(lat, lon)
+    best = None
+    for di in (-1, 0, 1):
+        for dj in (-1, 0, 1):
+            for mast_lat, mast_lon, height in masts.get((cell_lat + di, cell_lon + dj), ()):
+                if (best is None or height > best) and haversine(
+                    lat, lon, mast_lat, mast_lon
+                ) <= SHARED_TRANSMITTER_RADIUS_KM:
+                    best = height
+    return best
+
+
 def process_and_rank(
     raw_systems: list,
     user_lat: float,
@@ -693,6 +901,7 @@ def process_and_rank(
     effective_radius = radius_km if radius_km > 0 else DEFAULT_RADIUS_KM
     effective_limit = limit if limit > 0 else DEFAULT_LIMIT
     towers = []
+    masts = _mast_heights(raw_systems)
 
     for system in raw_systems:
         licence = system.get("licence") or {}
@@ -725,9 +934,18 @@ def process_and_rank(
                 # Reasonable default for a broadcast tower
                 eirp = 50.0 if band == "FM" else 60.0
 
-            pwr = received_power(eirp, dist, freq_val)
+            tx_height = _as_float(device.get("antennaHeight"))
+            if not tx_height or tx_height <= 0:
+                # Low-power FCC records often carry 0 while the full-power
+                # station on the same mast carries the real height. Same
+                # mast, same beam: the derating must not depend on which
+                # record it came from.
+                tx_height = _borrowed_mast_height(tower_lat, tower_lon, masts)
+            pwr = received_power(eirp, dist, freq_val, tx_height, band)
             if pwr < SENSITIVITY_DBM:
                 continue
+            total_loss, excess_loss = path_loss(dist, freq_val, tx_height)
+            underbeam = underbeam_loss(dist, tx_height, band)
 
             brg = initial_bearing(user_lat, user_lon, tower_lat, tower_lon)
 
@@ -754,6 +972,11 @@ def process_and_rank(
                     "bearing_cardinal": bearing_to_cardinal(brg),
                     "received_power_dbm": round(pwr, 1),
                     "eirp_dbm": round(eirp, 1),
+                    # How the power was arrived at, so a reader can see why a
+                    # tower 3 km away is not the loudest thing on the list.
+                    "path_loss_db": round(total_loss, 1),
+                    "excess_path_loss_db": round(excess_loss, 1),
+                    "underbeam_loss_db": round(underbeam, 1),
                     "licence_type": licence.get("type") or "",
                     "licence_subtype": licence.get("subtype") or "",
                     "frequency_matched": freq_matched,

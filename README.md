@@ -36,11 +36,42 @@ Optional env vars:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/towers?lat&lon&altitude&radius_km&limit&source&frequencies` | Ranked towers near (lat, lon) using model-based scoring (EIRP, FSPL). Ranked by band tier first (VHF and UHF tie, FM last), then measured score where a sweep supplied one, then modelled received power. `frequencies` boosts towers near a frequency the caller names, in MHz; it never drops one. Accepts both spellings a client might send: comma-separated (`frequencies=95.5,101.1`) and repeated (`frequencies=95.5&frequencies=101.1`), including a mix of the two. Up to ten values are used and echoed back as `query.user_frequencies_mhz`. Stations licensed on one transmitter (FCC channel-sharing pairs, LPFM time-shares) are merged into a single row; the partners' callsigns are listed in `shared_callsigns`. |
+| GET | `/api/towers?lat&lon&altitude&radius_km&limit&source&frequencies` | Ranked towers near (lat, lon) using model-based scoring: licensed EIRP, a terrestrial path-loss model and an under-beam derating for towers close to a tall mast (see "Path-loss model"). Each row carries the breakdown as `path_loss_db`, `excess_path_loss_db` and `underbeam_loss_db`. Ranked by band tier first (VHF and UHF tie, FM last), then measured score where a sweep supplied one, then modelled received power. `frequencies` boosts towers near a frequency the caller names, in MHz; it never drops one. Accepts both spellings a client might send: comma-separated (`frequencies=95.5,101.1`) and repeated (`frequencies=95.5&frequencies=101.1`), including a mix of the two. Up to ten values are used and echoed back as `query.user_frequencies_mhz`. Stations licensed on one transmitter (FCC channel-sharing pairs, LPFM time-shares) are merged into a single row; the partners' callsigns are listed in `shared_callsigns`. |
 | POST | `/api/towers` | Same tower search, enriched with spectrum-analyser measurements. Body: `MeasurementPayload` (see `backend/models/measurements.py`). Only towers the SDR can see are returned — unmatched towers are excluded. Matched towers carry real measured fields (`snr_db`, `score`, `obw_fraction`, `power_db`, `measured=true`). At most 2000 measurements per request, 422 beyond that: ranking pairs every tower with every measurement, synchronously on the one event loop. |
 | GET | `/api/elevation?lat&lon` | Ground elevation at a point. The search form pre-fills altitude from this; `GET /api/towers` resolves altitude itself when none is given. 503 when the upstream cannot be reached, 404 for a point it has no data for: two different facts, so a caller can tell an outage from a gap. `GET /api/towers` treats both as best-effort and still returns towers, with a null elevation. |
 | GET | `/api/config` | Current ranking config (bands, band priority, sort order, defaults). |
 | PUT | `/api/config` | Replace ranking config; sanity-capped at 1 MB. Requires the admin bearer token (see `TOWER_FINDER_ADMIN_TOKEN`). Validated and applied before it is written (400 if either fails), so the file on the persistent volume only ever holds a config the running process has accepted. |
+
+## Path-loss model
+
+`received_power_dbm` is what a receiver with `receiver.rx_antenna_gain_dbi` of
+gain, pointed at the tower and polarisation-matched, hears at
+`propagation.rx_height_m` above ground. It is not what an indoor whip hears: on
+one home installation the measured levels sat 20 to 50 dB below the earlier
+free-space figures, and most of that was the antenna, the polarisation, the
+walls and the measurement bandwidth rather than the path. Those are the node's
+to measure (the sweep-calibrated POST route and the fleet feedback do that);
+the model's job is the part that is the same for everyone.
+
+Two terms do that, both in the `propagation` config section:
+
+- **Terrestrial loss.** `model: "hata"` adds Okumura-Hata's loss in excess of
+  free space for the tower's mast height, the receiver height and
+  `environment` (`open`, `suburban`, `urban`; shipped `suburban`). The excess is
+  never negative, so a tower in plain view is still free space away. Inputs
+  outside the formula's validity (FM below 150 MHz, masts above 200 m, ranges
+  under 1 km) are clamped to its edge rather than refused. `model: "free_space"`
+  is the previous behaviour, one line away.
+- **Under-beam derating.** A broadcast antenna's beam is a few degrees tall and
+  tilted `beam_tilt_deg` below horizontal, so a receiver 3 km from a 300 m mast
+  sits 6 degrees under it, where a UHF panel array is 20 dB down. The derating
+  is a parabolic main lobe, `12 * (angle / beamwidth)^2`, per band from
+  `vertical_beamwidth_deg`, capped at `max_underbeam_loss_db` for the null fill
+  real arrays have. Height is above ground, so a hilltop mast is derated less
+  than it should be, never more. A zero cap disables it.
+
+Both apply to the direct path only. An overlay written before this section
+existed gets the shipped model, not free space: nothing needs a config PUT.
 
 ## Layout
 
