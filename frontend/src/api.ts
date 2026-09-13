@@ -1,4 +1,4 @@
-import type { ElevationResponse, TowerSearchResponse } from "./types";
+import type { ElevationResponse, GeocodeResponse, TowerSearchResponse } from "./types";
 
 const API_BASE = "/api";
 
@@ -58,4 +58,36 @@ export async function fetchElevation(
   if (!res.ok) return null;
   const data: ElevationResponse = await res.json();
   return data.elevation_m;
+}
+
+/**
+ * Turn an address typed by the operator into a coordinate.
+ *
+ * POSTed rather than sent as a query string: the address is free text that
+ * would otherwise land in server access logs and browser history, and it is
+ * long enough (200 chars) to be awkward in a URL.
+ *
+ * Throws with the server's `detail` so the form can show the server's own
+ * wording — "No match for that address" (404), "Address lookup is unavailable
+ * right now" (503) — instead of inventing one per status code. A 422 answers
+ * with pydantic's array of errors, which is not a sentence, so that case falls
+ * through to the generic message the same way fetchTowers handles it.
+ */
+export async function geocodeAddress(
+  query: string,
+  signal?: AbortSignal,
+): Promise<GeocodeResponse> {
+  const res = await fetch(`${API_BASE}/geocode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query }),
+    signal,
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(
+      typeof body.detail === "string" ? body.detail : `Request failed (${res.status})`,
+    );
+  }
+  return res.json();
 }

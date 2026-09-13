@@ -88,12 +88,14 @@ _COLUMNS = (
     "callsign",
     "source",
     "outcome",
+    "run_id",
     "max_evidence",
     "max_detections",
     "duration_s",
     "gain_a",
     "gain_b",
     "lna_state",
+    "device_error",
     "verified_range_p85_km",
     "adsb_match_rate",
     "snr_median_db",
@@ -114,12 +116,14 @@ CREATE TABLE IF NOT EXISTS tower_outcomes (
     callsign TEXT,
     source TEXT NOT NULL,
     outcome TEXT NOT NULL,
+    run_id TEXT,
     max_evidence INTEGER,
     max_detections INTEGER,
     duration_s REAL,
     gain_a INTEGER,
     gain_b INTEGER,
     lna_state INTEGER,
+    device_error INTEGER,
     verified_range_p85_km REAL,
     adsb_match_rate REAL,
     snr_median_db REAL,
@@ -129,6 +133,8 @@ CREATE TABLE IF NOT EXISTS tower_outcomes (
 );
 CREATE INDEX IF NOT EXISTS idx_tower_outcomes_rx ON tower_outcomes (rx_lat, rx_lon);
 CREATE INDEX IF NOT EXISTS idx_tower_outcomes_key ON tower_outcomes (tower_key);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tower_outcomes_run
+    ON tower_outcomes (node_id, run_id, tower_key) WHERE run_id IS NOT NULL;
 """
 
 # One writer at a time. FastAPI runs this service on a single worker, but route
@@ -210,6 +216,10 @@ def record_many(rows: Iterable[dict]) -> int:
 
     Rows arrive already validated (models.feedback.TowerOutcome), so this only
     fills observed_at/received_at and derives the group keys.
+
+    A row whose (node_id, run_id, tower) is already in the table is dropped and
+    not counted: a node retrying a post after a timeout must not double its
+    run's weight. Rows without a run_id are always inserted.
     """
     rows = list(rows)
     if not rows:
@@ -230,19 +240,24 @@ def record_many(rows: Iterable[dict]) -> int:
         )
 
     placeholders = ", ".join("?" * (len(_COLUMNS) + 4))
+    # OR IGNORE against the partial unique index on (node_id, run_id, tower_key):
+    # the conflict is the whole dedupe, so it costs nothing on rows without a
+    # run_id and needs no read-before-write.
     sql = (
-        f"INSERT INTO tower_outcomes (received_at, observed_at, {', '.join(_COLUMNS)}, tower_key, rx_cell) "
+        f"INSERT OR IGNORE INTO tower_outcomes (received_at, observed_at, {', '.join(_COLUMNS)}, tower_key, rx_cell) "
         f"VALUES ({placeholders})"
     )
     with _LOCK:
         conn = _connect()
         try:
             with conn:
-                conn.executemany(sql, params)
+                # executemany sums the modified-row count over the batch, and an
+                # ignored insert modifies nothing, so this is the stored count.
+                stored = conn.executemany(sql, params).rowcount
                 _prune(conn)
         finally:
             conn.close()
-    return len(rows)
+    return stored
 
 
 def record(row: dict) -> int:

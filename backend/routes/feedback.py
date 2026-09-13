@@ -21,12 +21,16 @@ async def post_tower_outcome(payload: TowerOutcome | TowerOutcomeBatch):
 
     Accepts one row or a batch of up to 100. A node reports one row per
     candidate it tried; the archive job posts windows of aggregates.
+
+    `ignored` counts rows already held for the same (node, run, tower). A
+    retried post therefore answers 200 with everything ignored, which is the
+    reply a node wants: the run is on record, stop retrying.
     """
     rows = payload if isinstance(payload, list) else [payload]
     # In a thread: SQLite commits fsync, and this service runs one worker, so
     # doing it inline would stall every in-flight tower search behind the disk.
     stored = await run_in_threadpool(tower_feedback.record_many, [row.model_dump() for row in rows])
-    return {"stored": stored}
+    return {"stored": stored, "ignored": len(rows) - stored}
 
 
 @router.get("/summary", dependencies=[Depends(require_admin)])

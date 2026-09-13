@@ -107,6 +107,38 @@ class TestRoundTrip:
         assert stored["observed_at"]
         assert stored["received_at"]
 
+    def test_calibration_fields_have_columns(self, store):
+        model = TowerOutcome(**row(run_id="run-1", device_error=True, gain_a=41, gain_b=35, lna_state=6))
+        assert tower_feedback.record(model.model_dump()) == 1
+
+        conn = sqlite3.connect(store)
+        conn.row_factory = sqlite3.Row
+        stored = conn.execute("SELECT * FROM tower_outcomes").fetchone()
+        conn.close()
+        assert stored["run_id"] == "run-1"
+        assert stored["device_error"] == 1
+        assert (stored["gain_a"], stored["gain_b"], stored["lna_state"]) == (41, 35, 6)
+
+    def test_a_run_is_stored_once_per_tower(self, store):
+        run = [row(run_id="run-1"), row(run_id="run-1", fc_hz=101_100_000.0)]
+        assert tower_feedback.record_many(run) == 2
+        # The retry, and a partial retry, both land nothing.
+        assert tower_feedback.record_many(run) == 0
+        assert tower_feedback.record_many(run[:1]) == 0
+        # Same run id from another node, or another tower in this run: new rows.
+        assert tower_feedback.record_many([row(run_id="run-1", node_id="node-2")]) == 1
+        assert tower_feedback.record_many([row(run_id="run-1", fc_hz=105_500_000.0)]) == 1
+
+        conn = sqlite3.connect(store)
+        assert conn.execute("SELECT COUNT(*) FROM tower_outcomes").fetchone()[0] == 4
+        conn.close()
+
+    def test_a_duplicate_inside_one_batch_is_stored_once(self, store):
+        assert tower_feedback.record_many([row(run_id="run-1"), row(run_id="run-1")]) == 1
+
+    def test_rows_without_a_run_id_are_never_deduplicated(self, store):
+        assert tower_feedback.record_many([row(), row()]) == 2
+
     def test_empty_batch_is_not_a_write(self, store):
         assert tower_feedback.record_many([]) == 0
         assert not store.exists()

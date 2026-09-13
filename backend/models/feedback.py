@@ -2,9 +2,14 @@
 
 Two producers post the same row shape:
 
-* ``calibration`` — a node's Auto-Calibrate, one row per candidate tower it
-  tried, carrying what the tuner actually saw (``outcome``, ``max_evidence``,
-  ``max_detections``, the gains it settled on).
+* ``calibration`` — a node's Auto-Calibrate (retina-gui's calibrator), one
+  row per candidate tower it tried, carrying what the tuner actually saw
+  (``outcome``, ``max_evidence``, ``max_detections``, the gains it settled on).
+  The row is a flattening of one entry in the run's ``history``: ``tower_name``
+  becomes ``callsign``, ``fc`` is ``fc_hz``, ``final_gain_a`` / ``final_gain_b``
+  / ``final_lna_state`` are the gains, ``dwell_seconds`` is ``duration_s``. The
+  receiver position and the current tower's transmitter come from the node's
+  merged config; an alternate tower carries its own ``tx`` block.
 * ``archive`` — a later retina-server job, one row per tower per window,
   carrying archive-derived aggregates (verified range, ADS-B match rate).
 
@@ -69,6 +74,14 @@ class TowerOutcome(BaseModel):
     callsign: str | None = Field(None, max_length=32, description="Callsign, when the node knows one")
     source: Literal["calibration", "archive"] = Field(..., description="Which producer wrote this row")
     outcome: Outcome = Field(..., description="What happened; 'observed' is archive-only")
+    # Optional, but a node should always send one. A node that times out on
+    # the post and retries would otherwise land the same run twice, and every
+    # duplicate doubles that run's weight in the correction. Rows carrying a
+    # run_id are stored once per (node, run, tower); rows without one are
+    # never deduplicated, because there is nothing to deduplicate them on.
+    run_id: str | None = Field(
+        None, min_length=1, max_length=64, description="Node-side id of the run this row came from"
+    )
 
     # ── Calibration fields ───────────────────────────────────────────────────
     max_evidence: int | None = Field(None, ge=0, le=2, description="0 none, 1 detections, 2 active track")
@@ -79,6 +92,11 @@ class TowerOutcome(BaseModel):
     gain_a: int | None = Field(None, ge=0, le=255, description="Final gain A")
     gain_b: int | None = Field(None, ge=0, le=255, description="Final gain B")
     lna_state: int | None = Field(None, ge=0, le=255, description="Final LNA state")
+    # The calibrator sets this when the SDR wedged or stopped answering on a
+    # candidate rather than reporting a clean overload. Kept apart from
+    # `outcome`: an unstable_overload with a device error says less about the
+    # tower than one without, and a later fit may want to weight them apart.
+    device_error: bool | None = Field(None, description="True when the SDR wedged on this candidate")
 
     # ── Archive fields ───────────────────────────────────────────────────────
     verified_range_p85_km: float | None = Field(None, ge=0, le=2000, description="p85 verified range, km")

@@ -86,5 +86,17 @@
   "search": {
     "default_radius_km": 80,
     "default_limit": 100
+  },
+  "propagation": {
+    "model": "hata",
+    "environment": "suburban",
+    "rx_height_m": 5.0,
+    "beam_tilt_deg": 1.0,
+    "vertical_beamwidth_deg": {
+      "FM": 8.0,
+      "VHF": 4.0,
+      "UHF": 2.0
+    },
+    "max_underbeam_loss_db": 20.0
   }
 }

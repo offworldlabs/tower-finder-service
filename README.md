@@ -30,17 +30,21 @@ API, so a deployed service is a single container with no separate web host.
 Optional env vars:
 - `MAPRAD_API_KEY` — required for non-US queries; US can fall back to FCC only.
 - `TOWER_FINDER_RUNTIME_DIR` — where `tower_config.json` is read/written (default `./data/runtime/`). On first start the runtime overlay is seeded from `backend/config/tower_config.json`.
+- `TOWER_FINDER_GEOCODER_CONTACT` — contact string in the `User-Agent` `POST /api/geocode` sends to Nominatim (default the repo URL). Nominatim's usage policy requires an identifying contact and one request per second; unidentified traffic gets blocked, and it is the fallback for city and ZIP lookups.
 - `TOWER_FINDER_ADMIN_TOKEN` — shared secret gating `PUT /api/config`, presented as `Authorization: Bearer <token>`. Unset closes the endpoint (503) rather than opening it, so a deploy that omits it cannot silently expose a public config write.
-- `TOWER_FINDER_FEEDBACK_TOKEN`: shared secret gating `POST /api/feedback/tower-outcome`, same bearer shape and the same fail-closed rule. Separate from the admin token on purpose: every node in the fleet holds this one, so a node that is lost or read must not also hand over the ranking config. See "Fleet feedback" below.
+- `TOWER_FINDER_FEEDBACK_TOKEN` — shared secret gating `POST /api/feedback/tower-outcome`, same bearer shape and the same fail-closed rule. Separate from the admin token on purpose: every node in the fleet holds this one, so a node that is lost or read must not also hand over the ranking config. See "Fleet feedback" below.
 
 ## API
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/towers?lat&lon&altitude&radius_km&limit&source&frequencies` | Ranked towers near (lat, lon). Ranked by expected detection area (`expected_area_km2`, see "Ranking"), then reordered so the top of the list is not ten channels of one mast; every tower also carries `best_azimuth_deg` (where to aim the Yagi), `horizon_km`, and the site annotations `site_id`, `site_channels` and `diversity_penalty`. `query.ranking` names the ordering that ran (`expected_area_mmr`, `expected_area` or `sort_order`). `frequencies` boosts towers near a frequency the caller names, in MHz; it never drops one, and the boosted towers keep the top of the list whatever the diversity pass does inside each group. Accepts both spellings a client might send: comma-separated (`frequencies=95.5,101.1`) and repeated (`frequencies=95.5&frequencies=101.1`), including a mix of the two. Up to ten values are used and echoed back as `query.user_frequencies_mhz`. Stations licensed on one transmitter (FCC channel-sharing pairs, LPFM time-shares) are merged into a single row; the partners' callsigns are listed in `shared_callsigns`. |
+| GET | `/api/towers?lat&lon&altitude&radius_km&limit&source&frequencies` | Ranked towers near (lat, lon). The direct path uses a terrestrial path-loss model and an under-beam derating for towers close to a tall mast (see "Path-loss model"); each row carries the breakdown as `path_loss_db`, `excess_path_loss_db` and `underbeam_loss_db`. Ranked by expected detection area (`expected_area_km2`, see "Ranking"), then reordered so the top of the list is not ten channels of one mast; every tower also carries `best_azimuth_deg` (where to aim the Yagi), `horizon_km`, and the site annotations `site_id`, `site_channels` and `diversity_penalty`. `query.ranking` names the ordering that ran (`expected_area_mmr`, `expected_area` or `sort_order`). `frequencies` boosts towers near a frequency the caller names, in MHz; it never drops one, and the boosted towers keep the top of the list whatever the diversity pass does inside each group. Accepts both spellings a client might send: comma-separated (`frequencies=95.5,101.1`) and repeated (`frequencies=95.5&frequencies=101.1`), including a mix of the two. Up to ten values are used and echoed back as `query.user_frequencies_mhz`. Stations licensed on one transmitter (FCC channel-sharing pairs, LPFM time-shares) are merged into a single row; the partners' callsigns are listed in `shared_callsigns`. |
 | POST | `/api/towers` | Same tower search, enriched with spectrum-analyser measurements. Body: `MeasurementPayload` (see `backend/models/measurements.py`). Only towers the SDR can see are returned; unmatched towers are excluded. Matched towers carry real measured fields (`snr_db`, `score`, `obw_fraction`, `power_db`, `measured=true`). The sweep also calibrates the model: `query.calibration_offset_db` and `query.calibrated_towers` say whether it could be done and over how many towers, each matched tower says whether its direct path is `measured` or modelled (`direct_power_source`) and what the analyser's `score` discounted it by (`measurement_quality`). See "Ranking". At most 2000 measurements per request, 422 beyond that: ranking pairs every tower with every measurement, synchronously on the one event loop. |
 | GET | `/api/elevation?lat&lon` | Ground elevation at a point. The search form pre-fills altitude from this; `GET /api/towers` resolves altitude itself when none is given. 503 when the upstream cannot be reached, 404 for a point it has no data for: two different facts, so a caller can tell an outage from a gap. `GET /api/towers` treats both as best-effort and still returns towers, with a null elevation. |
-| GET | `/api/config` | Current ranking config (bands, band priority, band offsets, sort order, scoring knobs, defaults). |
+| POST | `/api/geocode` | Address, place or ZIP → a point, for the search box. Body `{"query": "..."}`, 1–200 characters once stripped. Tries the US Census geocoder first (authoritative for street addresses, unkeyed, no usage policy) and falls back to Nominatim, which is the only one of the two that answers a city or a bare ZIP. `precision` (`street`/`postcode`/`locality`) says how far to trust the point; the form warns on anything below street level, since a city-centre fix can sit 10 km from the real site. 404 when both answered and neither knew it, 503 when one could not be reached and no other matched — a search box has to tell "check the spelling" from "try again". Unauthenticated, so it is capped at four concurrent lookups, caches for 24 h, and holds Nominatim to its one request per second. The query text is never logged. |
+| POST | `/api/feedback/tower-outcome` | Fleet feedback ingest: what a node's Auto-Calibrate actually got out of a tower we ranked. Body: one `TowerOutcome` or a list of up to 100 (see `backend/models/feedback.py`). Requires the feedback bearer token (see `TOWER_FINDER_FEEDBACK_TOKEN`); unset closes it with a 503. Unknown keys are a 422, so a misspelled field is loud rather than silently dropped. Rows carrying a `run_id` are stored once per node, run and tower, so a retried post is safe. Returns `{"stored": n, "ignored": m}`. See "Fleet feedback". |
+| GET | `/api/feedback/summary?limit=` | Per-tower rollup of stored outcomes, busiest first: row and node counts, distinct receiver cells, mean multiplier, callsigns seen, last observation. Requires the admin bearer token, not the feedback one: the rollup names sites and node counts. |
+| GET | `/api/config` | Current ranking config (bands, band priority, band offsets, sort order, scoring and propagation knobs, defaults). |
 | PUT | `/api/config` | Replace ranking config; sanity-capped at 1 MB. Requires the admin bearer token (see `TOWER_FINDER_ADMIN_TOKEN`). Validated and applied before it is written (400 if either fails), so the file on the persistent volume only ever holds a config the running process has accepted. |
 | POST | `/api/feedback/tower-outcome` | Fleet feedback ingest: what a node (or the archive job) actually got out of a tower we ranked. Body: one `TowerOutcome` or a list of up to 100 (see `backend/models/feedback.py`). Requires the feedback bearer token (see `TOWER_FINDER_FEEDBACK_TOKEN`); unset closes it with a 503. Unknown keys are a 422, so a misspelled field is loud rather than silently dropped. Returns `{"stored": n}`. See "Fleet feedback". |
 | GET | `/api/feedback/summary?limit=` | Per-tower rollup of stored outcomes, busiest first: row and node counts, distinct receiver cells, mean multiplier, callsigns seen, last observation. Requires the admin bearer token, not the feedback one: the rollup names sites and node counts. |
@@ -107,7 +111,7 @@ was picked, 0 for the first pick and whenever the pass did not run).
 ### Measurement calibration (POST only)
 
 On `POST /api/towers` the node's own sweep is the best direct-path measurement
-available, and terrain is the largest error in the free-space model. `power_db`
+available, and terrain is the largest error in the path model. `power_db`
 is always dBFS, the ATSC pilot peak as the node's front end sees it, and is
 present only for TV rows (FM sends null). It carries no absolute scale of its
 own, but the differences between channels within one sweep are real. So the
@@ -169,41 +173,138 @@ operator who does not want it sets `enabled` to false with a PUT. The knobs an
 overlay does name are kept and the rest defaulted, so a partial section is a
 partial override rather than a reset.
 
+## Path-loss model
+
+`received_power_dbm` is what a receiver with `receiver.rx_antenna_gain_dbi` of
+gain, pointed at the tower and polarisation-matched, hears at
+`propagation.rx_height_m` above ground. It is not what an indoor whip hears: on
+one home installation the measured levels sat 20 to 50 dB below the earlier
+free-space figures, and most of that was the antenna, the polarisation, the
+walls and the measurement bandwidth rather than the path. Those are the node's
+to measure (the sweep-calibrated POST route and the fleet feedback do that);
+the model's job is the part that is the same for everyone.
+
+Two terms do that, both in the `propagation` config section:
+
+- **Terrestrial loss.** `model: "hata"` adds Okumura-Hata's loss in excess of
+  free space for the tower's mast height, the receiver height and
+  `environment` (`open`, `suburban`, `urban`; shipped `suburban`). The excess is
+  never negative, so a tower in plain view is still free space away. Inputs
+  outside the formula's validity (FM below 150 MHz, masts above 200 m, ranges
+  under 1 km) are clamped to its edge rather than refused. `model: "free_space"`
+  is the previous behaviour, one line away.
+- **Under-beam derating.** A broadcast antenna's beam is a few degrees tall and
+  tilted `beam_tilt_deg` below horizontal, so a receiver 3 km from a 300 m mast
+  sits 6 degrees under it, where a UHF panel array is 20 dB down. The derating
+  is a parabolic main lobe, `12 * (angle / beamwidth)^2`, per band from
+  `vertical_beamwidth_deg`, capped at `max_underbeam_loss_db` for the null fill
+  real arrays have. Height is above ground, so a hilltop mast is derated less
+  than it should be, never more. A zero cap disables it.
+
+Both apply to the direct path only. An overlay written before this section
+existed gets the shipped model, not free space: nothing needs a config PUT.
+
+## Layout
+
+| Path | What's there |
+| --- | --- |
+| `app.py` | FastAPI entry point |
+| `backend/routes/towers.py` | HTTP routes |
+| `backend/routes/geocode.py` | `POST /api/geocode` |
+| `backend/services/geocode.py` | Address lookup: Census then Nominatim, with the cache, fan-out cap and throttle |
+| `backend/routes/feedback.py` | Feedback ingest + admin summary routes |
+| `backend/models/feedback.py` | `TowerOutcome` payload model |
+| `backend/services/tower_feedback.py` | Fleet feedback store (SQLite) and the `apply_feedback` correction |
+| `backend/services/tower_ranking.py` | Ranking algorithm + config loader/validator |
+| `backend/services/tower_scoring.py` | Bistatic detection-area model: what the rank is computed from |
+| `backend/services/tower_coverage.py` | Optional n>=2 coverage-area-added scoring, injected into the ranking as a `coverage_scorer` |
+| `backend/clients/fcc.py` | FCC TV/FM Query CGI client |
+| `backend/clients/maprad.py` | Maprad.io broadcast-systems client |
+| `backend/config/tower_config.json` | Default ranking config (image-shipped) |
+| `backend/tests/` | pytest suite (176 tests); integration tests require running `capture_fixture.py` first) |
+| `frontend/` | The standalone React UI (Vite). Built into the image and served by `app.py`; `npm test` / `npm run test:e2e` cover it |
+| `pyproject.toml` | Package + tooling config |
+
+## Tests
+
+```bash
+pytest -q                 # backend
+cd frontend && npm test   # frontend unit tests
+cd frontend && npm run test:e2e   # Playwright, against the built dist
+```
+
+## Origin
+
+Extracted from `offworldlabs/retina-server` on 2026-05-20 with `git filter-repo --path ...` over the 11 tower-finder paths, then made standalone:
+- `tower_ranking.py` no longer imports `core.runtime_config`; the runtime overlay is inlined.
+- `routes/towers.py` trimmed to tower endpoints only (dropped `/api/health` and the
+  `core.users.require_admin` auth dep). `/api/health` and `/api/elevation` were later
+  added back — the first for deploy smoke tests, the second for the UI's altitude field.
+- Tests rewired to a local `app` entry point.
+
+The parent repo still contains the same code for now; deduplication can come later.
+The two have already diverged once in a way worth knowing about: the region
+detection here is a border-polygon lookup (`services/region_lookup.py`), while
+retina-server kept a lat/lon bounding-box heuristic that returned "ca" for every
+US point above 42°N until it was ported across.
+
 ## Fleet feedback
 
-The ranking predicts how much area a tower lights up (`expected_area_km2`).
-Nothing ever told it whether that was true. These endpoints close that loop: the
-fleet reports what it actually got out of a tower, and the next request for that
-tower from a nearby receiver is corrected by what came back.
+Nothing has ever told the ranking whether a tower it put first was any good once
+a node tuned there. These endpoints are the return path: a node's Auto-Calibrate
+(retina-gui's calibrator) tries up to three candidate towers and reports what
+happened on each one.
 
 Two producers post the same row shape:
 
-- **Calibration.** A node's Auto-Calibrate tries up to three candidate towers and
-  posts one row per candidate: the `outcome` it reached, `max_evidence` (0 none,
-  1 detections, 2 an active track), `max_detections`, and the gains it settled on.
+- **Calibration.** One row per candidate tower the run tried, flattened from the
+  entry the calibrator keeps in its run `history`:
+
+  | Row field | Calibrator `history` entry | Notes |
+  | --- | --- | --- |
+  | `node_id` | the node's Mender id | `get_node_id()` in retina-gui |
+  | `run_id` | one id per run, e.g. the run's start time | optional, but send it: it is what makes a retried post safe |
+  | `rx_lat`, `rx_lon` | `location.rx` from the merged config | |
+  | `tx_lat`, `tx_lon` | the alternate's `tx` block, or `location.tx` for the configured tower | |
+  | `fc_hz` | `fc` | Hz, as the tuner has it |
+  | `callsign` | `tower_name` | up to 32 characters, the node's own limit |
+  | `outcome` | `outcome` | the calibrator's vocabulary, verbatim |
+  | `max_evidence`, `max_detections` | same names | 0 none, 1 detections, 2 active track |
+  | `duration_s` | `dwell_seconds` | |
+  | `gain_a`, `gain_b`, `lna_state` | `final_gain_a`, `final_gain_b`, `final_lna_state` | absent on a `not_reached` entry, which is fine |
+  | `device_error` | `device_error` | the SDR wedged rather than reporting a clean overload |
+
 - **Archive.** A later retina-server job posts archive-derived aggregates per
   tower per window: `verified_range_p85_km`, `adsb_match_rate`, `snr_median_db`,
-  `hours_observed`.
+  `hours_observed`, with `outcome: "observed"`.
 
 Payload (`backend/models/feedback.py`), one object or a list of up to 100:
 
 ```bash
-curl -X POST https://towers.retina.fm/api/feedback/tower-outcome \
+curl -X POST https://tower-finder.retina.fm/api/feedback/tower-outcome \
   -H "Authorization: Bearer $TOWER_FINDER_FEEDBACK_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"node_id": "node-7", "rx_lat": 34.05, "rx_lon": -118.25,
+  -d '{"node_id": "node-7", "run_id": "2026-09-11T10:00:00Z",
+       "rx_lat": 34.05, "rx_lon": -118.25,
        "tx_lat": 34.23, "tx_lon": -118.06, "fc_hz": 98700000,
        "callsign": "KABC", "source": "calibration",
        "outcome": "confirmed_track", "max_evidence": 2,
-       "max_detections": 41, "duration_s": 90, "gain_a": 12,
-       "gain_b": 8, "lna_state": 3}'
-# {"stored": 1}
+       "max_detections": 41, "duration_s": 90, "gain_a": 41,
+       "gain_b": 35, "lna_state": 6}'
+# {"stored": 1, "ignored": 0}
 ```
 
 Unknown keys are a 422 rather than being dropped, so a node that misspells a
 field finds out instead of posting rows that weigh nothing. `observed_at` is
 optional; the server dates the row when it is absent, and keeps `received_at`
 separately so a node with a bad clock still lands something orderable.
+
+**Retries are safe.** A node that times out on the post and tries again would
+otherwise land the same run twice, and every duplicate doubles that run's
+weight. Rows carrying a `run_id` are stored once per (node, run, tower); a
+repeat comes back `200` with everything under `ignored`, which is the reply a
+node wants: on record, stop retrying. Rows without a `run_id` (the archive job,
+or an older node) are never deduplicated.
 
 **Where it lives.** A SQLite file at `<TOWER_FINDER_RUNTIME_DIR>/feedback.db`,
 the same persistent overlay as `tower_config.json` (default
@@ -240,48 +341,6 @@ their raw fields and stand in the ADS-B match rate as the multiplier
 (`match_rate / 0.5`, clamped to 0.05 ... 3.0). Fitting the correction per band
 and per region, rather than per tower and receiver radius, is future work, as is
 letting a node's own history weigh more than a neighbour's.
-
-## Layout
-
-| Path | What's there |
-| --- | --- |
-| `app.py` | FastAPI entry point |
-| `backend/routes/towers.py` | HTTP routes |
-| `backend/services/tower_ranking.py` | Ranking algorithm + config loader/validator |
-| `backend/services/tower_scoring.py` | Bistatic detection-area model: what the rank is computed from |
-| `backend/services/tower_coverage.py` | Optional n>=2 coverage-area-added scoring, injected into the ranking as a `coverage_scorer` |
-| `backend/clients/fcc.py` | FCC TV/FM Query CGI client |
-| `backend/clients/maprad.py` | Maprad.io broadcast-systems client |
-| `backend/config/tower_config.json` | Default ranking config (image-shipped) |
-| `backend/services/tower_feedback.py` | Fleet feedback store (SQLite) and the `apply_feedback` correction |
-| `backend/routes/feedback.py` | Feedback ingest + admin summary routes |
-| `backend/models/feedback.py` | `TowerOutcome` payload model |
-| `backend/tests/` | pytest suite (176 tests); integration tests require running `capture_fixture.py` first) |
-| `frontend/` | The standalone React UI (Vite). Built into the image and served by `app.py`; `npm test` / `npm run test:e2e` cover it |
-| `pyproject.toml` | Package + tooling config |
-
-## Tests
-
-```bash
-pytest -q                 # backend
-cd frontend && npm test   # frontend unit tests
-cd frontend && npm run test:e2e   # Playwright, against the built dist
-```
-
-## Origin
-
-Extracted from `offworldlabs/retina-server` on 2026-05-20 with `git filter-repo --path ...` over the 11 tower-finder paths, then made standalone:
-- `tower_ranking.py` no longer imports `core.runtime_config`; the runtime overlay is inlined.
-- `routes/towers.py` trimmed to tower endpoints only (dropped `/api/health` and the
-  `core.users.require_admin` auth dep). `/api/health` and `/api/elevation` were later
-  added back — the first for deploy smoke tests, the second for the UI's altitude field.
-- Tests rewired to a local `app` entry point.
-
-The parent repo still contains the same code for now; deduplication can come later.
-The two have already diverged once in a way worth knowing about: the region
-detection here is a border-polygon lookup (`services/region_lookup.py`), while
-retina-server kept a lat/lon bounding-box heuristic that returned "ca" for every
-US point above 42°N until it was ported across.
 
 ## Deployment
 
@@ -529,6 +588,8 @@ cd /opt/tower-finder-service
 cp backend/.env.example backend/.env
 # Edit backend/.env: set TOWER_FINDER_ADMIN_TOKEN (a different one per
 # environment: it gates config writes and must not cross a trust boundary).
+# Set TOWER_FINDER_FEEDBACK_TOKEN too; it is the one the nodes hold, so it is
+# the one to hand to retina-node's .env, and it must not be the admin token.
 # Set MAPRAD_API_KEY on production only: staging and test are not meant to
 # reach the metered upstream, so leave it unset there; see "Metered upstream"
 # below for the consequence. This file holds secrets and CI never writes it.
