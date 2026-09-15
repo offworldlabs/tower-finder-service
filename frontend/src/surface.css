@@ -1,0 +1,478 @@
+/**
+ * Tower Finder surface theme — dash.retina.fm's design system, with
+ * map.retina.fm's palette as the dark theme.
+ *
+ * The token names are dash's (retina-server `dashboard/src/App.css`) and the
+ * light block's values are too, so a card, a badge or a micro-label reads the
+ * same here, on the console and on the map. The map's own port of this system
+ * (retina-server `frontend/src/map-surface.css`) is the third copy of the same
+ * vocabulary; the three are duplicated rather than shared because the apps
+ * build separately. Change a shared name here only by changing it in dash
+ * first.
+ *
+ * Reference: claude-shared `docs/brand/brand-guide.md` §3–§6, whose companion
+ * `tokens.css` carries the same values under a different, unified naming. The
+ * live names win here: this surface is being put in line with two specific
+ * sibling surfaces rather than built from scratch.
+ *
+ * `--bg-sunk`, `--accent-tint` and the `--tile-*` tokens are the ones dash has
+ * no equivalent for — dash paints no recessed tier (its canvas is already
+ * darker than its cards) and has no map.
+ */
+
+:root {
+  /* — Type ————————————————————————————————————————————————————————————
+     dash loads no web fonts at all and runs on the system stack; the map runs
+     on Inter. Inter is already bundled here (@fontsource-variable/inter, not
+     fetched), which satisfies the map exactly and dash in substance, since
+     dash's reason is a CSP that forbids fetching one. The guide flags the
+     estate's four unrelated type systems as accidental divergence (§10) and
+     names reusing Inter as the fix. */
+  --font-body: "Inter Variable", "Inter", -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  --font-mono: "SF Mono", "Fira Code", "Cascadia Code", ui-monospace, monospace;
+
+  /* — Canvas and ink (dash, verbatim) ————————————————————————————————— */
+  --bg-primary: #f1f5f9;
+  --bg-secondary: #ffffff;
+  --bg-card: #ffffff;
+  --bg-card-hover: #f8fafc;
+  --bg-input: #f8fafc;
+  --bg-sunk: #f1f5f9;
+
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #94a3b8;
+
+  --border: #e2e8f0;
+  --border-light: #cbd5e1;
+
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+  --accent-light: rgba(59, 130, 246, 0.1);
+  /* The wash at hover strength, below --accent-light on purpose so a hovered
+     row and a selected one stay apart. */
+  --accent-tint: rgba(59, 130, 246, 0.05);
+  /* Ink on a filled accent button. Light on the console's mid-blue; on the
+     dark theme the accent goes light enough that white on it fails, which is
+     the same inversion the guide notes for the map's primary button. */
+  --accent-ink: #ffffff;
+
+  --success: #10b981;
+  --success-light: rgba(16, 185, 129, 0.1);
+  --warning: #f59e0b;
+  --warning-light: rgba(245, 158, 11, 0.1);
+  --error: #ef4444;
+  --error-light: rgba(239, 68, 68, 0.1);
+  /* Ink for text sitting on a semantic wash, where the semantic colour itself
+     is too light to read. */
+  --error-ink: #b91c1c;
+
+  /* — Shape and rhythm ————————————————————————————————————————————————
+     Geometry, not colour: it belongs to the base and is not restated in the
+     dark block. dash and the map take the same scale. */
+  --radius: 8px;
+  --radius-sm: 4px;
+  --radius-lg: 12px;
+  --header-height: 56px;
+
+  /* Native widgets our tokens cannot reach — the select's dropdown, the
+     scrollbar gutter — follow this rather than the stylesheet. */
+  color-scheme: light;
+
+  /* Structure comes from hairlines, not shadows (§2). The one exception is a
+     panel floating over a moving basemap, which is what this buys. */
+  --panel-shadow: 0 2px 12px rgba(15, 23, 42, 0.12);
+
+  /* — Map ————————————————————————————————————————————————————————————
+     How far the basemap is pushed back, and the chrome drawn onto it. */
+  --tile-filter: saturate(0.9);
+  --attribution-bg: rgba(255, 255, 255, 0.85);
+  --map-chip-bg: rgba(255, 255, 255, 0.88);
+  --map-chip-ink: #0f172a;
+  /* The ring around a marker. Light on both themes, because it separates the
+     dot from a basemap that is a light tile set either way. */
+  --marker-ring: #ffffff;
+
+  /* — Rank ramp ————————————————————————————————————————————————————————
+     An ordinal five-step scale, not a status set: best → worst, anchored on
+     the surface's own success and warning and ending on the neutral the
+     console already spends on an "others" slice. The four hues in between are
+     taken from dash's documented chart palette (§3) rather than invented. */
+  --rank-1: #10b981;
+  --rank-2: #84cc16;
+  --rank-3: #f59e0b;
+  --rank-4: #f97316;
+  --rank-5: #94a3b8;
+  --rank-1-wash: rgba(16, 185, 129, 0.12);
+  --rank-2-wash: rgba(132, 204, 22, 0.12);
+  --rank-3-wash: rgba(245, 158, 11, 0.12);
+  --rank-4-wash: rgba(249, 115, 22, 0.12);
+  --rank-5-wash: rgba(148, 163, 184, 0.16);
+
+  /* — Broadcast band ————————————————————————————————————————————————————
+     owl-os's domain palette (§3), which exists there because no other surface
+     asks someone to pick a transmitter. This one does, so it borrows rather
+     than inventing a sixth categorical scheme. */
+  --band-fm: #3b82f6;
+  --band-vhf: #8b5cf6;
+  --band-uhf: #ec4899;
+  --band-fm-wash: rgba(59, 130, 246, 0.08);
+  --band-vhf-wash: rgba(139, 92, 246, 0.08);
+  --band-uhf-wash: rgba(236, 72, 153, 0.08);
+  --band-other: #64748b;
+  --band-other-wash: rgba(100, 116, 139, 0.08);
+}
+
+/* ── Dark: map.retina.fm ──────────────────────────────────────────────────
+   Only token values change; every rule in this file and the component
+   stylesheets reads the custom properties, so the whole chrome inverts from
+   these blocks alone.
+
+   Two selectors carry it because the control has three states, and this is
+   dash's arrangement verbatim. The media query answers `system`, which stamps
+   no attribute at all, so the OS preference is honoured with no JavaScript and
+   keeps working when the OS changes its mind mid-session;
+   `:not([data-theme="light"])` is what lets an explicit light choice override a
+   dark OS. The attribute rule answers an explicit dark.
+
+   The two blocks must stay identical, which theme-tokens.test.ts asserts: CSS
+   has no way to share a declaration block across a media query boundary, so the
+   guard against them drifting is a test rather than the stylesheet.
+
+   Values are the map's dark palette, which is dash's ramp mirrored: the card is
+   now lighter than the canvas, hairlines go blue-tinted translucent rather than
+   solid grey, and the semantics brighten a step so they carry on navy. */
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg-primary: #0d1b2a;
+    --bg-secondary: #132240;
+    --bg-card: #132240;
+    --bg-card-hover: #1a2b4d;
+    --bg-input: rgba(15, 30, 55, 0.9);
+    /* Dark inverts the ramp — the card is lighter than the canvas — so a
+       recessed pane needs a colour of its own rather than being made by letting
+       the canvas show through. */
+    --bg-sunk: #0f2035;
+
+    --text-primary: #e2e8f0;
+    --text-secondary: #94a3b8;
+    --text-muted: #64748b;
+
+    --border: rgba(100, 180, 255, 0.14);
+    --border-light: rgba(100, 180, 255, 0.28);
+
+    --accent: #38bdf8;
+    --accent-hover: #7dd3fc;
+    --accent-light: rgba(56, 189, 248, 0.16);
+    --accent-tint: rgba(56, 189, 248, 0.07);
+    --accent-ink: #082f49;
+
+    --success: #4ade80;
+    --success-light: rgba(74, 222, 128, 0.15);
+    --warning: #fbbf24;
+    --warning-light: rgba(251, 191, 36, 0.15);
+    --error: #f43f5e;
+    --error-light: rgba(244, 63, 94, 0.15);
+    --error-ink: #fca5a5;
+
+    /* On a dark surface a soft shadow does almost nothing, so the elevation
+       comes from the panel being lighter than the canvas plus a harder edge. */
+    --panel-shadow: 0 2px 12px rgba(0, 0, 0, 0.45);
+
+    /* Voyager pushed back hard, which is the treatment the live console uses: a
+       light basemap tinted down until the markers sit clearly in front. */
+    --tile-filter: saturate(0.85) brightness(0.78) opacity(0.82);
+    --attribution-bg: rgba(13, 27, 42, 0.85);
+    --map-chip-bg: rgba(8, 18, 38, 0.78);
+    --map-chip-ink: #ffffff;
+    --marker-ring: #e2e8f0;
+
+    --rank-1: #4ade80;
+    --rank-2: #a3e635;
+    --rank-3: #fbbf24;
+    --rank-4: #fb923c;
+    --rank-5: #94a3b8;
+    --rank-1-wash: rgba(74, 222, 128, 0.18);
+    --rank-2-wash: rgba(163, 230, 53, 0.18);
+    --rank-3-wash: rgba(251, 191, 36, 0.18);
+    --rank-4-wash: rgba(251, 146, 60, 0.18);
+    --rank-5-wash: rgba(148, 163, 184, 0.2);
+
+    --band-fm: #60a5fa;
+    --band-vhf: #a78bfa;
+    --band-uhf: #f472b6;
+    --band-fm-wash: rgba(96, 165, 250, 0.16);
+    --band-vhf-wash: rgba(167, 139, 250, 0.16);
+    --band-uhf-wash: rgba(244, 114, 182, 0.16);
+    --band-other: #94a3b8;
+    --band-other-wash: rgba(148, 163, 184, 0.16);
+
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg-primary: #0d1b2a;
+  --bg-secondary: #132240;
+  --bg-card: #132240;
+  --bg-card-hover: #1a2b4d;
+  --bg-input: rgba(15, 30, 55, 0.9);
+  /* Dark inverts the ramp — the card is lighter than the canvas — so a
+     recessed pane needs a colour of its own rather than being made by letting
+     the canvas show through. */
+  --bg-sunk: #0f2035;
+
+  --text-primary: #e2e8f0;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+
+  --border: rgba(100, 180, 255, 0.14);
+  --border-light: rgba(100, 180, 255, 0.28);
+
+  --accent: #38bdf8;
+  --accent-hover: #7dd3fc;
+  --accent-light: rgba(56, 189, 248, 0.16);
+  --accent-tint: rgba(56, 189, 248, 0.07);
+  --accent-ink: #082f49;
+
+  --success: #4ade80;
+  --success-light: rgba(74, 222, 128, 0.15);
+  --warning: #fbbf24;
+  --warning-light: rgba(251, 191, 36, 0.15);
+  --error: #f43f5e;
+  --error-light: rgba(244, 63, 94, 0.15);
+  --error-ink: #fca5a5;
+
+  /* On a dark surface a soft shadow does almost nothing, so the elevation
+     comes from the panel being lighter than the canvas plus a harder edge. */
+  --panel-shadow: 0 2px 12px rgba(0, 0, 0, 0.45);
+
+  /* Voyager pushed back hard, which is the treatment the live console uses: a
+     light basemap tinted down until the markers sit clearly in front. */
+  --tile-filter: saturate(0.85) brightness(0.78) opacity(0.82);
+  --attribution-bg: rgba(13, 27, 42, 0.85);
+  --map-chip-bg: rgba(8, 18, 38, 0.78);
+  --map-chip-ink: #ffffff;
+  --marker-ring: #e2e8f0;
+
+  --rank-1: #4ade80;
+  --rank-2: #a3e635;
+  --rank-3: #fbbf24;
+  --rank-4: #fb923c;
+  --rank-5: #94a3b8;
+  --rank-1-wash: rgba(74, 222, 128, 0.18);
+  --rank-2-wash: rgba(163, 230, 53, 0.18);
+  --rank-3-wash: rgba(251, 191, 36, 0.18);
+  --rank-4-wash: rgba(251, 146, 60, 0.18);
+  --rank-5-wash: rgba(148, 163, 184, 0.2);
+
+  --band-fm: #60a5fa;
+  --band-vhf: #a78bfa;
+  --band-uhf: #f472b6;
+  --band-fm-wash: rgba(96, 165, 250, 0.16);
+  --band-vhf-wash: rgba(167, 139, 250, 0.16);
+  --band-uhf-wash: rgba(244, 114, 182, 0.16);
+  --band-other: #94a3b8;
+  --band-other-wash: rgba(148, 163, 184, 0.16);
+
+  color-scheme: dark;
+}
+
+/* ── Reset ───────────────────────────────────────────────────────────────── */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-body);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--accent-hover);
+}
+
+/* ── dash component idioms ───────────────────────────────────────────────
+   Shared objects rather than one-off inline styles, so the search panel and
+   the results panel are the same thing. */
+
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+/* The micro-label: panel headers, stat labels, table headers. The single most
+   reused idiom on the console. The guide describes it as mono on dash (§2);
+   dash's stylesheet sets it in the body font, and the map's port keeps it
+   there, so this follows the two implementations rather than the prose. */
+.label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+/* Anything that is a number first and a word second. */
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* dash's status badge — a tinted 12px pill with a leading dot — is
+   deliberately absent: nothing on this surface reports health, and the two
+   things it does label (rank tier, broadcast band) are classifications, which
+   take the rectangular chip in ResultsTable.css instead. The guide's advice on
+   badges is to pick the shape the job calls for rather than assuming the pill
+   (§6). */
+
+/* ── Buttons ─────────────────────────────────────────────────────────────
+   Flat: dash does not lift its buttons, retina does. The disabled rule covers
+   primary as well as secondary — on dash it is attached to `.btn-secondary`
+   alone, so a disabled primary there looks enabled, which the guide records
+   as a gap (§6) rather than as the intent. */
+
+.btn {
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  cursor: pointer;
+  border: none;
+  transition: all 0.15s;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.btn-secondary {
+  background: transparent;
+  border: 1px solid var(--border-light);
+  color: var(--text-secondary);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.btn-sm {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ── Form controls ───────────────────────────────────────────────────────
+   One shared rule for every text-shaped control. dash has no `input`,
+   `select` or `textarea` selector at all and styles each call site inline,
+   which the guide records as its most striking gap (§10); the map closed it
+   with a single rule and this follows the map.
+
+   Typed rather than a bare `input`, which would also catch checkboxes and
+   ranges; `:not([type])` is there so an input that omits the attribute and
+   defaults to text is not left unstyled. */
+
+input:not([type]),
+input[type="text"],
+input[type="number"],
+input[type="search"],
+select {
+  width: 100%;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  padding: 8px 10px;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+input:focus,
+select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-light);
+}
+
+::placeholder {
+  color: var(--text-muted);
+}
+
+/* ── Scrollbars ──────────────────────────────────────────────────────────── */
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-light);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* ── Focus ───────────────────────────────────────────────────────────────
+   Neither dash nor the marketing sites define one and keyboard focus rides
+   the browser default there, which on the dark theme is close to invisible.
+   The map's port defines one; so does this. */
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ── Reduced motion ──────────────────────────────────────────────────────
+   The search spinner and its progress bar both loop. */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

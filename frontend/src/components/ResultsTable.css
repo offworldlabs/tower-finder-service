@@ -1,27 +1,28 @@
-.results-wrap {
-  background: #fff;
-  border-radius: 12px;
-  padding: 24px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
-}
+/**
+ * Results table. dash's table: 11px uppercase muted headers over 13px rows,
+ * a hairline under each, a faint row hover, inside a horizontal scroller.
+ */
 
 .results-wrap h2 {
-  font-size: 0.95rem;
-  margin-bottom: 16px;
-  color: #1a1a2e;
-  font-weight: 600;
   display: flex;
   align-items: center;
   gap: 8px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
 }
 
+/* A count, so the badge takes its dotless form. */
 .results-count {
-  background: #f0f2f5;
-  color: #6b7280;
-  font-size: 0.75rem;
+  padding: 2px 10px;
+  border-radius: 12px;
+  background: var(--accent-light);
+  color: var(--accent-hover);
+  font-size: 12px;
   font-weight: 600;
-  padding: 2px 9px;
-  border-radius: 10px;
+  font-variant-numeric: tabular-nums;
 }
 
 .table-scroll {
@@ -31,123 +32,117 @@
 .results-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.83rem;
 }
 
 .results-table th {
   text-align: left;
-  padding: 10px 12px;
-  color: #9ca3af;
-  font-weight: 500;
-  font-size: 0.72rem;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  border-bottom: 1px solid #f0f2f5;
   white-space: nowrap;
 }
 
 .results-table td {
-  padding: 11px 12px;
-  border-bottom: 1px solid #f8f9fa;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 13px;
   white-space: nowrap;
-  color: #374151;
 }
 
 .results-table tbody tr {
   transition: background 0.15s;
 }
 
-.results-table tbody tr:hover {
-  background: #f8fafc;
+.results-table tbody tr:hover td {
+  background: var(--accent-tint);
 }
 
 .results-table .rank {
-  font-weight: 700;
-  color: #1a1a2e;
-  font-size: 0.8rem;
   width: 2em;
 }
 
-.results-table .callsign {
+.results-table .callsign,
+.results-table .detect-area {
   font-weight: 600;
-  color: #1a1a2e;
+  color: var(--text-primary);
 }
 
 .results-table .location-name {
   max-width: 220px;
   overflow: hidden;
   text-overflow: ellipsis;
-  color: #6b7280;
-  font-size: 0.8rem;
+  color: var(--text-muted);
 }
 
+/* .mono carries the family and the tabular figures; the table only shrinks it. */
 .results-table .mono {
-  font-variant-numeric: tabular-nums;
-  font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
-  font-size: 0.8rem;
-}
-
-.results-table .power {
-  font-weight: 500;
+  font-size: 12px;
 }
 
 .results-table .cardinal {
-  color: #9ca3af;
-  font-size: 0.75rem;
-}
-
-.badge {
-  display: inline-block;
-  padding: 3px 10px;
-  border-radius: 6px;
-  font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-}
-
-.freq-match-badge {
-  display: inline-block;
-  margin-left: 4px;
-  color: #16a34a;
-  font-size: 0.72rem;
-  font-weight: 700;
-}
-
-.results-table .rank-badge {
-  display: inline-block;
-  min-width: 1.6em;
-  padding: 2px 6px;
-  border-radius: 6px;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .results-table .shared-callsigns {
   display: block;
-  color: #6b7280;
-  font-weight: 500;
-  font-size: 0.72rem;
   margin-top: 2px;
-}
-
-.results-table .detect-area {
-  font-weight: 600;
-  color: #1a1a2e;
+  color: var(--text-muted);
+  font-weight: 500;
+  font-size: 11px;
 }
 
 .results-table .point {
   white-space: nowrap;
 }
 
+/* ── Badges ──────────────────────────────────────────────────────────────
+   A 6px tinted rectangle rather than dash's dotted pill: the tier and the
+   band are classifications, not health, and the console's pill shape reads
+   as a status. The guide's own advice on badges is to pick the shape that
+   suits the surface rather than assuming the pill (§6). */
+
+.chip {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.results-table .rank-badge {
+  display: inline-block;
+  min-width: 1.6em;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  text-align: center;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.freq-match-badge {
+  display: inline-block;
+  margin-left: 4px;
+  color: var(--success);
+  font-size: 12px;
+  font-weight: 700;
+}
+
 /* Past its own radio horizon: still listed, but visibly discounted. The row
    carries a "Beyond radio horizon" title so the muting has a stated reason. */
 .results-table tbody tr.beyond-horizon td {
-  color: #9ca3af;
+  color: var(--text-muted);
 }
 
 .results-table tbody tr.beyond-horizon .callsign,
 .results-table tbody tr.beyond-horizon .detect-area,
 .results-table tbody tr.beyond-horizon .location-name {
-  color: #9ca3af;
+  color: var(--text-muted);
   font-weight: 500;
 }

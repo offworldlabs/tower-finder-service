@@ -2,21 +2,26 @@ import "./ResultsTable.css";
 import { rankTier } from "../utils/rankTier";
 import { bearingCardinal, beyondHorizon, formatAreaKm2 } from "../utils/format";
 
+/**
+ * Broadcast band as a categorical hue. Tokens rather than literals, so the
+ * chips brighten with the dark theme; the values are owl-os's band palette,
+ * which exists there for the same job (see surface.css).
+ */
 const BAND_COLORS = {
-  VHF: "#7c3aed",
-  UHF: "#0891b2",
-  FM: "#db2777",
+  FM: "var(--band-fm)",
+  VHF: "var(--band-vhf)",
+  UHF: "var(--band-uhf)",
 };
 
 const BAND_BG = {
-  VHF: "rgba(124, 58, 237, 0.08)",
-  UHF: "rgba(8, 145, 178, 0.08)",
-  FM: "rgba(219, 39, 119, 0.08)",
+  FM: "var(--band-fm-wash)",
+  VHF: "var(--band-vhf-wash)",
+  UHF: "var(--band-uhf-wash)",
 };
 
 export default function ResultsTable({ towers, onHover }) {
   return (
-    <div className="results-wrap">
+    <div className="card results-wrap">
       <h2>Results <span className="results-count">{towers.length}</span></h2>
       <div className="table-scroll">
         <table className="results-table">
@@ -97,10 +102,10 @@ export default function ResultsTable({ towers, onHover }) {
                   </td>
                   <td>
                     <span
-                      className="badge"
+                      className="chip"
                       style={{
-                        color: BAND_COLORS[t.band] || "#6b7280",
-                        background: BAND_BG[t.band] || "rgba(107,114,128,0.08)",
+                        color: BAND_COLORS[t.band] || "var(--band-other)",
+                        background: BAND_BG[t.band] || "var(--band-other-wash)",
                       }}
                     >
                       {t.band}
@@ -113,7 +118,7 @@ export default function ResultsTable({ towers, onHover }) {
                   </td>
                   <td className="mono power">{t.received_power_dbm} dBm</td>
                   <td>
-                    <span className="badge" style={{ color: tier.color, background: tier.bg }}>
+                    <span className="chip" style={{ color: tier.color, background: tier.bg }}>
                       {tier.label}
                     </span>
                   </td>

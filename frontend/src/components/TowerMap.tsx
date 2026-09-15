@@ -7,18 +7,24 @@ import { withCartoKey } from "../utils/basemap";
 import { rankTier, RANK_TIERS } from "../utils/rankTier";
 import { formatAreaKm2 } from "../utils/format";
 
+/**
+ * Marker colours are custom properties, which resolve because this HTML lands
+ * in the document as an inline style. The ring stays a light hairline on both
+ * themes: it separates the dot from the basemap, which is a light tile set
+ * either way (see TowerMap.css).
+ */
 function makeTowerIcon(color: string, isHighlighted: boolean) {
   const size = isHighlighted ? 16 : 11;
   const border = isHighlighted ? 3 : 2;
   const shadow = isHighlighted
-    ? "0 0 0 3px rgba(59,130,246,.3), 0 2px 6px rgba(0,0,0,.25)"
+    ? "0 0 0 3px var(--accent-light), 0 2px 6px rgba(0,0,0,.25)"
     : "0 1px 4px rgba(0,0,0,.3)";
   return L.divIcon({
     className: "tower-marker",
     html: `<div style="
       width:${size}px;height:${size}px;
       background:${color};
-      border:${border}px solid #fff;
+      border:${border}px solid var(--marker-ring);
       border-radius:50%;
       box-shadow:${shadow};
       transition: all 0.15s;
@@ -32,14 +38,44 @@ const userIcon = L.divIcon({
   className: "user-marker",
   html: `<div style="
     width:16px;height:16px;
-    background:#3b82f6;
-    border:3px solid #fff;
+    background:var(--accent);
+    border:3px solid var(--marker-ring);
     border-radius:50%;
-    box-shadow:0 0 0 3px rgba(59,130,246,.25), 0 2px 8px rgba(0,0,0,.2);
+    box-shadow:0 0 0 3px var(--accent-light), 0 2px 8px rgba(0,0,0,.2);
   "></div>`,
   iconSize: [16, 16],
   iconAnchor: [8, 8],
 });
+
+/**
+ * Carto Positron on light, Voyager on dark, both pushed back by
+ * `--tile-filter`. Swapping the tile set rather than only the filter is what
+ * the live map does: Positron's near-white ground is what the console chrome
+ * was drawn against, and dimming it far enough to sit under navy leaves a grey
+ * wash with no geography left in it.
+ */
+const TILE_URLS = {
+  light: "https://{s}.basemaps.cartocdn.com/rastertiles/light_all/{z}/{x}/{y}{r}.png",
+  dark: "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
+} as const;
+
+/**
+ * Leaflet caches the container's size at init and only re-reads it when told
+ * to. The panel now stretches to its grid cell, so adding a frequency row to
+ * the form beside it changes that size with no window resize to notice.
+ */
+function InvalidateOnResize() {
+  const map = useMap();
+
+  useEffect(() => {
+    const el = map.getContainer();
+    const observer = new ResizeObserver(() => map.invalidateSize({ animate: false }));
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [map]);
+
+  return null;
+}
 
 function FitBounds({ towers, userLocation }) {
   const map = useMap();
@@ -59,16 +95,19 @@ function FitBounds({ towers, userLocation }) {
   return null;
 }
 
-export default function TowerMap({ towers, userLocation, highlighted }) {
+export default function TowerMap({ towers, userLocation, highlighted, theme = "light" }) {
   const center: [number, number] = userLocation
     ? [userLocation.latitude, userLocation.longitude]
     : [39.8, -98.6]; // center of USA (default)
 
   return (
-    <div className="map-wrap">
+    <div className="card map-wrap">
       <MapContainer center={center} zoom={4} className="map-container">
         <TileLayer
-          url={withCartoKey("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png")}
+          // Leaflet keeps the layer it was given; remounting is what makes a
+          // theme change actually fetch the other tile set.
+          key={theme}
+          url={withCartoKey(TILE_URLS[theme] ?? TILE_URLS.light)}
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>'
         />
 
@@ -85,8 +124,13 @@ export default function TowerMap({ towers, userLocation, highlighted }) {
             <Circle
               center={[userLocation.latitude, userLocation.longitude]}
               radius={80000}
+              // Colour comes from the class, not from a `color` option: that
+              // lands in an SVG presentation attribute, where a var() is not
+              // substituted. The class has to be a top-level prop — react-leaflet
+              // replays `pathOptions` through setStyle, which ignores className,
+              // so one passed there is silently dropped.
+              className="search-radius"
               pathOptions={{
-                color: "#3b82f6",
                 weight: 1.5,
                 fillOpacity: 0.04,
                 dashArray: "6 4",
@@ -153,6 +197,7 @@ export default function TowerMap({ towers, userLocation, highlighted }) {
           );
         })}
 
+        <InvalidateOnResize />
         <FitBounds towers={towers} userLocation={userLocation} />
       </MapContainer>
 

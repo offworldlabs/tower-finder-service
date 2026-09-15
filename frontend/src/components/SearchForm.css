@@ -1,56 +1,32 @@
+/**
+ * Search panel. A dash card; the controls take the shared rule in surface.css
+ * and only add what is particular to this form.
+ */
+
 .search-form {
-  background: #fff;
-  border-radius: 12px;
-  padding: 24px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+  padding: 20px;
   display: flex;
   flex-direction: column;
   min-width: 0;
 }
 
 .search-form h2 {
-  font-size: 0.95rem;
-  margin-bottom: 16px;
-  color: #1a1a2e;
+  font-size: 14px;
   font-weight: 600;
-  letter-spacing: -0.01em;
+  color: var(--text-primary);
+  margin-bottom: 16px;
 }
 
+/* Field furniture: a label over its control, the explanation under it. */
 .search-form label {
   display: flex;
   flex-direction: column;
-  font-size: 0.78rem;
-  color: #6b7280;
+  gap: 5px;
   margin-bottom: 14px;
+  font-size: 12px;
   font-weight: 500;
-  letter-spacing: 0.01em;
+  color: var(--text-secondary);
   min-width: 0;
-}
-
-.search-form input,
-.search-form select {
-  margin-top: 5px;
-  padding: 9px 12px;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  font-size: 0.88rem;
-  color: #1a1a2e;
-  background: #fafbfc;
-  outline: none;
-  transition: border-color 0.2s, box-shadow 0.2s;
-  width: 100%;
-  min-width: 0;
-}
-
-.search-form input:focus,
-.search-form select:focus {
-  border-color: #3b82f6;
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
-  background: #fff;
-}
-
-.search-form input::placeholder {
-  color: #c9cdd4;
 }
 
 .field-row {
@@ -65,59 +41,19 @@
 
 .form-actions {
   display: flex;
-  gap: 10px;
+  gap: 8px;
   margin-top: 6px;
   min-width: 0;
 }
 
-.btn-primary,
-.btn-secondary {
+.form-actions .btn {
   flex: 1;
-  padding: 10px 14px;
-  border: none;
-  border-radius: 8px;
-  font-size: 0.84rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s;
-  letter-spacing: 0.01em;
   min-width: 0;
 }
 
-.btn-primary {
-  background: linear-gradient(135deg, #2563eb, #3b82f6);
-  color: #fff;
-  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25);
-}
-
-.btn-primary:hover:not(:disabled) {
-  background: linear-gradient(135deg, #1d4ed8, #2563eb);
-  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.35);
-  transform: translateY(-1px);
-}
-
-.btn-secondary {
-  background: #f8f9fa;
-  color: #374151;
-  border: 1px solid #e5e7eb;
-}
-
-.btn-secondary:hover:not(:disabled) {
-  background: #f0f1f3;
-  border-color: #d1d5db;
-}
-
-.btn-primary:disabled,
-.btn-secondary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-  transform: none;
-  box-shadow: none;
-}
-
 .geo-error {
-  color: #dc2626;
-  font-size: 0.78rem;
+  color: var(--error-ink);
+  font-size: 12px;
   margin-top: 8px;
 }
 
@@ -144,13 +80,14 @@
 
 .address-matched,
 .address-warning {
-  font-size: 0.75rem;
-  color: #6b7280;
+  font-size: 12px;
+  color: var(--text-muted);
   margin: -8px 0 10px;
   line-height: 1.4;
 }
 
-/* Frequency inputs */
+/* ── Measured frequencies ────────────────────────────────────────────────── */
+
 .freq-toggle {
   margin-top: 2px;
   margin-bottom: 4px;
@@ -159,8 +96,9 @@
 .btn-link {
   background: none;
   border: none;
-  color: #3b82f6;
-  font-size: 0.8rem;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
   font-weight: 500;
   cursor: pointer;
   padding: 0;
@@ -168,7 +106,7 @@
 }
 
 .btn-link:hover {
-  color: #1d4ed8;
+  color: var(--accent-hover);
 }
 
 .freq-section {
@@ -176,11 +114,8 @@
 }
 
 .freq-label {
-  font-size: 0.78rem;
-  color: #6b7280;
-  font-weight: 500;
-  margin-bottom: 6px;
   display: block;
+  margin-bottom: 6px;
 }
 
 .freq-inputs {
@@ -198,61 +133,53 @@
 
 .freq-row input {
   flex: 1;
-  padding: 7px 10px;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  font-size: 0.84rem;
-  color: #1a1a2e;
-  background: #fafbfc;
-  outline: none;
-  transition: border-color 0.2s, box-shadow 0.2s;
-}
-
-.freq-row input:focus {
-  border-color: #3b82f6;
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
-  background: #fff;
+  min-width: 0;
+  padding: 6px 8px;
+  font-variant-numeric: tabular-nums;
 }
 
 .btn-remove-freq {
-  background: none;
-  border: 1px solid #e5e7eb;
-  border-radius: 6px;
-  color: #9ca3af;
-  font-size: 1rem;
+  flex-shrink: 0;
   width: 28px;
   height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
-  cursor: pointer;
-  transition: all 0.2s;
   padding: 0;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 1rem;
   line-height: 1;
+  cursor: pointer;
+  transition: all 0.15s;
 }
 
 .btn-remove-freq:hover {
-  color: #dc2626;
-  border-color: #fca5a5;
-  background: #fef2f2;
+  color: var(--error);
+  border-color: var(--error);
+  background: var(--error-light);
 }
 
 .btn-add-freq {
-  background: none;
-  border: 1px dashed #d1d5db;
-  border-radius: 8px;
-  color: #6b7280;
-  font-size: 0.78rem;
-  padding: 6px 12px;
-  cursor: pointer;
   width: 100%;
-  transition: all 0.2s;
+  padding: 6px 12px;
+  background: none;
+  border: 1px dashed var(--border-light);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
 }
 
 .btn-add-freq:hover {
-  border-color: #3b82f6;
-  color: #3b82f6;
-  background: #eff6ff;
+  border-color: var(--accent);
+  border-style: solid;
+  color: var(--accent);
+  background: var(--accent-light);
 }
 
 @media (max-width: 720px) {
@@ -260,9 +187,5 @@
   .form-actions {
     grid-template-columns: 1fr;
     flex-direction: column;
-  }
-
-  .search-form {
-    padding: 20px;
   }
 }

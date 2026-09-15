@@ -223,7 +223,51 @@ existed gets the shipped model, not free space: nothing needs a config PUT.
 | `backend/config/tower_config.json` | Default ranking config (image-shipped) |
 | `backend/tests/` | pytest suite (176 tests); integration tests require running `capture_fixture.py` first) |
 | `frontend/` | The standalone React UI (Vite). Built into the image and served by `app.py`; `npm test` / `npm run test:e2e` cover it |
+| `frontend/src/surface.css` | Design tokens and the shared console idioms; the only file holding a palette value |
 | `pyproject.toml` | Package + tooling config |
+
+## UI surface
+
+The UI is dash.retina.fm's design system with map.retina.fm's palette as the
+dark theme, per `claude-shared/docs/brand/brand-guide.md`. Token names and the
+light values are dash's, so a card, a chip or a micro-label reads the same here
+and on the console; retina-server's `frontend/src/map-surface.css` is the third
+copy of the same vocabulary. Change a shared name in dash first.
+
+The appearance switch is dash's, ported class for class: the same three-state
+`.theme-switch` radiogroup (Light / System / Dark), the same `retina.theme`
+storage key, the same `ThemeContext`. The console hangs it under an
+"Appearance" label inside the header's avatar menu; there is no signed-in user
+on this surface, so it sits in the header bar instead. Only the placement
+differs. Change it in dash first.
+
+Three rules keep it working:
+
+- **No palette value outside `surface.css`.** Component stylesheets and inline
+  styles read custom properties, which is what lets both themes come out of one
+  block each. (Marker drop shadows stay a literal black: the basemap is a light
+  tile set in both themes, so they are not palette.) Leaflet vectors are the
+  exception that cannot read a property at all — a `pathOptions` colour lands in
+  an SVG presentation attribute, where `var()` is not substituted, so a themed
+  vector takes a class, passed as a top-level `className` prop because
+  react-leaflet replays `pathOptions` through `setStyle` and that drops it.
+  `themeTokens.test.ts` enforces this, and that the two dark blocks stay
+  identical.
+- **`system` stamps no attribute.** It is the default, and the
+  `prefers-color-scheme` block answers it, so the OS preference needs no
+  JavaScript and keeps working when the OS changes its mind mid-session.
+  Resolving it to a value and stamping that instead would pin the surface to
+  whatever the OS happened to be at load. The cost is the dark palette written
+  twice, once per selector, because CSS cannot share a declaration block across
+  a media query boundary.
+- **No inline `<script>` in `index.html`.** The edge sends `script-src 'self'`
+  with no nonce or hash, so an inline block is refused in the browser and
+  nowhere else: the build succeeds and the suite passes while only the deployed
+  page misbehaves. Nothing needs one today — the default theme is pure CSS — and
+  `test_edge_security_headers.py` keeps it that way.
+
+`useResolvedTheme` exists for the one thing CSS cannot reach: the basemap is a
+tile set chosen in JavaScript, so the map has to be told which palette is drawn.
 
 ## Tests
 

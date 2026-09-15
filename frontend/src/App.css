@@ -1,117 +1,133 @@
-*,
-*::before,
-*::after {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-}
-
-body {
-  font-family: "Inter Variable", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-    "Helvetica Neue", Arial, sans-serif;
-  background: #f0f2f5;
-  color: #1a1a2e;
-  line-height: 1.6;
-  -webkit-font-smoothing: antialiased;
-}
+/**
+ * App shell. Everything here reads the tokens in surface.css, so both themes
+ * come out of that file alone.
+ */
 
 .app {
   height: 100vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  background: var(--bg-primary);
 }
 
-/* ---- header ---- */
+/* ── Header ──────────────────────────────────────────────────────────────
+   One slim identity bar on the panel colour, the same shape the map uses:
+   a rounded accent square as the mark, name, sub-label. dash runs a 250px
+   sidebar plus a header; this surface is a single view with nothing to
+   navigate to, so the sidebar's brand block moves into the bar instead of
+   standing up an empty rail beside it. */
+
 .app-header {
-  background: linear-gradient(135deg, #0d1b2a 0%, #132240 50%, #0f2035 100%);
-  color: #fff;
-  padding: 18px 32px;
+  flex-shrink: 0;
+  height: var(--header-height);
+  padding: 0 24px;
   display: flex;
   align-items: center;
-  gap: 14px;
-  box-shadow: 0 2px 16px rgba(0, 0, 0, 0.3);
-  border-bottom: 1px solid rgba(100, 180, 255, 0.1);
-  position: relative;
-  z-index: 10;
-}
-
-.app-header h1 {
-  font-size: 1.3rem;
-  font-weight: 700;
-  letter-spacing: -0.02em;
+  gap: 10px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border);
 }
 
 .header-icon {
-  font-size: 1.4rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 1rem;
   line-height: 1;
 }
 
-.app-header .subtitle {
-  font-size: 0.82rem;
-  opacity: 0.55;
-  font-weight: 400;
-  letter-spacing: 0.01em;
+.app-header h1 {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
 }
 
-/* ---- header tabs ---- */
-.header-tabs {
+.app-header .subtitle {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.header-actions {
   margin-left: auto;
   display: flex;
-  gap: 4px;
+  align-items: center;
+  gap: 8px;
 }
 
-.tab-btn {
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  color: rgba(255, 255, 255, 0.6);
-  padding: 6px 16px;
-  border-radius: 6px;
-  font-size: 0.82rem;
-  font-weight: 500;
+/* ── Appearance switch ───────────────────────────────────────────────────
+   dash's `.theme-switch`, class for class. On the console it sits under an
+   "Appearance" micro-label inside the header's avatar menu; there is no
+   signed-in user on this surface and so no menu to hang it in, so it sits in
+   the header bar itself. dash inherits the buttons' ground, ink and cursor
+   from `.user-dropdown button`, which does not exist here, so those are
+   restated below rather than being left to the browser. */
+
+.theme-switch {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--bg-sunk);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.theme-switch button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  background: none;
+  border: none;
+  border-radius: 3px;
+  color: var(--text-secondary);
   cursor: pointer;
-  transition: all 0.15s;
 }
 
-.tab-btn:hover {
-  background: rgba(255, 255, 255, 0.12);
-  color: #fff;
+.theme-switch button:hover {
+  background: var(--bg-card-hover);
+  color: var(--text-primary);
 }
 
-.tab-btn.active {
-  background: rgba(255, 255, 255, 0.18);
-  color: #fff;
-  border-color: rgba(255, 255, 255, 0.25);
+.theme-switch button svg {
+  width: 15px;
+  height: 15px;
+  display: block;
 }
 
-/* ---- body layout ---- */
+/* The glyph is drawn in currentColor, so setting the ink is what tints it. */
+.theme-switch button.active,
+/* The hover rule above is of equal weight, so without this an active segment
+   loses its wash on the way to being clicked. */
+.theme-switch button.active:hover {
+  background: var(--accent-light);
+  color: var(--accent);
+}
+
+/* ── Body ────────────────────────────────────────────────────────────────
+   dash's 24px content padding, in a centred column because this page is one
+   form beside one map rather than a full-width table. */
+
 .app-body {
   flex: 1;
-  padding: 24px 32px 48px;
+  padding: 24px 24px 48px;
   max-width: 1360px;
   width: 100%;
   margin: 0 auto;
   overflow-y: auto;
 }
 
-.app-body.physics-active {
-  background: #060d18;
-  max-width: none;
-  padding: 0;
-}
-
-.app-body.live-active {
-  padding: 0;
-  max-width: none;
-  overflow: hidden;
-  height: 0;
-  min-height: 0;
-}
-
 .top-section {
   display: grid;
   grid-template-columns: 360px 1fr;
-  gap: 20px;
+  gap: 16px;
   margin-bottom: 24px;
 }
 
@@ -120,14 +136,22 @@ body {
     grid-template-columns: 1fr;
   }
   .app-body {
-    padding: 16px;
+    padding: 16px 16px 32px;
   }
   .app-header {
-    padding: 14px 16px;
+    padding: 0 16px;
+  }
+  .app-header .subtitle {
+    display: none;
   }
 }
 
-/* ---- loading ---- */
+/* ── Loading ─────────────────────────────────────────────────────────────
+   dash has no spinner and no skeleton anywhere: every page renders the text
+   "Loading…" in its empty-state box. That is a fair default for a request
+   that returns promptly and a poor one for this search, which warns it may
+   take a minute, so the indicator stays and only its colours change. */
+
 .loading-section {
   margin-bottom: 24px;
   display: flex;
@@ -135,29 +159,28 @@ body {
   align-items: center;
   gap: 16px;
   padding: 32px 20px;
-  background: #fff;
-  border-radius: 12px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
 }
 
 .spinner {
-  width: 36px;
-  height: 36px;
-  border: 3px solid #e5e7eb;
-  border-top-color: #3b82f6;
+  width: 32px;
+  height: 32px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
 
 @keyframes spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .loading-bar {
   width: 100%;
   max-width: 360px;
   height: 3px;
-  background: #e5e7eb;
+  background: var(--bg-sunk);
   border-radius: 2px;
   overflow: hidden;
 }
@@ -165,68 +188,76 @@ body {
 .loading-bar-inner {
   height: 100%;
   width: 35%;
-  background: linear-gradient(90deg, #3b82f6, #60a5fa);
+  background: var(--accent);
   border-radius: 2px;
   animation: slide 1.4s ease-in-out infinite;
 }
 
 @keyframes slide {
-  0% { transform: translateX(-120%); }
-  100% { transform: translateX(380%); }
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(380%);
+  }
 }
 
 .loading-text {
-  color: #6b7280;
-  font-size: 0.85rem;
+  color: var(--text-secondary);
+  font-size: 13px;
   text-align: center;
 }
 
-/* ---- summary stats ---- */
+/* ── Stat cards ──────────────────────────────────────────────────────────
+   dash's: 12px uppercase muted label over a 28px/700 value, on a bordered
+   card. A wrapping strip rather than dash's auto-fill grid, because the
+   values here are a count, a band list and a callsign, and a 220px minimum
+   would leave most of each card empty. */
+
 .summary-strip {
   display: flex;
-  gap: 12px;
-  margin-bottom: 20px;
   flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 24px;
 }
 
 .stat-card {
-  background: #fff;
-  border-radius: 10px;
-  padding: 14px 20px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
-  display: flex;
-  flex-direction: column;
-  min-width: 120px;
+  flex: 1 1 200px;
+  min-width: 0;
+  padding: 20px;
 }
 
 .stat-card .stat-value {
-  font-size: 1.35rem;
+  display: block;
+  font-size: 28px;
   font-weight: 700;
-  color: #1a1a2e;
-  line-height: 1.2;
+  line-height: 1;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
 }
 
+/* dash sets its stat label one step above the 11px micro-label. */
 .stat-card .stat-label {
-  font-size: 0.72rem;
-  color: #9ca3af;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-weight: 500;
-  margin-top: 2px;
+  display: block;
+  margin-top: 8px;
+  font-size: 12px;
 }
 
-/* ---- error ---- */
+/* ── Error banner ────────────────────────────────────────────────────────
+   The error wash with ink chosen to read on it, since --error itself is a
+   light red on the dark theme. */
+
 .error-banner {
-  background: #fef2f2;
-  color: #b91c1c;
-  border: 1px solid #fecaca;
-  border-radius: 10px;
-  padding: 14px 18px;
-  margin-bottom: 20px;
-  font-size: 0.88rem;
   display: flex;
   align-items: center;
   gap: 10px;
+  padding: 12px 16px;
+  margin-bottom: 24px;
+  background: var(--error-light);
+  border: 1px solid var(--error);
+  border-radius: var(--radius);
+  color: var(--error-ink);
+  font-size: 13px;
 }
 
 .error-banner::before {
@@ -234,22 +265,52 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: #dc2626;
-  color: #fff;
-  font-size: 0.75rem;
-  font-weight: 700;
   flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--error);
+  color: var(--bg-card);
+  font-size: 12px;
+  font-weight: 700;
 }
 
+/* ── Empty state ─────────────────────────────────────────────────────────
+   dash's shape and padding. The copy names the next action, which is the one
+   thing the guide picks out of owl-os's version as worth copying. */
+
 .no-results {
-  text-align: center;
-  color: #9ca3af;
   padding: 48px 20px;
-  font-size: 0.95rem;
-  background: #fff;
-  border-radius: 12px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+/* ── Error boundary ──────────────────────────────────────────────────────
+   dash and the map both fall back to an unstyled heading and a default
+   button, which on the dark theme is black on white in the middle of the
+   console. This one is on the surface. */
+
+.crash-screen {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 48px 24px;
+  text-align: center;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+}
+
+.crash-screen h2 {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.crash-screen p {
+  font-size: 13px;
+  max-width: 44ch;
 }

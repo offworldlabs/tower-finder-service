@@ -5,12 +5,20 @@ export interface RankTier {
   bg: string;
 }
 
+/**
+ * Custom properties rather than literals, so the ramp brightens with the dark
+ * theme; the values live in surface.css. Every consumer puts these into a CSS
+ * declaration — a React `style` prop, or the inline style of a Leaflet
+ * `divIcon`'s HTML — where `var()` resolves. A Leaflet `pathOptions` colour
+ * does not qualify: that lands in an SVG presentation attribute, which
+ * substitution does not reach, so a themed vector takes a class instead.
+ */
 export const RANK_TIERS: RankTier[] = [
-  { tier: 1, label: "Best", color: "#16a34a", bg: "rgba(22,163,74,0.12)" },
-  { tier: 2, label: "Upper", color: "#65a30d", bg: "rgba(101,163,13,0.12)" },
-  { tier: 3, label: "Middle", color: "#ca8a04", bg: "rgba(202,138,4,0.12)" },
-  { tier: 4, label: "Lower", color: "#ea580c", bg: "rgba(234,88,12,0.12)" },
-  { tier: 5, label: "Worst", color: "#94a3b8", bg: "rgba(148,163,184,0.16)" },
+  { tier: 1, label: "Best", color: "var(--rank-1)", bg: "var(--rank-1-wash)" },
+  { tier: 2, label: "Upper", color: "var(--rank-2)", bg: "var(--rank-2-wash)" },
+  { tier: 3, label: "Middle", color: "var(--rank-3)", bg: "var(--rank-3-wash)" },
+  { tier: 4, label: "Lower", color: "var(--rank-4)", bg: "var(--rank-4-wash)" },
+  { tier: 5, label: "Worst", color: "var(--rank-5)", bg: "var(--rank-5-wash)" },
 ];
 
 /**
