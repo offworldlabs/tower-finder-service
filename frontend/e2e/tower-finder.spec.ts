@@ -164,6 +164,15 @@ test.describe("Tower Finder — search form", () => {
     const url = new URL((await towersRequest).url());
     expect(url.searchParams.get("source")).toBe("ca");
   });
+
+  test("prefills altitude from /api/elevation once coordinates are entered", async ({ page }) => {
+    // The lookup is driven by the coordinate fields, not by the search, so a
+    // form that is never submitted still ends up with an altitude. The
+    // file-level beforeEach answers /api/elevation with 43.
+    await page.getByLabel(/latitude/i).fill("42.38708028093612");
+    await page.getByLabel(/longitude/i).fill("-71.24905416622781");
+    await expect(page.getByLabel(/altitude/i)).toHaveValue("43");
+  });
 });
 
 test.describe("Tower Finder — search results", () => {
