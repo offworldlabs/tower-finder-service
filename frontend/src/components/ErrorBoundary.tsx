@@ -25,12 +25,15 @@ export default class ErrorBoundary extends Component<Props, State> {
   render() {
     if (this.state.hasError) {
       return (
-        <div style={{ padding: "2rem", textAlign: "center", color: "#94a3b8" }}>
+        // On the surface rather than the browser's defaults: an unstyled
+        // fallback is white-on-white in the light theme and black-on-white in
+        // the middle of the dark one.
+        <div className="crash-screen">
           <h2>Something went wrong</h2>
           <p>Please refresh the page. If the problem persists, contact support.</p>
           <button
+            className="btn btn-secondary"
             onClick={() => this.setState({ hasError: false })}
-            style={{ marginTop: "1rem", padding: "0.5rem 1rem", cursor: "pointer" }}
           >
             Try again
           </button>

@@ -178,6 +178,18 @@ def test_csp_keeps_inline_styles(csp: str):
     assert "'unsafe-inline'" in directive(csp, "style-src")
 
 
+def test_the_page_carries_no_inline_script(csp: str):
+    """script-src is 'self' with no nonce and no hash, so an inline block is
+    refused in the browser and nowhere else: the build succeeds, the suite
+    passes, and only the deployed page misbehaves. The theme is the thing that
+    keeps inviting one, since it wants to be right before first paint; it is
+    answered in CSS instead."""
+    assert "'unsafe-inline'" not in directive(csp, "script-src")
+    html = (REPO_ROOT / "frontend" / "index.html").read_text()
+    inline = [tag for tag in re.findall(r"<script\b[^>]*>", html) if not re.search(r"\bsrc=", tag)]
+    assert not inline, f"inline script in index.html, which the CSP refuses: {inline}"
+
+
 def test_csp_carries_every_image_source_the_map_needs(csp: str):
     """Exactly these three, for the reasons in the template. `data:` is not
     exercised today and is pinned so that stays a deliberate choice."""

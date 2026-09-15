@@ -2,6 +2,8 @@ import { useState } from "react";
 import SearchForm from "./components/SearchForm";
 import ResultsTable from "./components/ResultsTable";
 import TowerMap from "./components/TowerMap";
+import ThemeSwitch from "./components/ThemeSwitch";
+import { useResolvedTheme } from "./context/ThemeContext";
 import { fetchTowers } from "./api";
 import { formatAreaKm2 } from "./utils/format";
 import type { Tower, TowerQuery } from "./types";
@@ -20,18 +22,18 @@ function SummaryStrip({ towers, query }: { towers: Tower[]; query: TowerQuery | 
 
   return (
     <div className="summary-strip">
-      <div className="stat-card">
+      <div className="card stat-card">
         <span className="stat-value">{towers.length}</span>
-        <span className="stat-label">Towers Found</span>
+        <span className="label stat-label">Towers Found</span>
       </div>
-      <div className="stat-card">
+      <div className="card stat-card">
         <span className="stat-value">{bands.join(", ")}</span>
-        <span className="stat-label">Bands</span>
+        <span className="label stat-label">Bands</span>
       </div>
       {best && (
-        <div className="stat-card">
+        <div className="card stat-card">
           <span className="stat-value">{best.callsign || "—"}</span>
-          <span className="stat-label">
+          <span className="label stat-label">
             {/* The detect area is what the rank is sorted on, so the top pick
                 says why it is top. Absent on an older backend: the label then
                 reads exactly as it did before. */}
@@ -45,9 +47,9 @@ function SummaryStrip({ towers, query }: { towers: Tower[]; query: TowerQuery | 
         // Which country the server actually searched. Worth surfacing: when
         // "auto" is in play this is the only place the resolved region is
         // visible, and a wrong one is exactly the bug this UI used to cause.
-        <div className="stat-card">
+        <div className="card stat-card">
           <span className="stat-value">{query.source.toUpperCase()}</span>
-          <span className="stat-label">{SOURCE_LABELS[query.source] || "Data Source"}</span>
+          <span className="label stat-label">{SOURCE_LABELS[query.source] || "Data Source"}</span>
         </div>
       )}
     </div>
@@ -60,6 +62,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [highlighted, setHighlighted] = useState<Tower | null>(null);
+  const theme = useResolvedTheme();
 
   async function handleSearch({ lat, lon, altitude, source, frequencies }) {
     setLoading(true);
@@ -81,21 +84,29 @@ export default function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <span className="header-icon">&#9041;</span>
+        <span className="header-icon" aria-hidden="true">&#9041;</span>
         <h1>Tower Finder</h1>
-        <span className="subtitle">Passive Radar Illuminator Search</span>
+        <span className="subtitle">Passive radar illuminator search</span>
+        <div className="header-actions">
+          <ThemeSwitch />
+        </div>
       </header>
 
       <main className="app-body">
         <div className="top-section">
           <SearchForm onSearch={handleSearch} loading={loading} />
-          <TowerMap towers={towers} userLocation={query} highlighted={highlighted} />
+          <TowerMap
+            towers={towers}
+            userLocation={query}
+            highlighted={highlighted}
+            theme={theme}
+          />
         </div>
 
         {error && <div className="error-banner">{error}</div>}
 
         {loading && (
-          <div className="loading-section">
+          <div className="card loading-section">
             <div className="spinner" />
             <div className="loading-bar">
               <div className="loading-bar-inner" />
@@ -111,8 +122,10 @@ export default function App() {
         {towers.length > 0 && <ResultsTable towers={towers} onHover={setHighlighted} />}
 
         {!loading && query && towers.length === 0 && (
-          <p className="no-results">
-            No suitable broadcast towers found within {query.radius_km} km.
+          <p className="card no-results">
+            No suitable broadcast towers found within {query.radius_km} km. Try a
+            location closer to a populated area, or widen the measured
+            frequencies.
           </p>
         )}
       </main>

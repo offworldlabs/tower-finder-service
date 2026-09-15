@@ -343,3 +343,125 @@ test.describe("Tower Finder — subresources", () => {
     expect(sawTile).toBe(true);
   });
 });
+
+test.describe("Tower Finder — theme", () => {
+  const pick = (page, name: "Light" | "System" | "Dark") =>
+    page.getByRole("radio", { name, exact: true }).click();
+
+  // `system` is the default and stamps no attribute at all, so the OS
+  // preference is answered by the media query in surface.css with no
+  // JavaScript — which is the whole reason the control has a third state.
+  test("follows the operating system with nothing stored, stamping nothing", async ({
+    browser,
+  }) => {
+    for (const scheme of ["light", "dark"] as const) {
+      const ctx = await browser.newContext({ colorScheme: scheme });
+      const page = await ctx.newPage();
+      await page.goto(BASE);
+
+      await expect(page.getByRole("radio", { name: "System" })).toHaveAttribute(
+        "aria-checked",
+        "true",
+      );
+      await expect(page.locator("html")).not.toHaveAttribute("data-theme", /.*/);
+      // The chrome still themes, which is the part the attribute would
+      // otherwise be carrying.
+      await expect(page.locator("body")).toHaveCSS(
+        "background-color",
+        scheme === "dark" ? "rgb(13, 27, 42)" : "rgb(241, 245, 249)",
+      );
+      await ctx.close();
+    }
+  });
+
+  test("lets an explicit light choice beat a dark OS, and survives a reload", async ({
+    browser,
+  }) => {
+    const ctx = await browser.newContext({ colorScheme: "dark" });
+    const page = await ctx.newPage();
+    await page.goto(BASE);
+
+    await pick(page, "Light");
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+    await expect(page.locator("body")).toHaveCSS("background-color", "rgb(241, 245, 249)");
+
+    await page.reload();
+    await expect(page.getByRole("radio", { name: "Light" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+
+    await ctx.close();
+  });
+
+  test("goes back to following the OS when system is picked again", async ({ browser }) => {
+    const ctx = await browser.newContext({ colorScheme: "dark" });
+    const page = await ctx.newPage();
+    await page.goto(BASE);
+
+    await pick(page, "Light");
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+
+    await pick(page, "System");
+    await expect(page.locator("html")).not.toHaveAttribute("data-theme", /.*/);
+    await expect(page.locator("body")).toHaveCSS("background-color", "rgb(13, 27, 42)");
+
+    await ctx.close();
+  });
+
+  // The vectors are the one part of the surface that custom properties cannot
+  // reach directly, and the failure is silent: react-leaflet replays
+  // `pathOptions` through setStyle, which drops `className`, so a ring styled
+  // that way keeps Leaflet's own blue in both themes and nothing errors.
+  test("draws the search radius in the theme's accent", async ({ browser }) => {
+    const stroke = async (scheme: "light" | "dark") => {
+      const ctx = await browser.newContext({ colorScheme: scheme });
+      const page = await ctx.newPage();
+      await page.route("**/api/elevation**", (r) =>
+        r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ elevation_m: 43 }) }),
+      );
+      await page.route("**/api/towers**", (r) =>
+        r.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ towers: [tower()], query: query(), count: 1 }),
+        }),
+      );
+      await page.goto(BASE);
+      await page.getByLabel(/latitude/i).fill("42.38708028093612");
+      await page.getByLabel(/longitude/i).fill("-71.24905416622781");
+      await page.locator("button[type='submit']").filter({ hasText: /Find Towers/i }).click();
+      const ring = page.locator("path.search-radius");
+      await expect(ring).toBeAttached();
+      const value = await ring.evaluate((el) => getComputedStyle(el).stroke);
+      await ctx.close();
+      return value;
+    };
+
+    expect(await stroke("light")).toBe("rgb(59, 130, 246)"); // dash's blue
+    expect(await stroke("dark")).toBe("rgb(56, 189, 248)"); // the map's sky
+  });
+
+  // The basemap is the one thing the tokens cannot choose: it is a tile set
+  // picked in JavaScript, which is what useResolvedTheme exists for.
+  test("swaps the basemap with the resolved theme", async ({ browser }) => {
+    const ctx = await browser.newContext({ colorScheme: "light" });
+    const page = await ctx.newPage();
+    await page.goto(BASE);
+    await expect(page.locator(".leaflet-container")).toBeVisible({ timeout: 8000 });
+
+    await expect(page.locator(".leaflet-tile-pane img").first()).toHaveAttribute(
+      "src",
+      /\/light_all\//,
+    );
+
+    await pick(page, "Dark");
+    await expect(page.locator(".leaflet-tile-pane img").first()).toHaveAttribute(
+      "src",
+      /\/voyager\//,
+    );
+
+    await ctx.close();
+  });
+});

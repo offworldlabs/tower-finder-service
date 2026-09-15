@@ -2,6 +2,8 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
+import { ThemeProvider } from "../context/ThemeContext";
+import { stubBrowser } from "./browser";
 
 // react-leaflet needs a real layout box; jsdom gives it none and Leaflet throws
 // on init. The map isn't what these tests are about — the e2e suite asserts the
@@ -61,14 +63,26 @@ function towersRequestUrl(): string | undefined {
   return mock.mock.calls.map((c) => c[0]).find((u) => u.includes("/api/towers"));
 }
 
+// The header carries the appearance switch, which reads the theme through a
+// provider that throws without one — there is no sensible default for "change
+// the theme". Rendering App means rendering that.
+function renderApp() {
+  return render(
+    <ThemeProvider>
+      <App />
+    </ThemeProvider>,
+  );
+}
+
 beforeEach(() => {
   vi.restoreAllMocks();
+  stubBrowser();
 });
 
 describe("App", () => {
   it("mounts and renders the header and search form", () => {
     mockApi({ status: 200, body: { towers: [], query: null, count: 0 } });
-    render(<App />);
+    renderApp();
     expect(screen.getByRole("heading", { name: /tower finder/i })).toBeInTheDocument();
     expect(screen.getByLabelText(/latitude/i)).toBeInTheDocument();
     expect(screen.getByTestId("tower-map")).toBeInTheDocument();
@@ -90,7 +104,7 @@ describe("App", () => {
       },
     });
     const user = userEvent.setup();
-    render(<App />);
+    renderApp();
     await search(user);
 
     // "WGBH" appears in both the summary strip and the table, so scope to the row.
@@ -110,7 +124,7 @@ describe("App", () => {
       body: { detail: "Location is not in a supported region (US, CA, AU)." },
     });
     const user = userEvent.setup();
-    render(<App />);
+    renderApp();
     await search(user);
 
     await waitFor(() =>
@@ -125,7 +139,7 @@ describe("App", () => {
   it("carries entered frequencies through to the tower request", async () => {
     mockApi({ status: 200, body: { towers: [], query: null, count: 0 } });
     const user = userEvent.setup();
-    render(<App />);
+    renderApp();
 
     await user.click(screen.getByRole("button", { name: /add measured frequencies/i }));
     await user.click(screen.getByRole("button", { name: /add frequency/i }));
@@ -165,7 +179,7 @@ describe("App", () => {
       },
     });
     const user = userEvent.setup();
-    render(<App />);
+    renderApp();
     await search(user);
 
     await waitFor(() => expect(document.querySelectorAll("tbody tr")).toHaveLength(2));
@@ -192,7 +206,7 @@ describe("App", () => {
       },
     });
     const user = userEvent.setup();
-    render(<App />);
+    renderApp();
     await search(user);
 
     await waitFor(() => expect(document.querySelector("tbody tr")).toBeInTheDocument());
@@ -221,7 +235,7 @@ describe("App", () => {
       },
     });
     const user = userEvent.setup();
-    render(<App />);
+    renderApp();
     await search(user);
 
     await waitFor(() => expect(document.querySelector("tbody tr")).toBeInTheDocument());
@@ -260,7 +274,7 @@ describe("App", () => {
       },
     });
     const user = userEvent.setup();
-    render(<App />);
+    renderApp();
     await search(user);
 
     await waitFor(() => expect(document.querySelectorAll("tbody tr")).toHaveLength(2));

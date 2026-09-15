@@ -179,7 +179,7 @@ export default function SearchForm({ onSearch, loading }) {
   }
 
   return (
-    <form className="search-form" onSubmit={handleSubmit}>
+    <form className="card search-form" onSubmit={handleSubmit}>
       <h2>Location</h2>
 
       <div className="address-row">
@@ -200,7 +200,7 @@ export default function SearchForm({ onSearch, loading }) {
         </label>
         <button
           type="button"
-          className="btn-secondary btn-lookup"
+          className="btn btn-secondary btn-sm btn-lookup"
           onClick={lookupAddress}
           disabled={addressLoading || address.trim() === ""}
         >
@@ -293,7 +293,7 @@ export default function SearchForm({ onSearch, loading }) {
 
       {showFrequencies && (
         <div className="freq-section">
-          <span className="freq-label">Measured Frequencies (MHz)</span>
+          <span className="label freq-label">Measured Frequencies (MHz)</span>
           <div className="freq-inputs">
             {frequencies.map((freq, i) => (
               <div key={i} className="freq-row">
@@ -337,12 +337,12 @@ export default function SearchForm({ onSearch, loading }) {
       )}
 
       <div className="form-actions">
-        <button type="submit" className="btn-primary" disabled={loading}>
+        <button type="submit" className="btn btn-primary" disabled={loading}>
           {loading ? "Searching…" : "Find Towers"}
         </button>
         <button
           type="button"
-          className="btn-secondary"
+          className="btn btn-secondary"
           onClick={useMyLocation}
           disabled={loading || geoLoading}
         >
