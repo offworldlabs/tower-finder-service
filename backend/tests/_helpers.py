@@ -93,7 +93,7 @@ def mocked_upstreams(raw_systems):
             new=unittest.mock.AsyncMock(return_value=raw_systems),
         ),
         unittest.mock.patch(
-            "routes.towers._batch_lookup_elevations",
+            "services.elevation.lookup_many",
             new=unittest.mock.AsyncMock(return_value={}),
         ),
     ):
