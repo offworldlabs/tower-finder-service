@@ -2,8 +2,9 @@
 FCC broadcast station client for US tower data.
 
 Queries the FCC TV Query and FM Query CGI endpoints to get broadcast
-station data directly from the authoritative FCC LMS database.
-This supplements Maprad.io data and ensures complete US coverage.
+station data directly from the authoritative FCC LMS database. This is the
+whole of the US tower data: Maprad carries the FCC ULS licence system, which
+holds no broadcast stations.
 
 TV Query: https://transition.fcc.gov/cgi-bin/tvq
 FM Query: https://transition.fcc.gov/cgi-bin/fmq

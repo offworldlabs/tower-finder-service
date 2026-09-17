@@ -63,18 +63,12 @@ def _resolve_source(source: str, lat: float, lon: float) -> str:
 async def _fetch_raw_towers(source: str, lat: float, lon: float, radius_km: int) -> list:
     """Fetch raw broadcast systems for a resolved source.
 
-    US pulls the FCC database and optionally supplements it with Maprad; every
-    other region uses Maprad alone. Shared by GET and POST /api/towers.
+    US comes from the FCC database; every other region uses Maprad. Shared by
+    GET and POST /api/towers.
     """
     try:
         if source == "us":
             raw = await fetch_fcc_broadcast_systems(lat, lon, radius_km=radius_km)
-            if API_KEY:
-                try:
-                    maprad_raw = await fetch_broadcast_systems(API_KEY, lat, lon, radius_km=radius_km, source=source)
-                    raw.extend(maprad_raw)
-                except Exception:
-                    logging.warning("Maprad supplement failed, using FCC data only")
         else:
             if not API_KEY:
                 raise HTTPException(status_code=500, detail="MAPRAD_API_KEY not configured")
