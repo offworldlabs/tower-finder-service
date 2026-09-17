@@ -7,7 +7,13 @@ log = logging.getLogger(__name__)
 
 MAPRAD_URL = "https://maprad.io/api"
 
-# Device fields kept minimal to avoid API internal errors on larger page sizes.
+# maprad.io refuses a larger page outright rather than clamping it, and a
+# refusal arrives as a GraphQL error, which the walk below reads as the end of
+# the results. So this is the API's ceiling, not a preference.
+_PAGE_SIZE = 30
+
+# Kept minimal: the API is prone to internal errors on large responses, and
+# the walk runs at the maximum page size, so there is no headroom to spend.
 _DEVICE_FIELDS = """
           callsign
           frequency(unit: MHz)
@@ -94,6 +100,16 @@ async def _paginate_query(
         if cursor == prev_cursor:
             log.warning("Pagination cursor did not advance on page %d — stopping", page + 1)
             break
+    else:
+        # Every page spent while the API still had more to give. Said out loud
+        # because the shortfall is otherwise indistinguishable from a location
+        # that simply holds fewer stations.
+        log.warning(
+            "Subtype %s hit the %d-page budget with more available; returning %d system(s)",
+            fmt_kwargs.get("subtype"),
+            max_pages,
+            len(systems),
+        )
     return systems
 
 
@@ -143,7 +159,7 @@ async def fetch_broadcast_systems(
                     _SUBTYPE_QUERY,
                     kwargs,
                     max_pages=max_pages,
-                    page_size=5,
+                    page_size=_PAGE_SIZE,
                 )
             except Exception as exc:
                 log.warning("Subtype %s query failed: %s", subtype, exc)

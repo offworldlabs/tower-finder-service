@@ -35,7 +35,16 @@ class _Response:
 class _Upstream:
     """Stands in for maprad.io, counting and pacing the queries."""
 
-    def __init__(self, pages=1, delay=0.01, fail_subtypes=(), error_subtypes=(), stuck_cursor=False):
+    def __init__(
+        self,
+        pages=1,
+        delay=0.01,
+        fail_subtypes=(),
+        error_subtypes=(),
+        stuck_cursor=False,
+        records=None,
+        page_size_limit=None,
+    ):
         self.queries = []
         self.in_flight = 0
         self.peak = 0
@@ -44,6 +53,13 @@ class _Upstream:
         self._fail = set(fail_subtypes)
         self._errors = set(error_subtypes)
         self._stuck_cursor = stuck_cursor
+        # How many systems a subtype holds, when the point of the test is
+        # density rather than a page count. Pages are then served at whatever
+        # size is asked for, as the real API does.
+        self._records = records
+        # maprad.io refuses a page larger than 30 with a GraphQL error rather
+        # than clamping, so a test can ask for that refusal to be modelled.
+        self._page_size_limit = page_size_limit
 
     # Constructed as httpx.AsyncClient(timeout=...) and entered as a context
     # manager, so it stands in for both.
@@ -83,17 +99,34 @@ class _Upstream:
             if subtype in self._errors:
                 return _Response({"errors": [{"message": "cannot query field"}]})
 
+            if self._page_size_limit is not None and page_size > self._page_size_limit:
+                return _Response(
+                    {
+                        "errors": [
+                            {
+                                "message": (
+                                    f"The value of the 'first' argument ({page_size}) exceeds "
+                                    f"the page size limit of {self._page_size_limit}"
+                                )
+                            }
+                        ]
+                    }
+                )
+
             page = 0 if cursor == "" else int(cursor.rsplit("|", 1)[1]) + 1
+            if self._records is None:
+                served, has_next = page_size, page + 1 < self._pages
+            else:
+                served = max(0, min(page_size, self._records - page * page_size))
+                has_next = (page + 1) * page_size < self._records
             edges = [
                 {
                     "cursor": f"{subtype}|{0 if self._stuck_cursor else page}",
                     "node": {"id": f"{subtype}-{page}-{i}", "devices": [], "licence": {"subtype": subtype}},
                 }
-                for i in range(page_size)
+                for i in range(served)
             ]
-            return _Response(
-                {"data": {"systems": {"edges": edges, "pageInfo": {"hasNextPage": page + 1 < self._pages}}}}
-            )
+            return _Response({"data": {"systems": {"edges": edges, "pageInfo": {"hasNextPage": has_next}}}})
         finally:
             self.in_flight -= 1
 
@@ -152,8 +185,8 @@ class TestSubtypeFanOut:
 class TestPagination:
     async def test_the_cursor_walk_follows_pages(self):
         systems = await _fetch(_Upstream(pages=2))
-        # Two pages of five, for each of the three subtypes.
-        assert len(systems) == 2 * 5 * len(maprad._BROADCAST_SUBTYPES)
+        # Two full pages, for each of the three subtypes.
+        assert len(systems) == 2 * maprad._PAGE_SIZE * len(maprad._BROADCAST_SUBTYPES)
 
     async def test_the_walk_stops_when_the_upstream_says_so(self):
         upstream = _Upstream(pages=1)
@@ -164,7 +197,7 @@ class TestPagination:
         upstream = _Upstream(pages=99)
         systems = await _fetch(upstream, max_pages=2)
         assert len(upstream.queries) == 2 * len(maprad._BROADCAST_SUBTYPES)
-        assert len(systems) == 2 * 5 * len(maprad._BROADCAST_SUBTYPES)
+        assert len(systems) == 2 * maprad._PAGE_SIZE * len(maprad._BROADCAST_SUBTYPES)
 
     async def test_a_cursor_that_does_not_advance_stops_the_walk(self):
         # hasNextPage stays true while the cursor repeats, which would
@@ -190,3 +223,39 @@ class TestFailureIsolation:
     async def test_every_subtype_failing_is_an_empty_list_not_a_raise(self):
         systems = await _fetch(_Upstream(fail_subtypes=maprad._BROADCAST_SUBTYPES))
         assert systems == []
+
+
+class TestPageBudget:
+    """What a single search can actually retrieve, and what it tells us when
+    it could not retrieve all of it."""
+
+    async def test_a_dense_location_is_returned_in_full(self):
+        # Ninety systems to a subtype is inside what Sydney really holds, and
+        # is more than one page however the walk is paged, so only a budget
+        # that both pages widely and pages more than once returns the lot.
+        upstream = _Upstream(records=90)
+        systems = await _fetch(upstream)
+        assert len(systems) == 90 * len(maprad._BROADCAST_SUBTYPES)
+
+    async def test_the_page_size_stays_inside_the_upstream_limit(self):
+        # A page above 30 is refused outright, and _paginate_query reads a
+        # GraphQL error as "stop here", so asking too big empties the subtype
+        # instead of failing loudly.
+        upstream = _Upstream(records=1, page_size_limit=30)
+        systems = await _fetch(upstream)
+        assert len(systems) == len(maprad._BROADCAST_SUBTYPES)
+
+    async def test_a_walk_cut_short_by_the_budget_says_which_subtype(self, caplog):
+        upstream = _Upstream(records=10_000)
+        with caplog.at_level("WARNING", logger="clients.maprad"):
+            await _fetch(upstream)
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert warnings, "a walk that left records behind reported nothing"
+        for subtype in maprad._BROADCAST_SUBTYPES:
+            assert any(subtype in message for message in warnings), f"no warning named {subtype}"
+
+    async def test_a_walk_that_reaches_the_end_is_quiet(self, caplog):
+        upstream = _Upstream(records=3)
+        with caplog.at_level("WARNING", logger="clients.maprad"):
+            await _fetch(upstream)
+        assert [r.getMessage() for r in caplog.records if r.levelname == "WARNING"] == []
