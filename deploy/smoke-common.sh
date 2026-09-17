@@ -141,7 +141,7 @@ smoke_assert_frequencies_honoured() {
     local target="$1"
     if ! _smoke_fetch_with_retry "$target"; then
         _smoke_report_failure "frequencies" "$target" \
-            "/api/towers catches and logs FCC and Maprad failures on this path, so it does not 502 on a third-party outage: suspect the edge reaching the service, or the container."
+            "This is a US probe, so /api/towers is served from the FCC alone and an FCC outage surfaces as a 502: suspect the edge reaching the service, or the container."
         return 1
     fi
     _smoke_body_contains "frequencies" "$SMOKE_FREQ_ECHO"

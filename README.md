@@ -28,7 +28,7 @@ The Docker image builds the UI itself and serves it from the same origin as the
 API, so a deployed service is a single container with no separate web host.
 
 Optional env vars:
-- `MAPRAD_API_KEY` — required for non-US queries; US can fall back to FCC only.
+- `MAPRAD_API_KEY` — required for `au` and `ca` queries. US searches never reach Maprad: its only US dataset is the FCC ULS licence system, which holds no broadcast stations.
 - `TOWER_FINDER_RUNTIME_DIR` — where `tower_config.json` is read/written (default `./data/runtime/`). On first start the runtime overlay is seeded from `backend/config/tower_config.json`.
 - `TOWER_FINDER_GEOCODER_CONTACT` — contact string in the `User-Agent` `POST /api/geocode` sends to Nominatim (default the repo URL). Nominatim's usage policy requires an identifying contact and one request per second; unidentified traffic gets blocked, and it is the fallback for city and ZIP lookups.
 - `TOWER_FINDER_ADMIN_TOKEN` — shared secret gating `PUT /api/config`, presented as `Authorization: Bearer <token>`. Unset closes the endpoint (503) rather than opening it, so a deploy that omits it cannot silently expose a public config write.

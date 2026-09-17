@@ -42,31 +42,6 @@ query {{
 }}
 """.strip()
 
-# Fallback: frequency-range filter (US / generic).
-_FREQ_RANGE_QUERY = """
-query {{
-  systems(
-    first: {page_size}
-    after: "{cursor}"
-    source: "{source}"
-    geoFilter: {{ type: CIRCLE, values: ["{coords}", "{radius}"] }}
-    filter: [
-      {{ field: device_frequency, type: RANGE, values: ["54000000", "698000000"] }}
-    ]
-  ) {{
-    edges {{
-      cursor
-      node {{
-        id
-        devices {{{devices}}}
-        licence {{ type subtype }}
-      }}
-    }}
-    pageInfo {{ hasNextPage }}
-  }}
-}}
-""".strip()
-
 # Broadcast subtypes useful for passive radar — high-power, POINT geometries.
 # Retransmission / Community Broadcasting omitted: often low-power or return
 # enormous MULTIPOLYGON coverage geometries that slow down the API response.
@@ -76,7 +51,9 @@ _BROADCAST_SUBTYPES = [
     "Commercial Radio",
 ]
 
-_BROADCAST_TYPE_SOURCES = {"au", "ca"}
+# The whole of what Maprad can answer for: its US dataset is the FCC ULS
+# licence system, which holds no broadcast stations.
+_SUPPORTED_SOURCES = {"au", "ca"}
 
 
 async def _paginate_query(
@@ -125,16 +102,28 @@ async def fetch_broadcast_systems(
     lat: float,
     lon: float,
     radius_km: int = 80,
-    source: str = "us",
+    *,
+    source: str,
     max_pages: int = 3,
 ) -> list[dict]:
     """
     Fetch broadcast transmitters near (lat, lon) from Maprad.io.
 
-    For AU/CA: issues parallel queries per broadcast subtype to avoid
-    low-power narrowcasting dominating results.
-    For US: falls back to a broad frequency-range filter.
+    Issues parallel queries per broadcast subtype, so that low-power
+    narrowcasting does not crowd out the high-power stations.
+
+    ``source`` carries no default: the regions Maprad can answer for are a
+    subset of the regions the service supports, so a default would let a
+    caller reach the wrong one silently.
     """
+    # Maprad's source keys are lowercase, and this value reaches the query as
+    # well as the guard: folding it in only one of the two asks upstream for a
+    # key that matches nothing, which comes back empty rather than raising.
+    source = source.lower()
+    # US searches belong to clients/fcc.py.
+    if source not in _SUPPORTED_SOURCES:
+        raise ValueError(f"Maprad holds no broadcast data for source {source!r}")
+
     headers = {"X-Api-Key": api_key, "Content-Type": "application/json"}
     base_kwargs = {
         "source": source,
@@ -144,31 +133,21 @@ async def fetch_broadcast_systems(
     }
 
     async with httpx.AsyncClient(timeout=45.0) as client:
-        if source.lower() in _BROADCAST_TYPE_SOURCES:
 
-            async def _fetch_subtype(subtype: str) -> list[dict]:
-                kwargs = {**base_kwargs, "subtype": subtype}
-                try:
-                    return await _paginate_query(
-                        client,
-                        headers,
-                        _SUBTYPE_QUERY,
-                        kwargs,
-                        max_pages=max_pages,
-                        page_size=5,
-                    )
-                except Exception as exc:
-                    log.warning("Subtype %s query failed: %s", subtype, exc)
-                    return []
+        async def _fetch_subtype(subtype: str) -> list[dict]:
+            kwargs = {**base_kwargs, "subtype": subtype}
+            try:
+                return await _paginate_query(
+                    client,
+                    headers,
+                    _SUBTYPE_QUERY,
+                    kwargs,
+                    max_pages=max_pages,
+                    page_size=5,
+                )
+            except Exception as exc:
+                log.warning("Subtype %s query failed: %s", subtype, exc)
+                return []
 
-            batches = await asyncio.gather(*(_fetch_subtype(s) for s in _BROADCAST_SUBTYPES))
-            return [sys for batch in batches for sys in batch]
-        else:
-            return await _paginate_query(
-                client,
-                headers,
-                _FREQ_RANGE_QUERY,
-                base_kwargs,
-                max_pages=max_pages,
-                page_size=20,
-            )
+        batches = await asyncio.gather(*(_fetch_subtype(s) for s in _BROADCAST_SUBTYPES))
+        return [sys for batch in batches for sys in batch]

@@ -147,38 +147,6 @@ class TestTowerConfig:
 
 
 class TestFindTowersServiceErrors:
-    def test_fcc_succeeds_maprad_fails_returns_200(self):
-        fcc_data = [
-            {
-                "call_sign": "TEST",
-                "latitude": 33.9,
-                "longitude": -84.6,
-                "distance_km": 10,
-                "frequency_mhz": 100.1,
-            }
-        ]
-
-        with (
-            unittest.mock.patch("routes.towers.API_KEY", "fake-key"),
-            unittest.mock.patch(
-                "routes.towers.fetch_fcc_broadcast_systems",
-                new=unittest.mock.AsyncMock(return_value=fcc_data),
-            ),
-            unittest.mock.patch(
-                "routes.towers.fetch_broadcast_systems",
-                new=unittest.mock.AsyncMock(side_effect=Exception("Maprad down")),
-            ),
-            unittest.mock.patch(
-                "services.elevation.lookup_many",
-                new=unittest.mock.AsyncMock(return_value={}),
-            ),
-        ):
-            with TestClient(app, raise_server_exceptions=False) as c:
-                r = c.get("/api/towers?lat=33.9&lon=-84.6&source=us")
-
-        assert r.status_code == 200
-        assert "towers" in r.json()
-
     def test_fcc_fetch_fails_returns_502(self):
         with (
             unittest.mock.patch("routes.towers.API_KEY", ""),
@@ -357,6 +325,59 @@ _VALID_PAYLOAD = {
     "source": "us",
     "measurements": [_VALID_MEASUREMENT],
 }
+
+
+class TestUsDoesNotConsultMaprad:
+    """US searches are served from the FCC database alone.
+
+    Maprad's only US dataset is the FCC ULS licence system: land mobile,
+    microwave, maritime and broadcast auxiliary. It carries no broadcast
+    stations, and the land-mobile records it does return rank as television
+    because T-Band public safety sits on former UHF channels.
+    """
+
+    _FCC_SYSTEMS = [_raw_system([_raw_device(545.0, 33.9, -84.6, "WTEST")])]
+
+    def test_get_leaves_maprad_alone(self):
+        maprad = unittest.mock.AsyncMock(return_value=[])
+        with (
+            unittest.mock.patch("routes.towers.API_KEY", "fake-key"),
+            unittest.mock.patch(
+                "routes.towers.fetch_fcc_broadcast_systems",
+                new=unittest.mock.AsyncMock(return_value=self._FCC_SYSTEMS),
+            ),
+            unittest.mock.patch("routes.towers.fetch_broadcast_systems", new=maprad),
+            unittest.mock.patch(
+                "services.elevation.lookup_many",
+                new=unittest.mock.AsyncMock(return_value={}),
+            ),
+        ):
+            with TestClient(app, raise_server_exceptions=False) as c:
+                r = c.get("/api/towers?lat=33.9&lon=-84.6&source=us")
+
+        assert r.status_code == 200
+        maprad.assert_not_awaited()
+        assert [t["callsign"] for t in r.json()["towers"]] == ["WTEST"]
+
+    def test_post_leaves_maprad_alone(self):
+        maprad = unittest.mock.AsyncMock(return_value=[])
+        with (
+            unittest.mock.patch("routes.towers.API_KEY", "fake-key"),
+            unittest.mock.patch(
+                "routes.towers.fetch_fcc_broadcast_systems",
+                new=unittest.mock.AsyncMock(return_value=self._FCC_SYSTEMS),
+            ),
+            unittest.mock.patch("routes.towers.fetch_broadcast_systems", new=maprad),
+            unittest.mock.patch(
+                "services.elevation.lookup_many",
+                new=unittest.mock.AsyncMock(return_value={}),
+            ),
+        ):
+            with TestClient(app, raise_server_exceptions=False) as c:
+                r = c.post("/api/towers", json=_VALID_PAYLOAD)
+
+        assert r.status_code == 200
+        maprad.assert_not_awaited()
 
 
 class TestFindTowersWithMeasurements:
