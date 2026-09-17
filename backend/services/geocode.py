@@ -166,7 +166,7 @@ async def _census(query: str) -> GeocodeResult | None:
             resp = await client.get(url, params=params)
             resp.raise_for_status()
             return _parse_census(resp.json())
-    # Narrow deliberately, as _batch_lookup_elevations is: a transport fault, a
+    # Narrow deliberately, as services.elevation is: a transport fault, a
     # bad status, or a body that will not read as numbers is the upstream's
     # failure. Anything else is a fault in the code above and must reach the
     # caller as a 500 rather than be dressed up as a dependency being down.

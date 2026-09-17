@@ -2,7 +2,6 @@
 
 import unittest.mock
 
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -144,100 +143,6 @@ class TestTowerConfig:
         assert "too large" in r.json()["detail"].lower()
 
 
-# ── _batch_lookup_elevations ─────────────────────────────────────────────────
-
-
-class TestBatchLookupElevations:
-    async def test_empty_list_returns_empty_dict(self):
-        from routes.towers import _batch_lookup_elevations
-
-        result = await _batch_lookup_elevations([])
-        assert result == {}
-
-    async def test_http_success_returns_elevation(self):
-        from routes.towers import _batch_lookup_elevations
-
-        mock_resp = unittest.mock.MagicMock()
-        mock_resp.raise_for_status = unittest.mock.MagicMock()
-        mock_resp.json.return_value = {"elevation": [123.4]}
-
-        with make_httpx_mock(get_return=mock_resp):
-            result = await _batch_lookup_elevations([(33.9, -84.6)])
-
-        assert result == {(33.9, -84.6): 123.4}
-
-    async def test_http_timeout_raises_unavailable(self):
-        from routes.towers import ElevationUnavailable, _batch_lookup_elevations
-
-        with make_httpx_mock(get_side_effect=httpx.TimeoutException("timed out")):
-            with pytest.raises(ElevationUnavailable):
-                await _batch_lookup_elevations([(33.9, -84.6)])
-
-    async def test_http_500_error_raises_unavailable(self):
-        from routes.towers import ElevationUnavailable, _batch_lookup_elevations
-
-        with make_httpx_mock(get_return=status_error_response(500)):
-            with pytest.raises(ElevationUnavailable):
-                await _batch_lookup_elevations([(33.9, -84.6)])
-
-    async def test_rate_limiting_raises_unavailable(self):
-        """429 is open-meteo's own limit, not a fault in the request: waiting
-        fixes it, so it must not read as a broken route."""
-        from routes.towers import ElevationUnavailable, _batch_lookup_elevations
-
-        with make_httpx_mock(get_return=status_error_response(429)):
-            with pytest.raises(ElevationUnavailable):
-                await _batch_lookup_elevations([(33.9, -84.6)])
-
-    @pytest.mark.parametrize("status", [400, 404, 422])
-    async def test_a_rejected_request_is_not_reported_as_the_dependency(self, status):
-        """A 4xx is open-meteo rejecting the request we built, so it is ours to
-        answer for. Reporting it as the dependency would answer 503, which the
-        post-deploy smoke passes on, gating a permanently broken route green."""
-        from routes.towers import ElevationUnavailable, _batch_lookup_elevations
-
-        with make_httpx_mock(get_return=status_error_response(status)):
-            with pytest.raises(httpx.HTTPStatusError) as exc_info:
-                await _batch_lookup_elevations([(33.9, -84.6)])
-        assert not isinstance(exc_info.value, ElevationUnavailable)
-
-    async def test_generic_connection_error_raises_unavailable(self):
-        from routes.towers import ElevationUnavailable, _batch_lookup_elevations
-
-        with make_httpx_mock(get_side_effect=httpx.ConnectError("connection refused")):
-            with pytest.raises(ElevationUnavailable):
-                await _batch_lookup_elevations([(33.9, -84.6)])
-
-    async def test_unreadable_body_raises_unavailable(self):
-        """open-meteo answered, with something that will not read as numbers.
-        Still the dependency's failure, not ours."""
-        from routes.towers import ElevationUnavailable, _batch_lookup_elevations
-
-        mock_resp = unittest.mock.MagicMock()
-        mock_resp.raise_for_status = unittest.mock.MagicMock()
-        mock_resp.json.return_value = {"elevation": ["not a number"]}
-
-        with make_httpx_mock(get_return=mock_resp):
-            with pytest.raises(ElevationUnavailable):
-                await _batch_lookup_elevations([(33.9, -84.6)])
-
-    async def test_a_fault_of_our_own_is_not_reported_as_the_dependency(self):
-        """The classification is what /api/elevation's 503 and the post-deploy
-        smoke both rest on: a bug in the handling above must not reach either
-        of them wearing open-meteo's name."""
-        from routes.towers import ElevationUnavailable, _batch_lookup_elevations
-
-        mock_resp = unittest.mock.MagicMock()
-        mock_resp.raise_for_status = unittest.mock.MagicMock()
-        # A dict where the code indexes a list: the shape a refactor gets wrong.
-        mock_resp.json.return_value = {"elevation": {"0": 123.4}}
-
-        with make_httpx_mock(get_return=mock_resp):
-            with pytest.raises(Exception) as exc_info:  # noqa: PT011
-                await _batch_lookup_elevations([(33.9, -84.6)])
-        assert not isinstance(exc_info.value, ElevationUnavailable)
-
-
 # ── find_towers service-error paths ─────────────────────────────────────────
 
 
@@ -264,7 +169,7 @@ class TestFindTowersServiceErrors:
                 new=unittest.mock.AsyncMock(side_effect=Exception("Maprad down")),
             ),
             unittest.mock.patch(
-                "routes.towers._batch_lookup_elevations",
+                "services.elevation.lookup_many",
                 new=unittest.mock.AsyncMock(return_value={}),
             ),
         ):
@@ -282,7 +187,7 @@ class TestFindTowersServiceErrors:
                 new=unittest.mock.AsyncMock(side_effect=Exception("Network error")),
             ),
             unittest.mock.patch(
-                "routes.towers._batch_lookup_elevations",
+                "services.elevation.lookup_many",
                 new=unittest.mock.AsyncMock(return_value={}),
             ),
         ):
@@ -307,7 +212,7 @@ class TestFindTowersServiceErrors:
                 new=unittest.mock.AsyncMock(side_effect=Exception("AU service down")),
             ),
             unittest.mock.patch(
-                "routes.towers._batch_lookup_elevations",
+                "services.elevation.lookup_many",
                 new=unittest.mock.AsyncMock(return_value={}),
             ),
         ):
@@ -357,7 +262,7 @@ class TestTvBandGatingByRegion:
                 new=unittest.mock.AsyncMock(return_value=self._au_mixed_systems()),
             ),
             unittest.mock.patch(
-                "routes.towers._batch_lookup_elevations",
+                "services.elevation.lookup_many",
                 new=unittest.mock.AsyncMock(return_value={}),
             ),
         ):
@@ -387,7 +292,7 @@ class TestTvBandGatingByRegion:
                 new=unittest.mock.AsyncMock(return_value=us_systems),
             ),
             unittest.mock.patch(
-                "routes.towers._batch_lookup_elevations",
+                "services.elevation.lookup_many",
                 new=unittest.mock.AsyncMock(return_value={}),
             ),
         ):
@@ -421,7 +326,7 @@ class TestTvBandGatingByRegion:
                 new=unittest.mock.AsyncMock(return_value=self._au_mixed_systems()),
             ),
             unittest.mock.patch(
-                "routes.towers._batch_lookup_elevations",
+                "services.elevation.lookup_many",
                 new=unittest.mock.AsyncMock(return_value={}),
             ),
         ):
@@ -481,7 +386,7 @@ class TestFindTowersWithMeasurements:
                 new=unittest.mock.AsyncMock(return_value=[]),
             ),
             unittest.mock.patch(
-                "routes.towers._batch_lookup_elevations",
+                "services.elevation.lookup_many",
                 new=unittest.mock.AsyncMock(return_value={}),
             ),
         ):
@@ -499,7 +404,7 @@ class TestFindTowersWithMeasurements:
                 new=unittest.mock.AsyncMock(return_value=[]),
             ),
             unittest.mock.patch(
-                "routes.towers._batch_lookup_elevations",
+                "services.elevation.lookup_many",
                 new=unittest.mock.AsyncMock(return_value={}),
             ),
         ):
@@ -543,7 +448,7 @@ class TestFindTowersWithMeasurements:
                 new=unittest.mock.AsyncMock(return_value=[]),
             ),
             unittest.mock.patch(
-                "routes.towers._batch_lookup_elevations",
+                "services.elevation.lookup_many",
                 new=unittest.mock.AsyncMock(return_value={}),
             ),
         ):
@@ -736,8 +641,8 @@ class TestElevationEndpoint:
 
     def test_returns_elevation_for_a_point(self, client):
         with unittest.mock.patch(
-            "routes.towers._batch_lookup_elevations",
-            new=unittest.mock.AsyncMock(return_value={(42.387080, -71.249054): 43.5}),
+            "services.elevation.lookup",
+            new=unittest.mock.AsyncMock(return_value=43.5),
         ):
             r = client.get("/api/elevation", params={"lat": 42.38708028093612, "lon": -71.24905416622781})
         assert r.status_code == 200
@@ -749,10 +654,10 @@ class TestElevationEndpoint:
     def test_dependency_failure_returns_503(self, client):
         """Separate from the 404 below so a caller, and the post-deploy smoke,
         can tell an upstream outage from a route that has stopped working."""
-        from routes.towers import ElevationUnavailable
+        from services.elevation import ElevationUnavailable
 
         with unittest.mock.patch(
-            "routes.towers._batch_lookup_elevations",
+            "services.elevation.lookup",
             new=unittest.mock.AsyncMock(side_effect=ElevationUnavailable("open-meteo unreachable")),
         ):
             r = client.get("/api/elevation", params={"lat": 33.9, "lon": -84.6})
@@ -763,8 +668,8 @@ class TestElevationEndpoint:
         """open-meteo answered; it just has no DEM coverage here. That is a
         valid answer about the point, not a failure of the service."""
         with unittest.mock.patch(
-            "routes.towers._batch_lookup_elevations",
-            new=unittest.mock.AsyncMock(return_value={}),
+            "services.elevation.lookup",
+            new=unittest.mock.AsyncMock(return_value=None),
         ):
             r = client.get("/api/elevation", params={"lat": 33.9, "lon": -84.6})
         assert r.status_code == 404
@@ -774,7 +679,7 @@ class TestElevationEndpoint:
         """The smoke check passes a 503 carrying this detail, so a bug of ours
         must never produce one: it would gate a broken route green."""
         with unittest.mock.patch(
-            "routes.towers._batch_lookup_elevations",
+            "services.elevation.lookup",
             new=unittest.mock.AsyncMock(side_effect=KeyError(0)),
         ):
             r = client.get("/api/elevation", params={"lat": 33.9, "lon": -84.6})
@@ -802,31 +707,8 @@ class TestElevationEndpoint:
                 new=unittest.mock.AsyncMock(return_value=raw),
             ),
             unittest.mock.patch(
-                "routes.towers._batch_lookup_elevations",
+                "services.elevation.lookup_many",
                 new=unittest.mock.AsyncMock(side_effect=KeyError(0)),
-            ),
-        ):
-            r = client.get("/api/towers", params={"lat": 33.9, "lon": -84.6, "source": "us"})
-        assert r.status_code == 200
-        assert r.json()["towers"], "towers must still be returned"
-        assert all(t["elevation_m"] is None for t in r.json()["towers"])
-
-    def test_towers_still_answers_when_elevation_is_unavailable(self, client):
-        """Enrichment is best-effort: a dependency outage must not take the
-        tower list down with it."""
-        from routes.towers import ElevationUnavailable
-
-        raw = [system([device(95.5, 33.9, -84.6, callsign="WFAR", eirp=10000)], "Broadcast", "FM")]
-
-        with (
-            unittest.mock.patch("routes.towers.API_KEY", ""),
-            unittest.mock.patch(
-                "routes.towers.fetch_fcc_broadcast_systems",
-                new=unittest.mock.AsyncMock(return_value=raw),
-            ),
-            unittest.mock.patch(
-                "routes.towers._batch_lookup_elevations",
-                new=unittest.mock.AsyncMock(side_effect=ElevationUnavailable("down")),
             ),
         ):
             r = client.get("/api/towers", params={"lat": 33.9, "lon": -84.6, "source": "us"})
@@ -937,3 +819,72 @@ class TestUserFrequencies:
         r = self._get(client, "lat=33.9&lon=-84.6&source=us&frequencies=95.5,101.1&frequencies=88.1")
         assert r.status_code == 200
         assert r.json()["query"]["user_frequencies_mhz"] == [95.5, 101.1, 88.1]
+
+
+# ── query.altitude_m ─────────────────────────────────────────────────────────
+
+
+class TestResolvedAltitude:
+    """The node's own ground level, echoed back so the SPA can show what the
+    search actually ran with."""
+
+    # Far enough from the query point below to tell the two coordinates apart
+    # in the elevations the lookup is asked for.
+    RAW = [system([device(95.5, 33.9, -84.6, callsign="WFAR", eirp=10000)], "Broadcast", "FM")]
+    ELEVATIONS = {(34.0, -84.5): 250.0, (33.9, -84.6): 300.0}
+
+    def _get(self, client, elevations, **params):
+        lookup_many = unittest.mock.AsyncMock(return_value=elevations)
+        with (
+            unittest.mock.patch("routes.towers.API_KEY", ""),
+            unittest.mock.patch(
+                "routes.towers.fetch_fcc_broadcast_systems",
+                new=unittest.mock.AsyncMock(return_value=self.RAW),
+            ),
+            unittest.mock.patch("services.elevation.lookup_many", new=lookup_many),
+        ):
+            r = client.get("/api/towers", params={"lat": 34.0, "lon": -84.5, "source": "us", **params})
+        return r, lookup_many
+
+    def test_an_altitude_the_caller_gave_is_left_alone(self, client):
+        r, lookup_many = self._get(client, self.ELEVATIONS, altitude=150)
+
+        assert r.json()["query"]["altitude_m"] == 150
+        assert (34.0, -84.5) not in lookup_many.call_args.args[0], "the query point must not be looked up"
+
+    def test_a_missing_altitude_is_resolved_from_the_query_point(self, client):
+        r, _ = self._get(client, self.ELEVATIONS)
+
+        assert r.json()["query"]["altitude_m"] == 250.0
+
+    def test_the_query_point_is_asked_for_before_the_towers(self, client):
+        """It rides in the same request as the towers now, and a chunk that
+        fails abandons the ones after it, so trailing the towers would lose the
+        altitude on exactly the large searches that need chunking."""
+        _, lookup_many = self._get(client, self.ELEVATIONS)
+
+        assert lookup_many.call_args.args[0][0] == (34.0, -84.5)
+
+    def test_an_elevation_we_cannot_get_leaves_the_altitude_at_the_default(self, client):
+        r, _ = self._get(client, {})
+
+        assert r.json()["query"]["altitude_m"] == 0
+
+    def test_towers_still_answer_when_open_meteo_refuses(self, client):
+        """Through the real lookup rather than a stubbed one: enrichment is
+        best-effort, so a rate-limited upstream costs the elevations and
+        nothing else."""
+        with (
+            unittest.mock.patch("routes.towers.API_KEY", ""),
+            unittest.mock.patch(
+                "routes.towers.fetch_fcc_broadcast_systems",
+                new=unittest.mock.AsyncMock(return_value=self.RAW),
+            ),
+            make_httpx_mock(get_return=status_error_response(429)),
+        ):
+            r = client.get("/api/towers", params={"lat": 34.0, "lon": -84.5, "source": "us"})
+
+        assert r.status_code == 200
+        assert r.json()["towers"], "towers must still be returned"
+        assert all(t["elevation_m"] is None for t in r.json()["towers"])
+        assert r.json()["query"]["altitude_m"] == 0

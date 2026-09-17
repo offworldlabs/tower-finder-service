@@ -5,14 +5,14 @@ import logging
 import os
 from uuid import uuid4
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from clients.fcc import fetch_fcc_broadcast_systems
 from clients.maprad import fetch_broadcast_systems
 from core.auth import require_admin
 from models.measurements import MeasurementPayload
-from services import tower_ranking
+from services import elevation, tower_ranking
+from services.elevation import ElevationUnavailable
 from services.region_lookup import SUPPORTED_REGIONS, UNSUPPORTED_REGION_DETAIL, classify_region
 from services.tower_ranking import (
     allowed_bands_for_region,
@@ -48,55 +48,6 @@ def _detect_source(lat: float, lon: float) -> str:
     # Edge-of-country false negatives are accepted for now; revisit when
     # coverage and demod standards expand.
     raise HTTPException(status_code=422, detail=UNSUPPORTED_REGION_DETAIL)
-
-
-class ElevationUnavailable(Exception):
-    """The elevation dependency could not be reached, or would not answer.
-
-    Distinct from a point it simply has no data for, which is a valid answer
-    and comes back as an absent key.
-    """
-
-
-async def _lookup_elevation(lat: float, lon: float) -> float | None:
-    result = await _batch_lookup_elevations([(lat, lon)])
-    return result.get((round(lat, 6), round(lon, 6)))
-
-
-async def _batch_lookup_elevations(
-    coords: list[tuple[float, float]],
-) -> dict[tuple[float, float], float]:
-    if not coords:
-        return {}
-    url = "https://api.open-meteo.com/v1/elevation"
-    unique = list(dict.fromkeys((round(c[0], 6), round(c[1], 6)) for c in coords))
-    lats = ",".join(str(c[0]) for c in unique)
-    lons = ",".join(str(c[1]) for c in unique)
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(url, params={"latitude": lats, "longitude": lons})
-            resp.raise_for_status()
-            data = resp.json()
-            elevations = data.get("elevation", [])
-            result = {}
-            for i, coord in enumerate(unique):
-                if i < len(elevations) and elevations[i] is not None:
-                    result[coord] = float(elevations[i])
-            return result
-    # Narrow deliberately: a transport fault, a 5xx or 429, or a body that will
-    # not read as numbers is open-meteo's failure. Anything else is a fault in
-    # the code above and must not be dressed up as the dependency being down,
-    # which the post-deploy smoke passes on.
-    except (httpx.HTTPError, ValueError) as exc:
-        # A 4xx is open-meteo rejecting the request we built, which is ours to
-        # answer for: it must reach the caller as a 500. 429 is the exception,
-        # being its rate limit rather than anything wrong with the request.
-        if isinstance(exc, httpx.HTTPStatusError):
-            status = exc.response.status_code
-            if status < 500 and status != 429:
-                raise
-        logging.warning("Batch elevation lookup failed: %s", exc)
-        raise ElevationUnavailable(str(exc)) from exc
 
 
 def _resolve_source(source: str, lat: float, lon: float) -> str:
@@ -136,21 +87,29 @@ async def _fetch_raw_towers(source: str, lat: float, lon: float, radius_km: int)
     return raw
 
 
-async def _enrich_with_elevation(towers: list) -> None:
-    """Attach ground elevation + total altitude to each tower in place."""
-    tower_coords = [(t["latitude"], t["longitude"]) for t in towers]
+async def _enrich_with_elevation(towers: list, query_point: tuple[float, float] | None = None) -> float | None:
+    """Attach ground elevation + total altitude to each tower in place.
+
+    ``query_point`` rides along in the same upstream request and comes back as
+    the return value, so the node's own altitude and the towers' elevations
+    cost one round trip rather than two.
+    """
+    # Leading, not trailing: the batch is chunked in order and abandoned at the
+    # first chunk that fails, so putting it last would lose the node's own
+    # altitude on exactly the large searches that need chunking.
+    coords = [query_point] if query_point is not None else []
+    coords += [(t["latitude"], t["longitude"]) for t in towers]
+
     try:
-        elevations = await _batch_lookup_elevations(tower_coords)
-    except ElevationUnavailable:
-        elevations = {}
+        elevations = await elevation.lookup_many(coords)
     except Exception:
         # Best-effort by design: the tower list is the answer here, so a fault
         # in the lookup itself must not take it down with it.
         logging.exception("Elevation enrichment failed")
         elevations = {}
+
     for t in towers:
-        key = (round(t["latitude"], 6), round(t["longitude"], 6))
-        elev = elevations.get(key)
+        elev = elevations.get(elevation.key(t["latitude"], t["longitude"]))
         t["elevation_m"] = round(elev, 1) if elev is not None else None
         if elev is not None and t.get("antenna_height_m") is not None:
             t["altitude_m"] = round(elev + t["antenna_height_m"], 1)
@@ -158,6 +117,8 @@ async def _enrich_with_elevation(towers: list) -> None:
             t["altitude_m"] = round(elev, 1)
         else:
             t["altitude_m"] = None
+
+    return elevations.get(elevation.key(*query_point)) if query_point is not None else None
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -185,20 +146,6 @@ async def find_towers(
 
     raw = await _fetch_raw_towers(source, lat, lon, effective_radius)
 
-    resolved_altitude = altitude
-    if altitude == 0:
-        # Best-effort, as in _enrich_with_elevation: an elevation we cannot get
-        # leaves the caller's own altitude standing, whoever's fault it was.
-        try:
-            elev = await _lookup_elevation(lat, lon)
-        except ElevationUnavailable:
-            elev = None
-        except Exception:
-            logging.exception("Elevation lookup failed")
-            elev = None
-        if elev is not None:
-            resolved_altitude = elev
-
     # Filled in by process_and_rank; echoed back so a client can tell which
     # ordering it got rather than inferring it from the rows.
     diagnostics: dict = {}
@@ -212,7 +159,10 @@ async def find_towers(
         allowed_bands=allowed_bands_for_region(source),
         diagnostics=diagnostics,
     )
-    await _enrich_with_elevation(towers)
+    # Only when the caller gave none: an altitude they set is theirs, and an
+    # elevation we cannot get leaves it standing.
+    query_elev = await _enrich_with_elevation(towers, query_point=(lat, lon) if altitude == 0 else None)
+    resolved_altitude = altitude if query_elev is None else query_elev
 
     return {
         "towers": towers,
@@ -291,10 +241,10 @@ async def get_elevation(
     """
     # 503 and 404 rather than one 502: a caller, and the post-deploy smoke,
     # must be able to tell "the dependency is down" from "this route is broken".
-    # Only _batch_lookup_elevations' narrow classification keeps that true; a
-    # fault of our own reaches the caller as a 500, which the smoke fails on.
+    # Only the service's narrow classification keeps that true; a fault of our
+    # own reaches the caller as a 500, which the smoke fails on.
     try:
-        elev = await _lookup_elevation(lat, lon)
+        elev = await elevation.lookup(lat, lon)
     except ElevationUnavailable as exc:
         raise HTTPException(status_code=503, detail="Elevation service unavailable") from exc
     if elev is None:
