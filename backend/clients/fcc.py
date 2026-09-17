@@ -9,9 +9,11 @@ TV Query: https://transition.fcc.gov/cgi-bin/tvq
 FM Query: https://transition.fcc.gov/cgi-bin/fmq
 """
 
+import asyncio
 import logging
 import math
 import re
+import time
 
 import httpx
 
@@ -19,6 +21,141 @@ log = logging.getLogger(__name__)
 
 _TV_URL = "https://transition.fcc.gov/cgi-bin/tvq"
 _FM_URL = "https://transition.fcc.gov/cgi-bin/fmq"
+
+_TIMEOUT_S = 30.0
+
+# The licensing database moves on the order of weeks, so a day-old answer is
+# the same answer. What it buys is the whole cost of the endpoint: a search of
+# the dense north-east corridor selects eleven states, and each is a slow
+# legacy CGI request.
+_CACHE_TTL_S = 24 * 60 * 60
+
+# Every state and territory in both databases, so a service answering searches
+# across several US regions in a day holds them all rather than churning them
+# against each other: eviction is by insertion order, so a hot entry re-served
+# from the cache does not defend its place. The bound is a backstop against
+# unbounded growth, not a working limit. Measured, an entry averages ~100 kB of
+# response body, and the eleven states of a New York search came to 2.2 MB.
+_CACHE_MAX_ENTRIES = 120
+
+# A slow legacy CGI on a .gov host. The states go together rather than one
+# after another, but asking for a dozen at once is how a single search earns a
+# rate limit for every other one.
+_MAX_CONCURRENT_QUERIES = 4
+
+# (state, "tv"|"fm") -> (expires_at_monotonic, response body). The body rather
+# than the parsed records: parsing a state costs under 20 ms, and records
+# handed out of a day-long cache would be reachable, and so mutable, by every
+# caller that has ever held them.
+_cache: dict[tuple[str, str], tuple[float, str]] = {}
+
+# Built per event loop, not once at import. An asyncio.Semaphore binds to the
+# loop that first contends on it and raises on every other one, and an acquire
+# that raises inside the per-state handler below would be logged as the FCC
+# being unreachable, silently shortening the tower list.
+_gate: asyncio.Semaphore | None = None
+_gate_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _fanout() -> asyncio.Semaphore:
+    global _gate, _gate_loop
+    loop = asyncio.get_running_loop()
+    if _gate is None or _gate_loop is not loop:
+        _gate, _gate_loop = asyncio.Semaphore(_MAX_CONCURRENT_QUERIES), loop
+    return _gate
+
+
+def _cache_get(key: tuple[str, str]) -> str | None:
+    entry = _cache.get(key)
+    if entry is None:
+        return None
+    expires_at, text = entry
+    if expires_at <= time.monotonic():
+        _cache.pop(key, None)
+        return None
+    return text
+
+
+def _cache_put(key: tuple[str, str], text: str) -> None:
+    # Re-inserting moves the key to the end, so a refreshed entry is not the
+    # next one evicted.
+    _cache.pop(key, None)
+    _cache[key] = (time.monotonic() + _CACHE_TTL_S, text)
+    while len(_cache) > _CACHE_MAX_ENTRIES:
+        _cache.pop(next(iter(_cache)))
+
+
+async def _query_state(client, url: str, params: dict, kind: str) -> str | None:
+    """One state's listing, from the cache or from the endpoint.
+
+    None where the endpoint could not be reached: a state that fails is logged
+    and skipped, never cached, so the next search asks for it again rather than
+    holding a gap for a day.
+    """
+    state = params["state"]
+    cached = _cache_get((state, kind))
+    if cached is not None:
+        return cached
+
+    # Acquired outside the handler: a fault in taking the gate is ours, and
+    # must not be reported as the endpoint refusing.
+    async with _fanout():
+        try:
+            resp = await client.get(url, params=params, headers={"User-Agent": "TowerFinder/1.0"})
+            resp.raise_for_status()
+            text = resp.text
+        except Exception as exc:
+            log.warning("FCC %s query for state %s failed: %s", kind.upper(), state, exc)
+            return None
+
+    # A legacy CGI answers a maintenance page with a 200. No US state has no
+    # licensed stations, so a body carrying no records is always wrong, and
+    # holding it would blank that state for the whole of the entry's life.
+    if not any(line.startswith("|") for line in text.splitlines()):
+        log.warning("FCC %s query for state %s answered no records; not caching", kind.upper(), state)
+        return None
+
+    _cache_put((state, kind), text)
+    return text
+
+
+async def _devices_for_states(url: str, kind: str, states: list[str], params_for, parse_line) -> list[dict]:
+    """Every state's devices, the states queried together rather than in turn."""
+    # Through _cache_get, not a membership test: an entry past its life is
+    # present and about to be fetched again, and would otherwise be reported
+    # as cached in the same breath as being asked for.
+    held = sum(1 for state in states if _cache_get((state, kind)) is not None)
+    async with httpx.AsyncClient(timeout=_TIMEOUT_S) as client:
+        bodies = await asyncio.gather(*(_query_state(client, url, params_for(state), kind) for state in states))
+
+    # Which states were actually asked for, since a day-long cache otherwise
+    # makes "the FCC answered" and "the FCC has not been reached since
+    # yesterday" read identically in the log.
+    log.info("FCC %s: %d state(s) served from cache, %d fetched", kind.upper(), held, len(states) - held)
+
+    devices = []
+    for state, text in zip(states, bodies, strict=True):
+        if text is None:
+            continue
+        unreadable = 0
+        for line in text.strip().split("\n"):
+            if not line.startswith("|"):
+                continue
+            try:
+                device = parse_line(line)
+            except Exception:
+                # A record costs its own line and no more. The parse used to
+                # sit inside the per-state handler; loose, an exception here
+                # reaches _fetch_raw_towers, which answers 502 for the whole
+                # search and takes retina-server's deploy probe with it.
+                unreadable += 1
+                continue
+            if device is not None:
+                devices.append(device)
+        if unreadable:
+            log.warning("FCC %s: skipped %d unreadable record(s) for state %s", kind.upper(), unreadable, state)
+    return devices
+
 
 # Channel → approximate center frequency (MHz) for US TV channels
 # Channels 2-6 (VHF-Lo), 7-13 (VHF-Hi), 14-36 (UHF)
@@ -328,35 +465,20 @@ async def fetch_fcc_tv_stations(
     if states is None:
         states = _nearby_states(lat, lon)
 
-    all_devices = []
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        for state in states:
-            try:
-                params = {
-                    "list": "4",
-                    "state": state,
-                    "city": "",
-                    "chan": "0",
-                    "type": "4",  # All service types
-                    "status": "3",  # Licensed only
-                }
-                resp = await client.get(
-                    _TV_URL,
-                    params=params,
-                    headers={"User-Agent": "TowerFinder/1.0"},
-                )
-                resp.raise_for_status()
-                text = resp.text
-
-                for line in text.strip().split("\n"):
-                    if not line.startswith("|"):
-                        continue
-                    device = _parse_tv_line(line)
-                    if device is not None:
-                        all_devices.append(device)
-
-            except Exception as exc:
-                log.warning("FCC TV query for state %s failed: %s", state, exc)
+    all_devices = await _devices_for_states(
+        _TV_URL,
+        "tv",
+        states,
+        lambda state: {
+            "list": "4",
+            "state": state,
+            "city": "",
+            "chan": "0",
+            "type": "4",  # All service types
+            "status": "3",  # Licensed only
+        },
+        _parse_tv_line,
+    )
 
     # Wrap devices as Maprad-compatible system dicts
     systems = []
@@ -393,34 +515,19 @@ async def fetch_fcc_fm_stations(
     if states is None:
         states = _nearby_states(lat, lon)
 
-    all_devices = []
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        for state in states:
-            try:
-                params = {
-                    "list": "4",
-                    "state": state,
-                    "city": "",
-                    "type": "4",
-                    "status": "3",
-                }
-                resp = await client.get(
-                    _FM_URL,
-                    params=params,
-                    headers={"User-Agent": "TowerFinder/1.0"},
-                )
-                resp.raise_for_status()
-                text = resp.text
-
-                for line in text.strip().split("\n"):
-                    if not line.startswith("|"):
-                        continue
-                    device = _parse_fm_line(line)
-                    if device is not None:
-                        all_devices.append(device)
-
-            except Exception as exc:
-                log.warning("FCC FM query for state %s failed: %s", state, exc)
+    all_devices = await _devices_for_states(
+        _FM_URL,
+        "fm",
+        states,
+        lambda state: {
+            "list": "4",
+            "state": state,
+            "city": "",
+            "type": "4",
+            "status": "3",
+        },
+        _parse_fm_line,
+    )
 
     systems = []
     for dev in all_devices:
@@ -446,8 +553,6 @@ async def fetch_fcc_broadcast_systems(
     Returns Maprad-compatible system dicts that can be passed directly
     to calculations.process_and_rank().
     """
-    import asyncio
-
     tv_task = fetch_fcc_tv_stations(lat, lon, radius_km)
     fm_task = fetch_fcc_fm_stations(lat, lon, radius_km)
 
