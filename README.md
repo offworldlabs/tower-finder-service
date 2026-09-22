@@ -28,7 +28,7 @@ The Docker image builds the UI itself and serves it from the same origin as the
 API, so a deployed service is a single container with no separate web host.
 
 Optional env vars:
-- `MAPRAD_API_KEY` — required for `au` and `ca` queries. US searches never reach Maprad: its only US dataset is the FCC ULS licence system, which holds no broadcast stations.
+- `MAPRAD_API_KEY` — required for `au` and `ca` queries. US searches never reach Maprad: its only US dataset is the FCC ULS licence system, which holds no broadcast stations. See "Troubleshooting Maprad (AU / CA) searches" below for the probe script.
 - `TOWER_FINDER_RUNTIME_DIR` — where `tower_config.json` is read/written (default `./data/runtime/`). On first start the runtime overlay is seeded from `backend/config/tower_config.json`.
 - `TOWER_FINDER_GEOCODER_CONTACT` — contact string in the `User-Agent` `POST /api/geocode` sends to Nominatim (default the repo URL). Nominatim's usage policy requires an identifying contact and one request per second; unidentified traffic gets blocked, and it is the fallback for city and ZIP lookups.
 - `TOWER_FINDER_ADMIN_TOKEN` — shared secret gating `PUT /api/config`, presented as `Authorization: Bearer <token>`. Unset closes the endpoint (503) rather than opening it, so a deploy that omits it cannot silently expose a public config write.
@@ -221,6 +221,7 @@ existed gets the shipped model, not free space: nothing needs a config PUT.
 | `backend/services/tower_coverage.py` | Optional n>=2 coverage-area-added scoring, injected into the ranking as a `coverage_scorer` |
 | `backend/clients/fcc.py` | FCC TV/FM Query CGI client |
 | `backend/clients/maprad.py` | Maprad.io broadcast-systems client |
+| `scripts/maprad_probe.py` | Operator probe: what Maprad holds near a point, and which subtype vocabulary it answers to |
 | `backend/config/tower_config.json` | Default ranking config (image-shipped) |
 | `backend/tests/` | pytest suite (176 tests); integration tests require running `capture_fixture.py` first) |
 | `frontend/` | The standalone React UI (Vite). Built into the image and served by `app.py`; `npm test` / `npm run test:e2e` cover it |
@@ -664,6 +665,40 @@ Maprad's upstream is billed per query. Both serve US tower queries via the
 keyless FCC path as normal, but every `au` or `ca` query returns 500. A
 ranking change that touches the Maprad path can only be exercised in
 production.
+
+### Troubleshooting Maprad (AU / CA) searches
+
+Maprad reports a refused query (no read access to a source, an unknown
+field, an oversized page) as a GraphQL error inside an HTTP 200. The client
+turns that into a 502 whose detail carries upstream's own words, e.g.
+`Maprad rejected the ca query: READ access to 'source' [ca] is not authorized.`,
+and the UI shows it in the error banner. A 200 with zero towers therefore
+means Maprad answered and matched nothing, not that it refused. If one
+subtype query fails and others succeed, the search answers with what it has
+and the failure is logged at warning (`docker logs tower-finder-prod`).
+
+Each regulator has its own licence vocabulary, and a subtype the source does
+not use silently matches nothing. AU (ACMA RRL) is asked for `Commercial
+Television`, `National Broadcasting` and `Commercial Radio`; CA (ISED SMS) for
+`FM` and `DTV` under licence type `Broadcast`. When every CA subtype query
+comes back empty the client retries once with any `Broadcast` licence in
+54-698 MHz, and logs that it did. CA's `eirp` arrives in dBW under a W label
+and is converted to watts in the client.
+
+To see what Maprad holds near a point, and which vocabulary it answers to, run
+the probe on production (the image does not ship `scripts/`, so it goes in on
+stdin; about ten metered queries per run):
+
+```bash
+docker exec -i tower-finder-prod python - 43.6532 -79.3832 ca < scripts/maprad_probe.py
+# optional 4th argument: radius in km (default 80)
+```
+
+It prints any GraphQL errors verbatim, licence type and subtype counts near
+the point (Maprad's `systemCount` aggregation, or a tally of unfiltered pages
+if that is refused), the hit count of every AU and CA subtype query and of the
+CA fallback, and the raw `eirp` / `transmitPower` of a few devices. It exits 1
+if any query came back with an error.
 
 ### Rollback (manual)
 

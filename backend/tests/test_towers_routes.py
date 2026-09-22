@@ -190,6 +190,155 @@ class TestFindTowersServiceErrors:
         assert r.status_code == 502
 
 
+class _GraphQLUpstream:
+    """maprad.io at the httpx boundary: every query gets the same JSON body.
+
+    Stands in for ``httpx.AsyncClient`` (constructed, then entered as a
+    context manager) so the whole path from the route through the client's
+    fan-out is exercised, not just the route's exception mapping.
+    """
+
+    def __init__(self, body_for):
+        self._body_for = body_for
+        self.queries = []
+
+    def __call__(self, *args, **kwargs):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    async def post(self, url, json=None, headers=None):
+        self.queries.append(json["query"])
+        body = self._body_for(json["query"])
+        response = unittest.mock.Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = body
+        return response
+
+
+_CA_NOT_AUTHORIZED = "READ access to 'source' [ca] is not authorized."
+_TORONTO = (43.6532, -79.3832)
+
+
+def _refusal(query):
+    return {
+        "errors": [{"message": _CA_NOT_AUTHORIZED, "extensions": {"classification": "DataFetchingException"}}],
+        "data": {"systems": None},
+    }
+
+
+class TestMapradRefusalReachesTheCaller:
+    """A query maprad.io refuses must surface as a 502 naming the cause,
+    never as a 200 with zero towers."""
+
+    def test_refusal_from_the_client_maps_to_502_with_the_upstream_message(self):
+        from clients.maprad import MapradQueryError
+
+        with (
+            unittest.mock.patch("routes.towers.API_KEY", "fake-key"),
+            unittest.mock.patch(
+                "routes.towers.fetch_broadcast_systems",
+                new=unittest.mock.AsyncMock(side_effect=MapradQueryError("ca", _CA_NOT_AUTHORIZED)),
+            ),
+        ):
+            with TestClient(app, raise_server_exceptions=False) as c:
+                r = c.get(f"/api/towers?lat={_TORONTO[0]}&lon={_TORONTO[1]}&source=ca")
+
+        assert r.status_code == 502
+        assert r.json()["detail"] == f"Maprad rejected the ca query: {_CA_NOT_AUTHORIZED}"
+
+    def test_graphql_error_on_the_first_page_is_a_502_end_to_end(self):
+        upstream = _GraphQLUpstream(_refusal)
+        with (
+            unittest.mock.patch("routes.towers.API_KEY", "fake-key"),
+            unittest.mock.patch("clients.maprad.httpx.AsyncClient", upstream),
+        ):
+            with TestClient(app, raise_server_exceptions=False) as c:
+                r = c.get(f"/api/towers?lat={_TORONTO[0]}&lon={_TORONTO[1]}&source=ca")
+
+        assert r.status_code == 502
+        assert r.json()["detail"] == f"Maprad rejected the ca query: {_CA_NOT_AUTHORIZED}"
+        assert upstream.queries, "the client was never reached"
+
+    def test_post_maps_a_refusal_the_same_way(self):
+        upstream = _GraphQLUpstream(_refusal)
+        payload = {"lat": _TORONTO[0], "lon": _TORONTO[1], "source": "ca", "measurements": [_VALID_MEASUREMENT]}
+        with (
+            unittest.mock.patch("routes.towers.API_KEY", "fake-key"),
+            unittest.mock.patch("clients.maprad.httpx.AsyncClient", upstream),
+        ):
+            with TestClient(app, raise_server_exceptions=False) as c:
+                r = c.post("/api/towers", json=payload)
+
+        assert r.status_code == 502
+        assert _CA_NOT_AUTHORIZED in r.json()["detail"]
+
+    def test_other_failures_keep_the_generic_502(self):
+        with (
+            unittest.mock.patch("routes.towers.API_KEY", "fake-key"),
+            unittest.mock.patch(
+                "routes.towers.fetch_broadcast_systems",
+                new=unittest.mock.AsyncMock(side_effect=RuntimeError("socket closed")),
+            ),
+        ):
+            with TestClient(app, raise_server_exceptions=False) as c:
+                r = c.get(f"/api/towers?lat={_TORONTO[0]}&lon={_TORONTO[1]}&source=ca")
+
+        assert r.status_code == 502
+        assert r.json()["detail"] == "External service unavailable. Please try again."
+
+
+class TestCanadianSearchEndToEnd:
+    """A Toronto search through the real client, with maprad.io faked at httpx."""
+
+    @staticmethod
+    def _ckfm(query):
+        # CKFM-FM as maprad.io's CA index holds it: 99.9 MHz from the CN Tower,
+        # ERP in dBW under a W label. Only the FM leg finds anything.
+        if 'values: "FM"' not in query:
+            return {"data": {"systems": {"edges": [], "pageInfo": {"hasNextPage": False}}}}
+        node = {
+            "id": "ckfm",
+            "licence": {"type": "Broadcast", "subtype": "FM"},
+            "devices": [
+                {
+                    "callsign": "CKFM-FM",
+                    "frequency": 99.9,
+                    "eirp": 45.58469,
+                    "transmitPower": 17000.0,
+                    "antennaHeight": 469.7,
+                    "location": {"name": "Toronto", "state": "ON", "geom": "POINT(-79.3871 43.6426)"},
+                }
+            ],
+        }
+        return {"data": {"systems": {"edges": [{"cursor": "c1", "node": node}], "pageInfo": {"hasNextPage": False}}}}
+
+    def test_toronto_returns_the_station_at_its_real_power(self):
+        upstream = _GraphQLUpstream(self._ckfm)
+        with (
+            unittest.mock.patch("routes.towers.API_KEY", "fake-key"),
+            unittest.mock.patch("clients.maprad.httpx.AsyncClient", upstream),
+            unittest.mock.patch(
+                "services.elevation.lookup_many",
+                new=unittest.mock.AsyncMock(return_value={}),
+            ),
+        ):
+            with TestClient(app, raise_server_exceptions=False) as c:
+                r = c.get(f"/api/towers?lat={_TORONTO[0]}&lon={_TORONTO[1]}&source=ca")
+
+        assert r.status_code == 200
+        towers = r.json()["towers"]
+        assert [t["callsign"] for t in towers] == ["CKFM-FM"]
+        # 45.58 dBW is 75.6 dBm; read as watts it would have been 46.6.
+        assert towers[0]["eirp_dbm"] == pytest.approx(75.6, abs=0.1)
+        # The subtype legs found data, so no fallback query was spent.
+        assert not any("licence_type" in q for q in upstream.queries)
+
+
 # ── TV-band gating by region (ATSC allowlist) ────────────────────────────────
 
 
