@@ -135,8 +135,9 @@ def classify_region(lat: float, lon: float) -> str | None:
     """Return "us", "ca", "au", or None if the point is in none of them.
 
     Points inside a country polygon are classified by it. Otherwise the
-    nearest region within COASTAL_TOLERANCE_KM wins (nearest, so a boat in the
-    Strait of Georgia goes to whichever shore is closer); beyond that, None.
+    nearest region within COASTAL_TOLERANCE_KM wins (nearest, so a boat in
+    Haro Strait goes to the closer of the US and Canadian shores); beyond
+    that, None.
     """
     _load_borders()
     point = Point(lon, lat)  # GeoJSON order is (lon, lat)
