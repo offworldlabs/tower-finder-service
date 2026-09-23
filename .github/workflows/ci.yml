@@ -10,6 +10,11 @@ on:
 env:
   APP_DIR: /opt/tower-finder-service
 
+# Every job reads the repository and nothing more; a job that needs another
+# scope declares its own.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
