@@ -1,7 +1,7 @@
 """FastAPI entry point.
 
 Run locally with:
-    uvicorn app:app --reload
+    PYTHONPATH=.:backend uv run uvicorn app:app --reload
 
 That serves the API only. For the UI, either build it once
 (``cd frontend && npm ci && npm run build``) so ``create_app`` picks up

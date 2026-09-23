@@ -20,6 +20,9 @@ config change reaches the route.
 ``make_httpx_mock``/``status_error_response`` stand in for an upstream: every
 route here that leaves the process does so through ``httpx.AsyncClient``, so
 one patch of the class covers the elevation lookup and the geocoders alike.
+
+``strip_shell_comments`` leaves only the commands of a shell text, for the
+tests that assert on the CI workflow and the Dockerfile.
 """
 
 import contextlib
@@ -153,3 +156,30 @@ def status_error_response(status_code):
         )
     )
     return resp
+
+
+def strip_shell_comments(text):
+    """Return `text` with shell comments removed.
+
+    For tests that search a script for a command, so prose is not searchable:
+    a comment mentioning `exit` cannot fail a run, and commenting a guarded
+    command out cannot pass one. A `#` opens a comment only at the start of a
+    word and outside quotes, so `echo "a # b"; exit` keeps both its hash and
+    the command after it. Quote state is tracked per line, which is all these
+    scripts need.
+    """
+    stripped = []
+    for line in text.splitlines():
+        quote = ""
+        cut = len(line)
+        for i, char in enumerate(line):
+            if quote:
+                if char == quote:
+                    quote = ""
+            elif char in "'\"":
+                quote = char
+            elif char == "#" and (i == 0 or line[i - 1].isspace()):
+                cut = i
+                break
+        stripped.append(line[:cut].rstrip())
+    return "\n".join(stripped)

@@ -1,12 +1,9 @@
-[build-system]
-requires = ["setuptools>=61"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "tower-finder-service"
 version = "0.1.0"
 description = "FastAPI service that ranks broadcast towers near a node from FCC + Maprad data."
-requires-python = ">=3.10"
+# The interpreter CI and the image run, so the lock is solved for it alone.
+requires-python = "==3.12.*"
 dependencies = [
   "fastapi>=0.110",
   "uvicorn[standard]>=0.27",
@@ -18,7 +15,7 @@ dependencies = [
   "numpy>=1.26",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
   "pytest>=8",
   "pytest-asyncio>=0.23",
@@ -31,12 +28,11 @@ dev = [
   "pyyaml>=6",
 ]
 
-[tool.setuptools]
-package-dir = {"" = "backend"}
-
-[tool.setuptools.packages.find]
-where = ["backend"]
-include = ["clients*", "routes*", "services*"]
+# An application run from its source tree, not a distribution: uv installs its
+# dependencies and never the service itself. Imports resolve through the
+# image's PYTHONPATH and, under pytest, the pythonpath below.
+[tool.uv]
+package = false
 
 [tool.pytest.ini_options]
 pythonpath = [".", "backend"]
@@ -48,4 +44,3 @@ markers = [
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"

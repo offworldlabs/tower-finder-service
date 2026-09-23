@@ -1,3 +1,7 @@
+# The uv that syncs the image. Global because only an ARG declared ahead of
+# every stage is visible to a FROM.
+ARG UV_VERSION=0.12.5
+
 # ── Frontend build ────────────────────────────────────────────────────────────
 FROM node:20-alpine AS frontend-build
 
@@ -16,19 +20,35 @@ ENV VITE_CARTO_API_KEY=${VITE_CARTO_API_KEY}
 RUN npm run build
 
 
+# ── uv ────────────────────────────────────────────────────────────────────────
+# Only ever a mount source below, so nothing from it reaches the shipped image.
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+
+
 # ── Service ───────────────────────────────────────────────────────────────────
 FROM python:3.12-slim
 
 WORKDIR /app
 
-# Dependencies (declared in pyproject.toml: fastapi, uvicorn[standard], httpx, shapely)
-COPY pyproject.toml ./
+# Dependencies, synced from uv.lock ahead of the source so a code change leaves
+# this layer cached. A venv rather than the system site-packages, because
+# `uv sync` makes its environment match the lock and would remove the base
+# image's own pip.
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
+    PATH=/opt/venv/bin:$PATH
+# Holds the venv to this image's interpreter.
+ENV UV_PYTHON_DOWNLOADS=never
+COPY pyproject.toml uv.lock ./
+# --compile-bytecode: the venv is root-owned and the app runs as appuser, so any
+# .pyc not written here is recompiled on every boot.
+RUN --mount=from=uv,source=/uv,target=/bin/uv \
+    uv sync --locked --no-dev --no-cache --compile-bytecode
+
 COPY app.py ./
 COPY backend/ ./backend/
-RUN pip install --no-cache-dir .
 
-# Built UI, served by app.py. Kept out of the pip layer so a frontend-only
-# change doesn't invalidate the Python install.
+# Built UI, served by app.py. Kept out of the dependency layer so a
+# frontend-only change doesn't invalidate the Python install.
 COPY --from=frontend-build /app/frontend/dist ./frontend/dist
 
 # app.py (root) + backend packages (models, config, services, clients, routes)

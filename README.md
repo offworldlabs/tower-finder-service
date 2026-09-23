@@ -5,13 +5,14 @@ FastAPI service that ranks broadcast towers near a node from FCC and Maprad data
 ## Run
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-uvicorn app:app --reload
+uv sync
+PYTHONPATH=.:backend uv run uvicorn app:app --reload
 ```
 
-That serves the API. For the UI, either build it once so `app.py` picks up
-`frontend/dist`:
+That serves the API. The service is never installed into `.venv`, so
+`PYTHONPATH` puts `app.py` and `backend/` on the path, as the image does and as
+`pythonpath` in `pyproject.toml` does for pytest. For the UI, either build it
+once so `app.py` picks up `frontend/dist`:
 
 ```bash
 cd frontend && npm ci && npm run build
@@ -225,7 +226,7 @@ existed gets the shipped model, not free space: nothing needs a config PUT.
 | `backend/tests/` | pytest suite (176 tests); integration tests require running `capture_fixture.py` first) |
 | `frontend/` | The standalone React UI (Vite). Built into the image and served by `app.py`; `npm test` / `npm run test:e2e` cover it |
 | `frontend/src/surface.css` | Design tokens and the shared console idioms; the only file holding a palette value |
-| `pyproject.toml` | Package + tooling config |
+| `pyproject.toml`, `uv.lock` | Dependencies, their lock, and tooling config |
 
 ## UI surface
 
@@ -270,10 +271,24 @@ Three rules keep it working:
 `useResolvedTheme` exists for the one thing CSS cannot reach: the basemap is a
 tile set chosen in JavaScript, so the map has to be told which palette is drawn.
 
+## Dependencies
+
+`uv.lock` pins every package CI tests and the image runs, and `uv sync` builds
+`.venv` from it, dev tools included. Change a dependency in `pyproject.toml` and
+relock in the same commit, with the uv the Dockerfile pins as `UV_VERSION`,
+which CI also runs, so the image can always read the lock:
+
+```bash
+uv tool run --from "uv==$(sed -n 's/^ARG UV_VERSION=//p' Dockerfile)" uv lock
+```
+
+CI fails a lock that no longer matches `pyproject.toml`. Nothing relocks on its
+own: `uv lock --upgrade-package <name>` moves one package deliberately.
+
 ## Tests
 
 ```bash
-pytest -q                 # backend
+uv run pytest -q          # backend
 cd frontend && npm test   # frontend unit tests
 cd frontend && npm run test:e2e   # Playwright, against the built dist
 ```
