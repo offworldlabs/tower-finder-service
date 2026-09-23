@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests._helpers import strip_shell_comments
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 EXPECTED = {
@@ -96,38 +98,11 @@ HOSTNAME_GUARD_RE = re.compile(
 MUTATING_COMMAND_RE = re.compile(r'cd\s+"\$APP_DIR"|git reset --hard|docker compose up')
 
 
-def _strip_comments(text):
-    """Return `text` with shell comments removed.
-
-    Every guard below searches for a command, so prose must not be searchable:
-    a comment mentioning `exit` cannot fail a run, and commenting a guarded
-    command out cannot pass one. A `#` opens a comment only at the start of a
-    word and outside quotes, so `echo "a # b"; exit` keeps both its hash and
-    the command after it. Quote state is tracked per line, which is all these
-    scripts need.
-    """
-    stripped = []
-    for line in text.splitlines():
-        quote = ""
-        cut = len(line)
-        for i, char in enumerate(line):
-            if quote:
-                if char == quote:
-                    quote = ""
-            elif char in "'\"":
-                quote = char
-            elif char == "#" and (i == 0 or line[i - 1].isspace()):
-                cut = i
-                break
-        stripped.append(line[:cut].rstrip())
-    return "\n".join(stripped)
-
-
 def _ssh_script(job):
     """The deploy script, comments stripped: every caller wants commands."""
     for step in job["steps"]:
         if step.get("uses", "").startswith("appleboy/ssh-action"):
-            return _strip_comments(step["with"]["script"])
+            return strip_shell_comments(step["with"]["script"])
     raise AssertionError("no ssh-action deploy step in job")
 
 
@@ -198,7 +173,7 @@ def test_the_public_smoke_asserts_no_environment(job, workflow):
     over the public name can only ever fail. It belongs on this service's own
     8443 edge, which is where EDGE_ENV_EXPECTED below puts it."""
     assert "EXPECT_ENV" not in _smoke_env(workflow["jobs"][job])
-    script = _strip_comments((REPO_ROOT / "deploy" / "smoke-test.sh").read_text())
+    script = strip_shell_comments((REPO_ROOT / "deploy" / "smoke-test.sh").read_text())
     assert "EXPECT_ENV" not in script, "deploy/smoke-test.sh still reads EXPECT_ENV"
 
 
