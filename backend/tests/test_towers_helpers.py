@@ -45,18 +45,15 @@ class TestDetectSource:
         """Atlanta is in the US mainland region."""
         assert _detect_source(33.7, -84.4) == "us"
 
-    def test_offshore_alaska_edge_raises(self):
-        """These offshore coords aren't inside the mapped US region polygons;
-        _detect_source now raises instead of failing open to 'us'
-        (edge-of-region false negatives are accepted for now)."""
-        with pytest.raises(HTTPException) as exc_info:
-            _detect_source(61.0, -150.0)
-        assert exc_info.value.status_code == 422
-        assert "supported region" in exc_info.value.detail
+    def test_cook_inlet_resolves_to_us(self):
+        """Cook Inlet water ~7 km off the Alaska polygon: covered by no polygon,
+        but within the coastal tolerance, so the nearest region (US) serves it
+        instead of a 422."""
+        assert _detect_source(61.0, -150.0) == "us"
 
     def test_offshore_hawaii_edge_raises(self):
-        """South of the main Hawaiian islands — outside the mapped polygons —
-        now raises rather than defaulting to 'us'."""
+        """~65 km south of the main Hawaiian islands — beyond the coastal
+        tolerance, so it raises rather than defaulting to 'us'."""
         with pytest.raises(HTTPException) as exc_info:
             _detect_source(20.0, -157.0)
         assert exc_info.value.status_code == 422

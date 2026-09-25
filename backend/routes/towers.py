@@ -43,10 +43,12 @@ def _detect_source(lat: float, lon: float) -> str:
     region = classify_region(lat, lon)
     if region is not None:
         return region
-    # Deliberate stopgap: we only have tower data + an ATSC demod for the
-    # supported regions, so an unmapped location can't be served meaningfully.
-    # Edge-of-country false negatives are accepted for now; revisit when
-    # coverage and demod standards expand.
+    # We only have tower data + an ATSC demod for the supported regions, so a
+    # location outside them can't be served meaningfully. classify_region()
+    # already absorbs coastline error: points just off the coarse border
+    # polygons (peninsula tips, piers, nearshore water) resolve to the nearest
+    # region within COASTAL_TOLERANCE_KM, so reaching here means genuinely
+    # elsewhere (open ocean, another continent).
     raise HTTPException(status_code=422, detail=UNSUPPORTED_REGION_DETAIL)
 
 
