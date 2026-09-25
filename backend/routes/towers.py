@@ -8,7 +8,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from clients.fcc import fetch_fcc_broadcast_systems
-from clients.maprad import fetch_broadcast_systems
+from clients.maprad import MapradQueryError, fetch_broadcast_systems
 from core.auth import require_admin
 from models.measurements import MeasurementPayload
 from services import elevation, tower_ranking
@@ -77,6 +77,15 @@ async def _fetch_raw_towers(source: str, lat: float, lon: float, radius_km: int)
             raw = await fetch_broadcast_systems(API_KEY, lat, lon, radius_km=radius_km, source=source)
     except HTTPException:
         raise
+    except MapradQueryError as exc:
+        # Upstream answered and refused the query. Its own words go to the
+        # caller, because "try again" is wrong advice for a query that will be
+        # refused the same way every time, and the UI shows this detail as is.
+        logging.warning("Maprad refused the %s query: %s", exc.source, exc.upstream_message)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Maprad rejected the {exc.source} query: {exc.upstream_message}",
+        ) from None
     except Exception:
         logging.exception("Tower data fetch failed")
         raise HTTPException(status_code=502, detail="External service unavailable. Please try again.") from None
