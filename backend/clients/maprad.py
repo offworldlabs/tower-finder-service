@@ -370,7 +370,7 @@ async def fetch_broadcast_systems(
         log.debug("Maprad %s cache miss near %s,%s; joining the walk in flight", source, lat, lon)
     else:
         log.debug("Maprad %s cache miss near %s,%s (radius %s km)", source, lat, lon, radius_km)
-        task = asyncio.ensure_future(_fetch_and_hold(key, api_key, lat, lon, radius_km, source, max_pages))
+        task = asyncio.create_task(_fetch_and_hold(key, api_key, lat, lon, radius_km, source, max_pages))
         _in_flight[key] = task
         task.add_done_callback(lambda done: _walk_finished(key, done))
 
