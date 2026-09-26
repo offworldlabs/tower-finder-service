@@ -223,6 +223,7 @@ existed gets the shipped model, not free space: nothing needs a config PUT.
 | `backend/clients/fcc.py` | FCC TV/FM Query CGI client |
 | `backend/clients/maprad.py` | Maprad.io broadcast-systems client |
 | `scripts/maprad_probe.py` | Operator probe: what Maprad holds near a point, and which subtype vocabulary it answers to |
+| `scripts/maprad_completeness.py` | Operator check: does a deployment's Canadian tower list match maprad.io's own index? No key needed |
 | `backend/config/tower_config.json` | Default ranking config (image-shipped) |
 | `backend/tests/` | pytest suite (176 tests); integration tests require running `capture_fixture.py` first) |
 | `frontend/` | The standalone React UI (Vite). Built into the image and served by `app.py`; `npm test` / `npm run test:e2e` cover it |
@@ -714,6 +715,47 @@ the point (Maprad's `systemCount` aggregation, or a tally of unfiltered pages
 if that is refused), the hit count of every AU and CA subtype query and of the
 CA fallback, and the raw `eirp` / `transmitPower` of a few devices. It exits 1
 if any query came back with an error.
+
+#### Is a Canadian search complete?
+
+A CA search can come back short without saying so: the client walks a bounded
+number of Maprad pages per subtype. `scripts/maprad_completeness.py` compares
+what a deployment returns with what maprad.io itself lists for the same circle.
+It asks the service `GET /api/towers?limit=200` (same radius), then pages the
+facet search the maprad.io map reads (`https://maprad.io/ext/s`, source `CA`,
+one `dv_licence_subtype` filter per subtype). That endpoint answers without a
+key, so the check costs nothing metered beyond the one tower search per
+target. It is an undocumented interface of maprad.io's UI, not a published
+API, and may change or disappear without notice; if it starts answering 4xx
+or an empty `response`, the script reports the target as failed.
+
+Stdlib only, so it runs from any checkout, on any machine:
+
+```bash
+python3 scripts/maprad_completeness.py toronto montreal vancouver
+# presets: toronto montreal vancouver ubc, or any lat,lon
+# options: --host (default https://towers.retina.fm) --radius 80
+#          --subtypes FM,DTV --strong-dbw 40 --timeout 150
+```
+
+Per target it prints the service's tower count and the source it resolved,
+then one row per subtype: `records` is the index's record count, `stations`
+the distinct stations among them, `present` how many of those the service
+returned (as a tower's `callsign` or in its `shared_callsigns`), `missing`
+the rest and `strong` how many missing are at or above `--strong-dbw`
+(40 dBW EIRP, about 10 kW). The strongest missing stations follow, with EIRP,
+frequency and site; `!` marks the strong ones. Callsigns are compared per
+station: auxiliary records (`CKFM-FM-AX1`) and HD Radio records (`CFMZ-HD`,
+`CJKX-HD-2`) fold into their main station (`CKFM-FM`, `CFMZ-FM`, `CJKX-FM-2`).
+
+Exit 1 when any missing station is at or above the threshold; otherwise 2 when
+a target could not be checked (the service answered 422/500/502 or the index
+failed; its detail is printed); otherwise 0. Staging and test have no
+`MAPRAD_API_KEY`, so there every target fails with a 500: only production can
+be checked end to end. "Missing" means absent from the service's answer; it
+does not say whether the Maprad walk never fetched the station or the ranking
+dropped it; `maprad_probe.py` above, run on production, shows what the metered
+query itself returns.
 
 ### Rollback (manual)
 
