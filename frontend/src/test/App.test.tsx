@@ -118,10 +118,13 @@ describe("App", () => {
     expect(summary).toHaveTextContent(/United States/i);
   });
 
-  it("shows the server's detail message when the region is unsupported", async () => {
+  it("shows the server's detail message when no region is within the radius", async () => {
     mockApi({
       status: 422,
-      body: { detail: "Location is not in a supported region (US, CA, AU)." },
+      body: {
+        detail:
+          "No tower data within 80 km of this location (coverage: US, CA, AU). Try a larger search radius.",
+      },
     });
     const user = userEvent.setup();
     renderApp();
@@ -129,7 +132,7 @@ describe("App", () => {
 
     await waitFor(() =>
       expect(document.querySelector(".error-banner")).toHaveTextContent(
-        /not in a supported region/i,
+        /No tower data within 80 km.*Try a larger search radius/i,
       ),
     );
   });

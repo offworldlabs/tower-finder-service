@@ -32,27 +32,27 @@ from tests._helpers import system as _system
 
 class TestDetectSource:
     def test_sydney_au(self):
-        assert _detect_source(-33.8688, 151.2093) == "au"
+        assert _detect_source(-33.8688, 151.2093, 80) == "au"
 
     def test_washington_dc_us(self):
-        assert _detect_source(38.8977, -77.0365) == "us"
+        assert _detect_source(38.8977, -77.0365, 80) == "us"
 
     def test_toronto_ca(self):
-        assert _detect_source(43.6532, -79.3832) == "ca"
+        assert _detect_source(43.6532, -79.3832, 80) == "ca"
 
     def test_anchorage_us(self):
-        assert _detect_source(61.2181, -149.9003) == "us"
+        assert _detect_source(61.2181, -149.9003, 80) == "us"
 
     def test_honolulu_us(self):
-        assert _detect_source(21.3069, -157.8583) == "us"
+        assert _detect_source(21.3069, -157.8583, 80) == "us"
 
     def test_unknown_region_raises(self):
         from fastapi import HTTPException
 
         with pytest.raises(HTTPException) as exc_info:
-            _detect_source(0, 0)
+            _detect_source(0, 0, 80)
         assert exc_info.value.status_code == 422
-        assert "supported region" in exc_info.value.detail
+        assert "No tower data within 80 km" in exc_info.value.detail
 
 
 # ── Broadcast band classification ────────────────────────────────────────────

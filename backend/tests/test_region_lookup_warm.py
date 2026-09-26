@@ -49,7 +49,7 @@ class TestWarmBorders:
         """Scripts and tests import this module without running app startup."""
         _clear_cache()
 
-        assert region_lookup.classify_region(42.38708028093612, -71.24905416622781) == "us"
+        assert region_lookup.classify_region(42.38708028093612, -71.24905416622781, 80) == "us"
 
     def test_a_warm_cache_is_never_re_parsed(self):
         """The regression this guards: the 5 MB parse happening on the request path.
@@ -62,8 +62,8 @@ class TestWarmBorders:
         region_lookup.warm_borders()
 
         with unittest.mock.patch.object(region_lookup, "shape", side_effect=AssertionError("re-parsed after warm-up")):
-            assert region_lookup.classify_region(42.38708028093612, -71.24905416622781) == "us"
-            assert region_lookup.classify_region(48.8566, 2.3522) is None
+            assert region_lookup.classify_region(42.38708028093612, -71.24905416622781, 80) == "us"
+            assert region_lookup.classify_region(48.8566, 2.3522, 80) is None
 
 
 class TestStartupWarmsBorders:
