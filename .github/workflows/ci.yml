@@ -10,12 +10,17 @@ on:
 env:
   APP_DIR: /opt/tower-finder-service
 
+# Every job reads the repository and nothing more; a job that needs another
+# scope declares its own.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
       # setup-python owns the interpreter and uv syncs .venv from the lock.
@@ -30,7 +35,7 @@ jobs:
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
             echo "Expected one UV_VERSION in the Dockerfile, found: '$version'"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           version: ${{ steps.uv.outputs.version }}
       - run: uv sync --locked && echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
@@ -47,8 +52,8 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "20"
           cache: npm
@@ -85,7 +90,7 @@ jobs:
           test -n "$STAGING_HOST" || { echo "STAGING_HOST is not set"; exit 1; }
           test -n "$STAGING_SSH_KEY" || { echo "STAGING_SSH_KEY is not set"; exit 1; }
       - name: Deploy to staging via SSH
-        uses: appleboy/ssh-action@v1
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         with:
           host: ${{ secrets.STAGING_HOST }}
           username: root
@@ -210,7 +215,7 @@ jobs:
           test -n "$DEPLOY_HOST" || { echo "DEPLOY_HOST is not set"; exit 1; }
           test -n "$DEPLOY_SSH_KEY" || { echo "DEPLOY_SSH_KEY is not set"; exit 1; }
       - name: Deploy to production via SSH
-        uses: appleboy/ssh-action@v1
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: root
@@ -328,7 +333,7 @@ jobs:
     # unreachable production could otherwise sit here for ~11 minutes.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Smoke test production
         env:
           BASE_URL: https://towers.retina.fm
@@ -353,7 +358,7 @@ jobs:
           test -n "$TEST_HOST" || { echo "TEST_HOST is not set"; exit 1; }
           test -n "$TEST_SSH_KEY" || { echo "TEST_SSH_KEY is not set"; exit 1; }
       - name: Deploy to test via SSH
-        uses: appleboy/ssh-action@v1
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         with:
           host: ${{ secrets.TEST_HOST }}
           username: root
