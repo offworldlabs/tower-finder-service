@@ -680,6 +680,9 @@ Maprad's upstream is billed per query. Both serve US tower queries via the
 keyless FCC path as normal, but every `au` or `ca` query returns 500. A
 ranking change that touches the Maprad path can only be exercised in
 production.
+Successful Maprad answers are held in-process for 24 h per (source, radius,
+point rounded to ~1 km), so repeating a search costs no further queries until
+the entry expires or the container restarts.
 
 ### Troubleshooting Maprad (AU / CA) searches
 

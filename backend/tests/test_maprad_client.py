@@ -172,6 +172,15 @@ class _Upstream:
             self.in_flight -= 1
 
 
+@pytest.fixture(autouse=True)
+def _empty_result_cache():
+    # The result cache is module state that outlives a test, and most tests
+    # here ask the same point with a fresh fake upstream each time.
+    maprad.clear_cache()
+    yield
+    maprad.clear_cache()
+
+
 async def _fetch(upstream, **kwargs):
     with unittest.mock.patch.object(maprad.httpx, "AsyncClient", upstream):
         return await maprad.fetch_broadcast_systems("fake-key", -33.87, 151.21, source="au", **kwargs)
@@ -470,3 +479,226 @@ class TestPageBudget:
         with caplog.at_level("WARNING", logger="clients.maprad"):
             await _fetch(upstream)
         assert [r.getMessage() for r in caplog.records if r.levelname == "WARNING"] == []
+
+
+class TestResultCache:
+    """One search is several metered queries and ~7 s; the same search again
+    inside the day is answered in-process."""
+
+    async def test_a_repeated_search_asks_upstream_nothing(self):
+        upstream = _Upstream(pages=2)
+        first = await _fetch(upstream)
+        asked = len(upstream.queries)
+        assert asked == 2 * len(_AU_SUBTYPES)
+        second = await _fetch(upstream)
+        assert len(upstream.queries) == asked
+        assert second == first
+
+    async def test_a_point_within_the_rounding_shares_the_entry(self):
+        # 43.6532 and 43.6541 both round to 43.65: ~100 m apart.
+        upstream = _Upstream()
+        with unittest.mock.patch.object(maprad.httpx, "AsyncClient", upstream):
+            await maprad.fetch_broadcast_systems("fake-key", 43.6532, -79.3832, source="ca")
+            asked = len(upstream.queries)
+            await maprad.fetch_broadcast_systems("fake-key", 43.6541, -79.3791, source="ca")
+        assert len(upstream.queries) == asked
+
+    async def test_the_rounded_point_is_what_upstream_is_asked(self):
+        # So what the entry holds does not depend on which caller came first.
+        upstream = _Upstream()
+        await _fetch_ca(upstream)
+        assert all('"43.65,-79.38"' in q for q in upstream.queries), upstream.queries[0]
+
+    async def test_a_point_more_than_a_kilometre_away_misses(self):
+        upstream = _Upstream()
+        with unittest.mock.patch.object(maprad.httpx, "AsyncClient", upstream):
+            await maprad.fetch_broadcast_systems("fake-key", 43.6532, -79.3832, source="ca")
+            asked = len(upstream.queries)
+            # ~2.2 km north.
+            await maprad.fetch_broadcast_systems("fake-key", 43.6732, -79.3832, source="ca")
+        assert len(upstream.queries) == 2 * asked
+
+    async def test_a_different_radius_misses(self):
+        upstream = _Upstream()
+        await _fetch(upstream, radius_km=80)
+        asked = len(upstream.queries)
+        await _fetch(upstream, radius_km=120)
+        assert len(upstream.queries) == 2 * asked
+
+    async def test_a_different_page_budget_misses(self):
+        # A one-page walk is not an answer to a three-page question.
+        upstream = _Upstream(pages=5)
+        short = await _fetch(upstream, max_pages=1)
+        longer = await _fetch(upstream, max_pages=3)
+        assert len(longer) == 3 * len(short)
+
+    async def test_a_different_source_misses(self):
+        upstream = _Upstream()
+        with unittest.mock.patch.object(maprad.httpx, "AsyncClient", upstream):
+            await maprad.fetch_broadcast_systems("fake-key", 45.0, -75.0, source="ca")
+            await maprad.fetch_broadcast_systems("fake-key", 45.0, -75.0, source="au")
+        assert upstream.sources_queried == {"ca", "au"}
+
+    async def test_source_case_does_not_split_the_entry(self):
+        # The upstream key is folded to lowercase; the cache key is the same one.
+        upstream = _Upstream()
+        with unittest.mock.patch.object(maprad.httpx, "AsyncClient", upstream):
+            await maprad.fetch_broadcast_systems("fake-key", 43.6532, -79.3832, source="CA")
+            asked = len(upstream.queries)
+            await maprad.fetch_broadcast_systems("fake-key", 43.6532, -79.3832, source="ca")
+            await maprad.fetch_broadcast_systems("fake-key", 43.6532, -79.3832, source="Ca")
+        assert len(upstream.queries) == asked
+        assert upstream.sources_queried == {"ca"}
+
+    async def test_an_entry_expires_after_a_day(self, monkeypatch):
+        clock = [1_000.0]
+        monkeypatch.setattr(maprad, "_clock", lambda: clock[0])
+        upstream = _Upstream()
+        await _fetch(upstream)
+        asked = len(upstream.queries)
+
+        clock[0] += maprad._CACHE_TTL_S - 1
+        await _fetch(upstream)
+        assert len(upstream.queries) == asked
+
+        clock[0] += 2
+        await _fetch(upstream)
+        assert len(upstream.queries) == 2 * asked
+
+    async def test_a_refused_query_is_not_held(self):
+        refused = _Upstream(error_subtypes=_AU_SUBTYPES, error_message=_NOT_AUTHORIZED)
+        with pytest.raises(maprad.MapradQueryError):
+            await _fetch(refused)
+        assert maprad._cache == {}
+
+        # Access granted since: the next search asks again and is answered.
+        upstream = _Upstream()
+        systems = await _fetch(upstream)
+        assert len(upstream.queries) == len(_AU_SUBTYPES)
+        assert systems
+
+    async def test_an_unreachable_upstream_is_not_held(self):
+        with pytest.raises(httpx.ConnectError):
+            await _fetch(_Upstream(fail_subtypes=_AU_SUBTYPES))
+        assert maprad._cache == {}
+        upstream = _Upstream()
+        await _fetch(upstream)
+        assert len(upstream.queries) == len(_AU_SUBTYPES)
+
+    async def test_a_walk_cut_short_by_the_page_budget_is_still_held(self):
+        # The budget is the answer to the question as asked, not a failure.
+        upstream = _Upstream(records=10_000)
+        first = await _fetch(upstream)
+        asked = len(upstream.queries)
+        assert await _fetch(upstream) == first
+        assert len(upstream.queries) == asked
+
+    async def test_a_caller_cannot_change_what_the_next_one_gets(self):
+        upstream = _Upstream(devices=[{"callsign": "2SYD", "eirp": 246000.0}])
+        first = await _fetch(upstream)
+        pristine = [dict(s) for s in first]
+        # What the route does to its records, and worse.
+        first[0]["devices"][0]["eirp"] = 0.0
+        first[0]["annotated"] = True
+        first[1]["devices"].clear()
+        first.pop()
+
+        second = await _fetch(upstream)
+        assert len(second) == len(pristine)
+        assert second[0]["devices"][0]["eirp"] == 246000.0
+        assert "annotated" not in second[0]
+        assert second[1]["devices"]
+
+        # Nor can a hit reach the one after it.
+        second[0]["devices"][0]["eirp"] = 1.0
+        assert (await _fetch(upstream))[0]["devices"][0]["eirp"] == 246000.0
+
+    async def test_canadian_eirp_is_converted_once_across_hits(self):
+        upstream = _Upstream(devices=[{"eirp": 30.0}])
+        for _ in range(3):
+            systems = await _fetch_ca(upstream)
+        eirps = [d["eirp"] for s in systems for d in s["devices"]]
+        assert eirps == [pytest.approx(1000.0)] * len(eirps)
+        assert {d["eirp_dbw"] for s in systems for d in s["devices"]} == {30.0}
+        assert len(upstream.queries) == len(_CA_SUBTYPES)
+
+    async def test_clear_cache_empties_it(self):
+        upstream = _Upstream()
+        await _fetch(upstream)
+        assert maprad._cache
+        maprad.clear_cache()
+        assert maprad._cache == {}
+        await _fetch(upstream)
+        assert len(upstream.queries) == 2 * len(_AU_SUBTYPES)
+
+    async def test_the_cache_is_bounded_and_evicts_the_oldest(self):
+        for i in range(maprad._CACHE_MAX_ENTRIES + 5):
+            maprad._cache_put(("au", 80, 3, float(i), 0.0), "[]")
+        assert len(maprad._cache) == maprad._CACHE_MAX_ENTRIES
+        assert ("au", 80, 3, 0.0, 0.0) not in maprad._cache
+        assert ("au", 80, 3, float(maprad._CACHE_MAX_ENTRIES + 4), 0.0) in maprad._cache
+
+    async def test_expired_entries_are_evicted_before_live_ones(self, monkeypatch):
+        clock = [1_000.0]
+        monkeypatch.setattr(maprad, "_clock", lambda: clock[0])
+        maprad._cache_put(("au", 80, 3, 0.0, 0.0), "[]")  # oldest, still live
+        clock[0] += 10
+        for i in range(1, maprad._CACHE_MAX_ENTRIES):
+            maprad._cache_put(("au", 80, 3, float(i), 0.0), "[]")
+        # Push the second entry past its life, then overflow by one.
+        maprad._cache[("au", 80, 3, 1.0, 0.0)] = (clock[0] - 1, "[]")
+        maprad._cache_put(("au", 80, 3, 999.0, 0.0), "[]")
+        assert ("au", 80, 3, 1.0, 0.0) not in maprad._cache
+        assert ("au", 80, 3, 0.0, 0.0) in maprad._cache
+
+    async def test_hits_and_misses_are_logged_at_debug(self, caplog):
+        upstream = _Upstream()
+        with caplog.at_level("DEBUG", logger="clients.maprad"):
+            await _fetch(upstream)
+            await _fetch(upstream)
+        debug = [r.getMessage() for r in caplog.records if r.levelname == "DEBUG"]
+        assert any("cache miss" in m for m in debug), debug
+        assert any("cache hit" in m for m in debug), debug
+
+
+class TestInFlightSharing:
+    """Two identical searches at once (a retry, a double click) pay once."""
+
+    async def test_concurrent_identical_searches_share_one_walk(self):
+        upstream = _Upstream(pages=2, delay=0.02)
+        with unittest.mock.patch.object(maprad.httpx, "AsyncClient", upstream):
+            a, b = await asyncio.gather(
+                maprad.fetch_broadcast_systems("fake-key", -33.87, 151.21, source="au"),
+                maprad.fetch_broadcast_systems("fake-key", -33.87, 151.21, source="AU"),
+            )
+        assert len(upstream.queries) == 2 * len(_AU_SUBTYPES)
+        assert a == b
+        assert a is not b and a[0] is not b[0]
+        assert maprad._in_flight == {}
+
+    async def test_a_shared_failure_reaches_every_waiter_and_is_not_held(self):
+        upstream = _Upstream(error_subtypes=_AU_SUBTYPES, error_message=_NOT_AUTHORIZED)
+        with unittest.mock.patch.object(maprad.httpx, "AsyncClient", upstream):
+            results = await asyncio.gather(
+                maprad.fetch_broadcast_systems("fake-key", -33.87, 151.21, source="au"),
+                maprad.fetch_broadcast_systems("fake-key", -33.87, 151.21, source="au"),
+                return_exceptions=True,
+            )
+        assert all(isinstance(r, maprad.MapradQueryError) for r in results), results
+        assert len(upstream.queries) == len(_AU_SUBTYPES)
+        assert maprad._cache == {}
+        assert maprad._in_flight == {}
+
+    async def test_a_cancelled_caller_does_not_cancel_the_one_beside_it(self):
+        upstream = _Upstream(delay=0.05)
+        with unittest.mock.patch.object(maprad.httpx, "AsyncClient", upstream):
+            first = asyncio.ensure_future(maprad.fetch_broadcast_systems("fake-key", -33.87, 151.21, source="au"))
+            second = asyncio.ensure_future(maprad.fetch_broadcast_systems("fake-key", -33.87, 151.21, source="au"))
+            await asyncio.sleep(0.01)
+            first.cancel()
+            systems = await second
+        assert first.cancelled()
+        assert systems
+        assert len(upstream.queries) == len(_AU_SUBTYPES)
+        # And the walk the cancelled caller started was still held.
+        assert len(maprad._cache) == 1
