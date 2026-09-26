@@ -1,5 +1,22 @@
+"""
+Maprad.io broadcast-systems client for AU and CA tower data.
+
+Maprad's GraphQL API is metered per query, and one search fans out into a
+query per broadcast subtype, each walking up to three pages at ~2.4 s a page:
+a Toronto search costs ~7 s and half a dozen billed queries. So answers are
+held in-process for a day (see "Result cache" below), keyed on the source,
+the radius, the page budget and the point rounded to two decimals (~1 km).
+The point is rounded before it is sent as well, so what the cache holds for a
+key is exactly what upstream answers for it, whichever caller asked first.
+Only a successful answer is held: a refused query (MapradQueryError) or an
+unreachable upstream is asked again by the next search. Two identical
+searches in flight at once share one upstream walk.
+"""
+
 import asyncio
+import json
 import logging
+import time
 
 import httpx
 
@@ -238,7 +255,153 @@ async def _paginate_query(
     return systems
 
 
+# ---------------------------------------------------------------------------
+# Result cache
+# ---------------------------------------------------------------------------
+
+# Licence records move on the order of weeks, so a day-old answer is the same
+# answer, and every search or retry inside the day is one nobody pays for.
+_CACHE_TTL_S = 24 * 60 * 60
+
+# A backstop against unbounded growth, not a working limit: nodes do not move,
+# so a day's AU and CA searches come back to a few dozen points. Eviction is by
+# insertion order (expired entries go as they are met), as in clients/fcc.py.
+_CACHE_MAX_ENTRIES = 120
+
+# Two decimals of a degree is ~1.1 km of latitude (less of longitude away from
+# the equator), well inside what the search can tell apart: the query radius
+# is tens of km and the ranking scores towers on distance at a coarser grain.
+_COORD_DECIMALS = 2
+
+_CacheKey = tuple[str, int, int, float, float]
+
+# The cache's clock, by name, so a test can move it without moving
+# time.monotonic itself, which the event loop schedules every sleep by.
+_clock = time.monotonic
+
+# (source, radius_km, max_pages, lat, lon) -> (expires_at_monotonic, JSON
+# text). Text rather than the list itself, as clients/fcc.py holds response
+# bodies: a list handed out of a day-long cache would be reachable, and so
+# mutable, by every caller that has ever held it, so any caller annotating or
+# trimming its records (now or later) would change the next search's answer.
+# A str cannot be changed in place, json.loads (C) hands
+# each caller its own copy several times faster than copy.deepcopy (Python)
+# would, and the records are JSON from upstream to begin with, floats
+# included, so the round trip is exact. The stored list is the one after the
+# CA dBW->W conversion, so a hit is never converted a second time.
+_cache: dict[_CacheKey, tuple[float, str]] = {}
+
+# Walks under way, by key, so a second identical search (a retry, a double
+# click, two tabs) joins the first rather than paying for the same pages. A
+# Task, not a bare Future: it runs to completion even if the caller that
+# started it goes away, and the others are awaiting it through a shield.
+_in_flight: dict[_CacheKey, asyncio.Task] = {}
+
+
+def clear_cache() -> None:
+    """Forget every held answer (and any walk in flight). For tests and operators."""
+    _cache.clear()
+    _in_flight.clear()
+
+
+def _cache_get(key: _CacheKey) -> str | None:
+    entry = _cache.get(key)
+    if entry is None:
+        return None
+    expires_at, text = entry
+    if expires_at <= _clock():
+        _cache.pop(key, None)
+        return None
+    return text
+
+
+def _cache_put(key: _CacheKey, text: str) -> None:
+    # Re-inserting moves the key to the end, so a refreshed entry is not the
+    # next one evicted.
+    _cache.pop(key, None)
+    now = _clock()
+    _cache[key] = (now + _CACHE_TTL_S, text)
+    # Anything already expired goes first; only then the oldest live entry.
+    if len(_cache) > _CACHE_MAX_ENTRIES:
+        for stale in [k for k, (expires_at, _) in _cache.items() if expires_at <= now]:
+            del _cache[stale]
+    while len(_cache) > _CACHE_MAX_ENTRIES:
+        _cache.pop(next(iter(_cache)))
+
+
 async def fetch_broadcast_systems(
+    api_key: str,
+    lat: float,
+    lon: float,
+    radius_km: int = 80,
+    *,
+    source: str,
+    max_pages: int = 3,
+) -> list[dict]:
+    """
+    Broadcast transmitters near (lat, lon) from Maprad.io, through the cache.
+
+    The point is rounded to ~1 km, for the key and for the query alike. Every
+    call gets a list of its own to annotate. See _fetch_upstream for what is
+    asked and what raises; nothing that raises is held.
+    """
+    # Maprad's source keys are lowercase, and this value reaches the query as
+    # well as the guard: folding it in only one of the two asks upstream for a
+    # key that matches nothing, which comes back empty rather than raising.
+    # Folded before the key too, so "CA" and "ca" share an entry.
+    source = source.lower()
+    # US searches belong to clients/fcc.py.
+    if source not in _SUPPORTED_SOURCES:
+        raise ValueError(f"Maprad holds no broadcast data for source {source!r}")
+
+    lat = round(lat, _COORD_DECIMALS)
+    lon = round(lon, _COORD_DECIMALS)
+    key = (source, radius_km, max_pages, lat, lon)
+
+    text = _cache_get(key)
+    if text is not None:
+        log.debug("Maprad %s cache hit near %s,%s (radius %s km)", source, lat, lon, radius_km)
+        return json.loads(text)
+
+    task = _in_flight.get(key)
+    # A task from another event loop (one a test tore down mid-walk) cannot
+    # be awaited from this one; it is simply replaced.
+    if task is not None and task.get_loop() is asyncio.get_running_loop():
+        log.debug("Maprad %s cache miss near %s,%s; joining the walk in flight", source, lat, lon)
+    else:
+        log.debug("Maprad %s cache miss near %s,%s (radius %s km)", source, lat, lon, radius_km)
+        task = asyncio.create_task(_fetch_and_hold(key, api_key, lat, lon, radius_km, source, max_pages))
+        _in_flight[key] = task
+        task.add_done_callback(lambda done: _walk_finished(key, done))
+
+    # Shielded: a caller that is cancelled (a closed browser tab) leaves the
+    # walk running for whoever else is waiting on it, and for the cache.
+    return json.loads(await asyncio.shield(task))
+
+
+async def _fetch_and_hold(
+    key: _CacheKey, api_key: str, lat: float, lon: float, radius_km: int, source: str, max_pages: int
+) -> str:
+    """One upstream walk, held on success, answered as JSON text."""
+    systems = await _fetch_upstream(api_key, lat, lon, radius_km, source=source, max_pages=max_pages)
+    text = json.dumps(systems)
+    _cache_put(key, text)
+    return text
+
+
+def _walk_finished(key: _CacheKey, task: asyncio.Task) -> None:
+    # Only if it is still this walk's slot: clear_cache() may have dropped it,
+    # and a later walk for the same key may already hold it.
+    if _in_flight.get(key) is task:
+        del _in_flight[key]
+    # Marks a failure as retrieved even when every waiter was cancelled, so it
+    # is not reported again as "Task exception was never retrieved"; the
+    # waiters that remain have had it raised to them.
+    if not task.cancelled():
+        task.exception()
+
+
+async def _fetch_upstream(
     api_key: str,
     lat: float,
     lon: float,
@@ -259,16 +422,9 @@ async def fetch_broadcast_systems(
 
     ``source`` carries no default: the regions Maprad can answer for are a
     subset of the regions the service supports, so a default would let a
-    caller reach the wrong one silently.
+    caller reach the wrong one silently. It arrives lowercased and checked
+    against _SUPPORTED_SOURCES by fetch_broadcast_systems.
     """
-    # Maprad's source keys are lowercase, and this value reaches the query as
-    # well as the guard: folding it in only one of the two asks upstream for a
-    # key that matches nothing, which comes back empty rather than raising.
-    source = source.lower()
-    # US searches belong to clients/fcc.py.
-    if source not in _SUPPORTED_SOURCES:
-        raise ValueError(f"Maprad holds no broadcast data for source {source!r}")
-
     headers = {"X-Api-Key": api_key, "Content-Type": "application/json"}
     base_kwargs = {
         "source": source,
