@@ -31,44 +31,46 @@ class TestNearbyStates:
 
 
 class TestDetectSource:
-    """Tests for _detect_source(lat, lon) -> str."""
+    """Tests for _detect_source(lat, lon, radius_km) -> str."""
 
     def test_australia_sydney(self):
         """Sydney is in the Australian region."""
-        assert _detect_source(-33.9, 151.2) == "au"
+        assert _detect_source(-33.9, 151.2, 80) == "au"
 
     def test_canada_toronto(self):
         """Toronto is in the Canadian region."""
-        assert _detect_source(43.7, -79.4) == "ca"
+        assert _detect_source(43.7, -79.4, 80) == "ca"
 
     def test_us_mainland_atlanta(self):
         """Atlanta is in the US mainland region."""
-        assert _detect_source(33.7, -84.4) == "us"
+        assert _detect_source(33.7, -84.4, 80) == "us"
 
     def test_cook_inlet_resolves_to_us(self):
         """Cook Inlet water ~7 km off the Alaska polygon: covered by no polygon,
-        but within the coastal tolerance, so the nearest region (US) serves it
+        but well within the search radius, so the nearest region (US) serves it
         instead of a 422."""
-        assert _detect_source(61.0, -150.0) == "us"
+        assert _detect_source(61.0, -150.0, 80) == "us"
 
-    def test_offshore_hawaii_edge_raises(self):
-        """~65 km south of the main Hawaiian islands — beyond the coastal
-        tolerance, so it raises rather than defaulting to 'us'."""
+    def test_offshore_hawaii_follows_the_radius(self):
+        """~65 km south of the main Hawaiian islands: inside an 80 km search
+        radius the US database is the one with towers in reach; inside 50 km
+        no database is, so it raises rather than defaulting to 'us'."""
+        assert _detect_source(20.0, -157.0, 80) == "us"
         with pytest.raises(HTTPException) as exc_info:
-            _detect_source(20.0, -157.0)
+            _detect_source(20.0, -157.0, 50)
         assert exc_info.value.status_code == 422
-        assert "supported region" in exc_info.value.detail
+        assert "No tower data within 50 km" in exc_info.value.detail
 
     def test_pacific_ocean_raises(self):
-        """Middle of Pacific Ocean is not in a supported region — must raise."""
+        """Middle of Pacific Ocean has no supported region within reach — must raise."""
         with pytest.raises(HTTPException) as exc_info:
-            _detect_source(0.0, 170.0)
+            _detect_source(0.0, 170.0, 80)
         assert exc_info.value.status_code == 422
-        assert "supported region" in exc_info.value.detail
+        assert "No tower data within 80 km" in exc_info.value.detail
 
     def test_south_america_raises(self):
         """São Paulo (outside defined regions) must raise, not default to 'us'."""
         with pytest.raises(HTTPException) as exc_info:
-            _detect_source(-23.5, -46.6)
+            _detect_source(-23.5, -46.6, 80)
         assert exc_info.value.status_code == 422
-        assert "supported region" in exc_info.value.detail
+        assert "No tower data within 80 km" in exc_info.value.detail

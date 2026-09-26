@@ -18,7 +18,8 @@ const API_BASE = "/api";
  * leave Starlette holding only the last one and quietly drop the others.
  *
  * Throws with the server's `detail` message on failure, including the 422 a
- * coordinate outside the supported regions produces.
+ * coordinate with no supported region (US, CA, AU) within the search radius
+ * produces; that detail names the radius and suggests a larger one.
  */
 export async function fetchTowers(
   lat: number,

@@ -32,65 +32,65 @@ class TestDetectSource:
     def test_us_mainland(self):
         from routes.towers import _detect_source
 
-        assert _detect_source(34.05, -118.25) == "us"
+        assert _detect_source(34.05, -118.25, 80) == "us"
 
     def test_australia(self):
         from routes.towers import _detect_source
 
-        assert _detect_source(-33.87, 151.21) == "au"
+        assert _detect_source(-33.87, 151.21, 80) == "au"
 
     def test_canada(self):
         from routes.towers import _detect_source
 
-        assert _detect_source(45.42, -75.69) == "ca"
+        assert _detect_source(45.42, -75.69, 80) == "ca"
 
     def test_us_northern_tier_not_misclassified_as_canada(self):
         """Amherst, MA (42.2687, -72.6713) — same longitude band as Canada
         but south of the real border; previously misclassified as 'ca'."""
         from routes.towers import _detect_source
 
-        assert _detect_source(42.2687, -72.6713) == "us"
+        assert _detect_source(42.2687, -72.6713, 80) == "us"
 
     def test_toronto_is_canada(self):
         """Toronto (43.6532, -79.3832) sits south of a flat 45°N cutoff but
         is still Canada — the real border dips around the Great Lakes."""
         from routes.towers import _detect_source
 
-        assert _detect_source(43.6532, -79.3832) == "ca"
+        assert _detect_source(43.6532, -79.3832, 80) == "ca"
 
     def test_windsor_is_canada(self):
         """Windsor, ON (42.3149, -83.0364) is south of Detroit, MI — a flat
         latitude threshold can't separate them; polygon lookup can."""
         from routes.towers import _detect_source
 
-        assert _detect_source(42.3149, -83.0364) == "ca"
+        assert _detect_source(42.3149, -83.0364, 80) == "ca"
 
     def test_northern_maine_is_us(self):
         """Fort Kent, ME (47.2380, -68.5905) sits north of 45°N but is US —
         the border bulges north around the Maine/Quebec line."""
         from routes.towers import _detect_source
 
-        assert _detect_source(47.2380, -68.5905) == "us"
+        assert _detect_source(47.2380, -68.5905, 80) == "us"
 
     def test_hawaii(self):
         from routes.towers import _detect_source
 
-        assert _detect_source(21.31, -157.86) == "us"
+        assert _detect_source(21.31, -157.86, 80) == "us"
 
     def test_alaska(self):
         from routes.towers import _detect_source
 
-        assert _detect_source(64.2, -152.5) == "us"
+        assert _detect_source(64.2, -152.5, 80) == "us"
 
     def test_unknown_region_raises(self):
-        """Paris (48.85, 2.35) is not in a supported region — must raise 422
+        """Paris (48.85, 2.35) has no supported region within reach — must raise 422
         rather than silently falling through to 'us'."""
         from fastapi import HTTPException
 
         from routes.towers import _detect_source
 
         with pytest.raises(HTTPException):
-            _detect_source(48.85, 2.35)
+            _detect_source(48.85, 2.35, 80)
 
 
 # ── Tower search validation ──────────────────────────────────────────────────
@@ -116,7 +116,7 @@ class TestTowerSearch:
         # from a request-validation 422.
         r = client.get("/api/towers?lat=48.85&lon=2.35")
         assert r.status_code == 422
-        assert "not in a supported region" in r.json()["detail"]
+        assert "No tower data within" in r.json()["detail"]
 
 
 # ── Config endpoints ─────────────────────────────────────────────────────────
@@ -545,7 +545,7 @@ class TestFindTowersWithMeasurements:
         # rejected before any external fetch.
         r = client.post("/api/towers", json={"lat": 48.85, "lon": 2.35, "measurements": []})
         assert r.status_code == 422
-        assert "not in a supported region" in r.json()["detail"]
+        assert "No tower data within" in r.json()["detail"]
 
     def test_empty_measurements_accepted(self, client):
         payload = {**_VALID_PAYLOAD, "measurements": []}
@@ -625,6 +625,77 @@ class TestFindTowersWithMeasurements:
             r = client.post("/api/towers", json=payload)
         assert r.status_code == 200
         assert r.json()["query"]["source"] == "au"
+
+
+# ── The search radius is the reach of "auto" ─────────────────────────────────
+
+# Open water ~59 km off the nearest Nova Scotia shore (south of Halifax), in no
+# country polygon: inside the default 80 km radius, outside a 30 km one.
+_HALIFAX_OFFSHORE = {"lat": 43.95, "lon": -63.35}
+
+
+class TestSearchRadiusIsTheReach:
+    """ "auto" resolves to the nearest database whose country lies within the
+    request's own search radius, so the radius decides whether a point out to
+    sea is served, and a 422 names the radius that fell short."""
+
+    @pytest.fixture()
+    def maprad(self, monkeypatch):
+        # Pinned so these tests hold whatever the shipped config's default is.
+        monkeypatch.setattr("services.tower_ranking.DEFAULT_RADIUS_KM", 80)
+        mock = unittest.mock.AsyncMock(return_value=[])
+        with (
+            unittest.mock.patch("routes.towers.API_KEY", "fake-key"),
+            unittest.mock.patch("routes.towers.fetch_broadcast_systems", new=mock),
+            unittest.mock.patch(
+                "services.elevation.lookup_many",
+                new=unittest.mock.AsyncMock(return_value={}),
+            ),
+        ):
+            yield mock
+
+    def test_get_small_radius_is_422_naming_the_radius(self, client, maprad):
+        r = client.get("/api/towers", params={**_HALIFAX_OFFSHORE, "radius_km": 30})
+        assert r.status_code == 422
+        detail = r.json()["detail"]
+        assert "30 km" in detail
+        assert "US, CA, AU" in detail
+        maprad.assert_not_awaited()
+
+    def test_get_default_radius_resolves_to_canada(self, client, maprad):
+        r = client.get("/api/towers", params=_HALIFAX_OFFSHORE)
+        assert r.status_code == 200
+        assert r.json()["query"]["source"] == "ca"
+        assert r.json()["query"]["radius_km"] == 80
+        maprad.assert_awaited_once()
+        assert maprad.await_args.kwargs["source"] == "ca"
+        assert maprad.await_args.kwargs["radius_km"] == 80
+
+    def test_get_open_ocean_is_422_even_at_the_cap(self, client, maprad):
+        r = client.get("/api/towers", params={"lat": 40.0, "lon": -40.0, "radius_km": 300})
+        assert r.status_code == 422
+        assert "300 km" in r.json()["detail"]
+        maprad.assert_not_awaited()
+
+    def test_post_small_radius_is_422_naming_the_radius(self, client, maprad):
+        payload = {**_HALIFAX_OFFSHORE, "radius_km": 30, "measurements": []}
+        r = client.post("/api/towers", json=payload)
+        assert r.status_code == 422
+        assert "30 km" in r.json()["detail"]
+        maprad.assert_not_awaited()
+
+    def test_post_default_radius_resolves_to_canada(self, client, maprad):
+        r = client.post("/api/towers", json={**_HALIFAX_OFFSHORE, "measurements": []})
+        assert r.status_code == 200
+        assert r.json()["query"]["source"] == "ca"
+        maprad.assert_awaited_once()
+        assert maprad.await_args.kwargs["radius_km"] == 80
+
+    def test_post_explicit_radius_is_the_reach(self, client, maprad):
+        r = client.post("/api/towers", json={**_HALIFAX_OFFSHORE, "radius_km": 65, "measurements": []})
+        assert r.status_code == 200
+        assert r.json()["query"]["source"] == "ca"
+        assert maprad.await_args.kwargs["radius_km"] == 65
 
 
 # ── What the response says about how it was ranked ───────────────────────────

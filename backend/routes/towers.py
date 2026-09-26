@@ -13,7 +13,7 @@ from core.auth import require_admin
 from models.measurements import MeasurementPayload
 from services import elevation, tower_ranking
 from services.elevation import ElevationUnavailable
-from services.region_lookup import SUPPORTED_REGIONS, UNSUPPORTED_REGION_DETAIL, classify_region
+from services.region_lookup import SUPPORTED_REGIONS, classify_region, unsupported_region_detail
 from services.tower_ranking import (
     allowed_bands_for_region,
     apply_config,
@@ -39,24 +39,29 @@ API_KEY = os.getenv("MAPRAD_API_KEY", "")
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def _detect_source(lat: float, lon: float) -> str:
-    region = classify_region(lat, lon)
+def _detect_source(lat: float, lon: float, radius_km: float) -> str:
+    """The database to search for (lat, lon): the nearest supported region within ``radius_km``.
+
+    ``radius_km`` is the request's effective search radius. The question is
+    which database gives the best towers, not which jurisdiction the point is
+    in, so a point out to sea or just over a land border is served by the
+    nearest country whose territory the search area reaches.
+    """
+    region = classify_region(lat, lon, radius_km)
     if region is not None:
         return region
-    # We only have tower data + an ATSC demod for the supported regions, so a
-    # location outside them can't be served meaningfully. classify_region()
-    # already absorbs coastline error: points just off the coarse border
-    # polygons (peninsula tips, piers, nearshore water) resolve to the nearest
-    # region within COASTAL_TOLERANCE_KM, so reaching here means genuinely
-    # elsewhere (open ocean, another continent).
-    raise HTTPException(status_code=422, detail=UNSUPPORTED_REGION_DETAIL)
+    # We only have tower data + an ATSC demod for the supported regions, and
+    # none of them comes within the search radius (open ocean, another
+    # continent), so there is nothing meaningful to serve. The detail names the
+    # radius because widening it is what can change the answer.
+    raise HTTPException(status_code=422, detail=unsupported_region_detail(radius_km))
 
 
-def _resolve_source(source: str, lat: float, lon: float) -> str:
-    """Normalise + validate the requested source, resolving "auto" by geo-lookup."""
+def _resolve_source(source: str, lat: float, lon: float, radius_km: float) -> str:
+    """Normalise + validate the requested source, resolving "auto" by geo-lookup within ``radius_km``."""
     source = source.lower()
     if source == "auto":
-        source = _detect_source(lat, lon)
+        source = _detect_source(lat, lon, radius_km)
     if source not in SUPPORTED_REGIONS:
         raise HTTPException(status_code=400, detail=f"Invalid source. Use: {', '.join(SUPPORTED_REGIONS)}, auto")
     return source
@@ -139,9 +144,9 @@ async def find_towers(
     source: str = Query("auto"),
     frequencies: list[str] = Query(default=[]),
 ):
-    source = _resolve_source(source, lat, lon)
-
+    # Before the source: "auto" picks the nearest database within the radius.
     effective_radius = radius_km if radius_km > 0 else tower_ranking.DEFAULT_RADIUS_KM
+    source = _resolve_source(source, lat, lon, effective_radius)
     effective_limit = limit if limit > 0 else tower_ranking.DEFAULT_LIMIT
     # List-typed, not scalar: Starlette keeps only the last occurrence of a
     # repeated key for a scalar, silently dropping the rest. The occurrences go
@@ -194,9 +199,9 @@ async def find_towers_with_measurements(payload: MeasurementPayload):
     towers are excluded entirely.  Matched towers carry real measured quality
     fields (``snr_db``, ``score``, ``power_db``, ``obw_fraction``, ``measured=True``).
     """
-    source = _resolve_source(payload.source, payload.lat, payload.lon)
-
+    # Before the source: "auto" picks the nearest database within the radius.
     effective_radius = payload.radius_km if payload.radius_km > 0 else tower_ranking.DEFAULT_RADIUS_KM
+    source = _resolve_source(payload.source, payload.lat, payload.lon, effective_radius)
     effective_limit = payload.limit if payload.limit > 0 else tower_ranking.DEFAULT_LIMIT
     measurements = [m.model_dump() for m in payload.measurements]
 

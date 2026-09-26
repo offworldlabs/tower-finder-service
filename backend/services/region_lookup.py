@@ -4,11 +4,15 @@ Replaces lat/lon bounding-box heuristics, which can't represent a border
 that dips and bulges (e.g. the Great Lakes, the Maine/Quebec line).
 
 A point inside a country polygon is classified by that polygon. A point inside
-none of them -- which includes real coastal land the Natural Earth coastline
-is too coarse to cover (a peninsula tip, a pier, a harbour-front block) and
-nearshore water -- is assigned to the nearest supported region, provided that
-region lies within COASTAL_TOLERANCE_KM. Anything further out (open ocean,
-other continents) is still unsupported.
+none of them -- real coastal land the Natural Earth coastline is too coarse to
+cover (a peninsula tip, a pier, a harbour-front block), a boat, a platform, an
+island offshore, or a town just over a land border -- is served by the nearest
+supported region whose polygon lies within the caller's reach, which for tower
+search is the request's own search radius. The question is which database will
+give the best towers, not which jurisdiction the point is in: if a country's
+territory is within the search radius, so are (some of) its towers. Anything
+with no supported polygon within reach (open ocean, other continents) is
+unsupported.
 """
 
 import json
@@ -29,32 +33,50 @@ _ADMIN_TO_SOURCE = {
     "Australia": "au",
 }
 
-# Single source of truth for the supported-region set and the human-facing
-# rejection message, derived from _ADMIN_TO_SOURCE so the two can't drift.
+# Single source of truth for the supported-region set, derived from
+# _ADMIN_TO_SOURCE so it and the rejection message below can't drift.
 SUPPORTED_REGIONS = tuple(_ADMIN_TO_SOURCE.values())
-UNSUPPORTED_REGION_DETAIL = (
-    f"Location is not in a supported region ({', '.join(s.upper() for s in SUPPORTED_REGIONS)})."
-)
 
-# How far outside the coastline a point may sit and still be served by the
-# nearest supported region. The Natural Earth coastline misses real land by
-# hundreds of metres to a few km (UBC's Point Grey campus sits ~0.5 km outside
-# the Canada polygon), and a user on a ferry, a pier or an offshore island is
-# still within reach of that country's towers, so the band is generous. 25 km
-# comfortably covers coastline error and nearshore water while keeping open
-# ocean unsupported: the mid-Atlantic, mid-Pacific and the sea south of the
-# main Hawaiian islands are all 60+ km from any polygon.
+
+def unsupported_region_detail(reach_km: float) -> str:
+    """The human-facing 422 detail for a point with no supported region within ``reach_km``.
+
+    Names the reach because it is the caller's own search radius, and a larger
+    one is the thing that can turn this answer into a result.
+    """
+    coverage = ", ".join(s.upper() for s in SUPPORTED_REGIONS)
+    return f"No tower data within {reach_km:g} km of this location (coverage: {coverage}). Try a larger search radius."
+
+
+# How far outside every polygon a point may sit and still be served: the
+# caller's reach, passed to classify_region() explicitly. For tower search it
+# is the request's effective search radius (default 80 km, capped at 300), so
+# "is any supported country within my search area" and "which database do I
+# query" are the same question. The nearest region within reach wins; there is
+# no merging of several databases.
 #
-# Trade-off, accepted deliberately: the band also reaches across land borders
-# into neighbouring countries (e.g. Tijuana -> "us", the Torres Strait coast of
-# Papua New Guinea -> "au"), since the borders file holds only the supported
-# countries. Those users are within reception range of that country's towers,
-# so serving them its tower list is useful rather than wrong.
-COASTAL_TOLERANCE_KM = 25.0
+# This absorbs coastline error (UBC's Point Grey campus sits ~0.5 km outside
+# the Canada polygon) and serves points genuinely out to sea -- ferries,
+# platforms, offshore islands -- from the nearest shore's towers. Open ocean
+# stays unsupported: the mid-Atlantic is 1,300+ km from any polygon, well past
+# the 300 km cap.
+#
+# Trade-off, accepted deliberately: the reach crosses land borders too, since
+# the borders file holds only the supported countries. With the 80 km default,
+# Tijuana and every point of northern Mexico within 80 km of the US border
+# resolve to "us", and the Torres Strait coast of Papua New Guinea to "au"; a
+# user who widens the radius widens that strip with it (to 300 km at the cap).
+# Those users get the US or Australian tower list, not their own country's.
+# That is the useful answer: those towers are within the radius they asked
+# about, and we have no database for Mexico or Papua New Guinea to give them
+# instead.
 
 # Mean length of a degree of latitude. Longitude degrees are scaled by
-# cos(latitude); over a ~25 km neighbourhood this local equirectangular
-# approximation is accurate to well under 1%.
+# cos(latitude) at the query point. That local equirectangular approximation
+# drifts with the latitude offset of the measured shore: at 60N the error is
+# ~2% at 80 km and ~8% at the 300 km cap (less further south), so a shore
+# right at the edge of the reach can land either side of it. Ample for picking
+# a database; the search itself measures its own distances.
 _KM_PER_DEG = 111.32
 
 _geoms: dict[str, BaseGeometry] = {}
@@ -131,22 +153,24 @@ def _distance_km(geom: BaseGeometry, lat: float, lon: float, max_km: float) -> f
     return best
 
 
-def classify_region(lat: float, lon: float) -> str | None:
-    """Return "us", "ca", "au", or None if the point is in none of them.
+def classify_region(lat: float, lon: float, reach_km: float) -> str | None:
+    """Return "us", "ca", "au", or None if no supported region is within reach.
 
-    Points inside a country polygon are classified by it. Otherwise the
-    nearest region within COASTAL_TOLERANCE_KM wins (nearest, so a boat in
-    Haro Strait goes to the closer of the US and Canadian shores); beyond
-    that, None.
+    Points inside a country polygon are classified by it, whatever the reach.
+    Otherwise the nearest region whose polygon lies within ``reach_km`` wins
+    (nearest, so a boat in Haro Strait goes to the closer of the US and
+    Canadian shores); with none that close, None.
     """
     _load_borders()
     point = Point(lon, lat)  # GeoJSON order is (lon, lat)
     for source, geom in _geoms.items():
         if geom.covers(point):  # covers() includes boundary points; contains() excludes them
             return source
-    # Miss path only: a few ms of clipping, never paid by inland points.
+    # Miss path only: a few ms of clipping, never paid by inland points. The
+    # cost is the clip over each whole border geometry, so it barely moves with
+    # the reach (measured ~3-7 ms at 25, 80 and 300 km alike).
     nearest: str | None = None
-    nearest_km = COASTAL_TOLERANCE_KM
+    nearest_km = float(reach_km)
     for source, geom in _geoms.items():
         d = _distance_km(geom, lat, lon, nearest_km)
         if d is not None and (nearest is None or d < nearest_km):

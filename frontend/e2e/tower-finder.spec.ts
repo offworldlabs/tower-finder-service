@@ -246,13 +246,15 @@ test.describe("Tower Finder — search results", () => {
     await expect(page.getByText(/No suitable broadcast towers/i)).toBeVisible({ timeout: 10000 });
   });
 
-  test("shows the server's message for a coordinate outside the supported regions", async ({ page }) => {
+  test("shows the server's message for a coordinate with no supported region in reach", async ({ page }) => {
     // /api/towers answers 422 rather than silently serving US data.
     await page.route("**/api/towers**", async (route) => {
       await route.fulfill({
         status: 422,
         contentType: "application/json",
-        body: JSON.stringify({ detail: "Location is not in a supported region (US, CA, AU)." }),
+        body: JSON.stringify({
+          detail: "No tower data within 80 km of this location (coverage: US, CA, AU). Try a larger search radius.",
+        }),
       });
     });
 
@@ -261,7 +263,7 @@ test.describe("Tower Finder — search results", () => {
     await page.getByLabel(/longitude/i).fill("2.3522");
     await page.locator("button[type='submit']").filter({ hasText: /Find Towers/i }).click();
 
-    await expect(page.locator(".error-banner")).toContainText(/not in a supported region/i);
+    await expect(page.locator(".error-banner")).toContainText(/No tower data within 80 km/i);
   });
 
   test("shows error banner on API failure", async ({ page }) => {
