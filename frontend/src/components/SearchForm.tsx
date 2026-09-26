@@ -1,16 +1,9 @@
 import { useState, useEffect, useRef } from "react";
 import { fetchElevation, geocodeAddress } from "../api";
-import type { GeocodeResponse } from "../types";
+import type { GeocodeResponse, SearchRequest } from "../types";
+import { MAX_FREQUENCIES, MAX_FREQUENCY_MHZ, parseFrequency } from "../utils/frequencies";
+import { normaliseSource, type SearchFormInitial } from "../utils/sharedSearch";
 import "./SearchForm.css";
-
-// Both mirror parse_user_frequencies in services/tower_ranking.py, which keeps
-// at most ten values and only those in 0 < v < 10000. Anything else is dropped
-// there without a word, so the form declines to offer it in the first place.
-// The server's upper bound is exclusive and the input's `max` is inclusive, so
-// exactly 10000 passes the browser and is dropped below; no illuminator sits
-// there.
-const MAX_FREQUENCIES = 10;
-const MAX_FREQUENCY_MHZ = 10000;
 
 // A geocoder that could only place the postcode or the town says so, and that
 // matters more here than it would on a map: the ranking grids the search disk
@@ -33,14 +26,29 @@ const PRECISION_WARNINGS: Record<string, string> = {
  * "ca" and searched against Canadian ISED data. Worse, it wrote that guess into
  * the request, so the server's polygon lookup never got to correct it. The
  * default is now "auto" and the server decides.
+ *
+ * `initial` is where a share link's values come in (see utils/sharedSearch).
+ * It seeds the inputs once; after that they are the form's own, the same as
+ * anything typed. An initial altitude counts as set by the operator, so the
+ * elevation lookup below leaves it alone.
  */
-export default function SearchForm({ onSearch, loading }) {
-  const [lat, setLat] = useState("");
-  const [lon, setLon] = useState("");
-  const [altitude, setAltitude] = useState("");
-  const [source, setSource] = useState("auto");
-  const [frequencies, setFrequencies] = useState([""]);
-  const [showFrequencies, setShowFrequencies] = useState(false);
+interface SearchFormProps {
+  onSearch: (request: SearchRequest) => void;
+  loading: boolean;
+  initial?: SearchFormInitial;
+}
+
+export default function SearchForm({ onSearch, loading, initial = {} }: SearchFormProps) {
+  const [lat, setLat] = useState(initial.lat ?? "");
+  const [lon, setLon] = useState(initial.lon ?? "");
+  const [altitude, setAltitude] = useState(initial.altitude ?? "");
+  const [source, setSource] = useState(() => normaliseSource(initial.source));
+  const [frequencies, setFrequencies] = useState(() =>
+    initial.frequencies?.length ? initial.frequencies.slice(0, MAX_FREQUENCIES) : [""],
+  );
+  // Opened when a link brought frequencies with it: the recipient should see
+  // what the ranking is matching against, not just a count.
+  const [showFrequencies, setShowFrequencies] = useState(() => !!initial.frequencies?.length);
   const [geoError, setGeoError] = useState(null);
   const [geoLoading, setGeoLoading] = useState(false);
   const [address, setAddress] = useState("");
@@ -49,14 +57,14 @@ export default function SearchForm({ onSearch, loading }) {
   // The accepted match, kept so the operator can see which of several possible
   // "123 Main St" the coordinates below actually belong to.
   const [matched, setMatched] = useState<GeocodeResponse | null>(null);
-  const altitudeManual = useRef(false);
+  const altitudeManual = useRef(!!initial.altitude);
   const geocodeRequest = useRef<AbortController | null>(null);
 
   // One reading of the entered rows, so what is submitted and what the collapsed
   // toggle counts can never disagree.
   const validFrequencies = frequencies
-    .map((f) => parseFloat(f))
-    .filter((f) => !isNaN(f) && f > 0 && f < MAX_FREQUENCY_MHZ);
+    .map(parseFrequency)
+    .filter((f): f is number => f !== null);
 
   // Auto-lookup elevation when lat/lon change and altitude hasn't been set by
   // hand. Debounced and aborted so typing a coordinate doesn't fire one
@@ -143,6 +151,9 @@ export default function SearchForm({ onSearch, loading }) {
       lat: parsedLat,
       lon: parsedLon,
       altitude: parseFloat(altitude) || 0,
+      // The elevation prefill fills the same field, so the share link has to
+      // be told which of the two it is looking at.
+      altitudeSet: altitudeManual.current,
       source,
       frequencies: validFrequencies,
     });

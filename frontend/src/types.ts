@@ -87,3 +87,18 @@ export interface GeocodeResponse {
    *  back with a different answer. The form says so when it does. */
   precision: "street" | "postcode" | "locality";
 }
+
+/** One search as the form submits it and the share link records it. */
+export interface SearchRequest {
+  lat: number;
+  lon: number;
+  /** Metres. 0 asks the server to resolve the ground elevation itself. */
+  altitude: number;
+  /** True when the operator set the altitude (typed it, or it came from a
+   *  link that carried one). False when it is blank or the /api/elevation
+   *  prefill, which the share link leaves out so the recipient's search
+   *  resolves it the same way. */
+  altitudeSet: boolean;
+  source: string;
+  frequencies: number[];
+}
