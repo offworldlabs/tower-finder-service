@@ -280,6 +280,97 @@ test.describe("Tower Finder — search results", () => {
   });
 });
 
+test.describe("Tower Finder — share links", () => {
+  const DEEP_LINK = "/?lat=49.2648&lon=-123.2502&alt=95&f=99.9,102.1";
+
+  test.beforeEach(async ({ page }) => {
+    await page.route("**/api/towers**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          towers: [tower({ callsign: "CBU-FM", name: "CBU-FM", state: "BC" })],
+          query: query({ latitude: 49.2648, longitude: -123.2502, altitude_m: 95, source: "ca" }),
+          count: 1,
+        }),
+      });
+    });
+  });
+
+  test("a deep link runs its search on load and can be copied", async ({ page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"], {
+      origin: new URL(BASE).origin,
+    });
+    const towersRequest = page.waitForRequest((r) => r.url().includes("/api/towers"));
+
+    await page.goto(`${BASE}${DEEP_LINK}`);
+
+    const sent = new URL((await towersRequest).url()).searchParams;
+    expect(sent.get("lat")).toBe("49.2648");
+    expect(sent.get("lon")).toBe("-123.2502");
+    expect(sent.get("altitude")).toBe("95");
+    expect(sent.get("source")).toBe("auto");
+    expect(sent.get("frequencies")).toBe("99.9,102.1");
+
+    await expect(page.locator("table")).toBeVisible({ timeout: 10000 });
+    await expect(page.locator("tbody tr")).toHaveCount(1);
+    await expect(page.locator(".summary-strip")).toContainText("CBU-FM");
+    await expect(page.getByLabel(/latitude/i)).toHaveValue("49.2648");
+    await expect(page.getByLabel(/altitude/i)).toHaveValue("95");
+
+    const copy = page.locator(".summary-strip").getByRole("button", { name: "Copy link" });
+    await copy.click();
+    await expect(page.locator(".summary-strip").getByRole("button", { name: "Copied" })).toBeVisible();
+    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    expect(copied).toBe(`${BASE}${DEEP_LINK}`);
+    expect(copied).toBe(page.url());
+  });
+
+  test("shows the link for a manual copy when the clipboard refuses", async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { writeText: () => Promise.reject(new DOMException("Denied", "NotAllowedError")) },
+      });
+    });
+    await page.goto(`${BASE}${DEEP_LINK}`);
+
+    await page.getByRole("button", { name: "Copy link" }).click();
+    const field = page.getByLabel("Link to this search");
+    await expect(field).toHaveValue(`${BASE}${DEEP_LINK}`);
+    await expect(field).toBeFocused();
+  });
+
+  test("a submitted search puts its inputs in the address bar", async ({ page }) => {
+    await page.goto(BASE);
+    await page.getByLabel(/altitude/i).fill("120");
+    await page.getByLabel(/latitude/i).fill("42.38708028093612");
+    await page.getByLabel(/longitude/i).fill("-71.24905416622781");
+    await page.getByLabel(/data source/i).selectOption("us");
+    await page.locator("button[type='submit']").filter({ hasText: /Find Towers/i }).click();
+
+    await expect(page.locator("tbody tr")).toHaveCount(1);
+    await expect(page).toHaveURL(
+      `${BASE}/?lat=42.38708028093612&lon=-71.24905416622781&alt=120&source=us`,
+    );
+  });
+
+  test("an invalid link prefills what it can and searches nothing", async ({ page }) => {
+    let searched = false;
+    await page.route("**/api/towers**", async (route) => {
+      searched = true;
+      await route.abort();
+    });
+    await page.goto(`${BASE}/?lat=49.2648&lon=west`);
+
+    await expect(page.getByLabel(/latitude/i)).toHaveValue("49.2648");
+    await expect(page.getByLabel(/longitude/i)).toHaveValue("");
+    await page.waitForLoadState("networkidle");
+    expect(searched).toBe(false);
+    await expect(page.locator(".error-banner")).toHaveCount(0);
+  });
+});
+
 test.describe("Tower Finder — map rendering", () => {
   test("Leaflet map container is present", async ({ page }) => {
     await page.goto(BASE);

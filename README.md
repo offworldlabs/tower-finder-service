@@ -273,6 +273,29 @@ Three rules keep it working:
 `useResolvedTheme` exists for the one thing CSS cannot reach: the basemap is a
 tile set chosen in JavaScript, so the map has to be told which palette is drawn.
 
+### Sharing a search
+
+The address bar is the share link. Submitting a search rewrites the page's
+query string (`history.replaceState`, so no history entry per search, and a
+failed search is linkable too), and opening a URL that carries a valid `lat`
+and `lon` fills the form and runs the search on load. After a search, **Copy
+link** puts the URL on the clipboard, or shows it selected in a read-only field
+where the clipboard is unavailable.
+
+| Param | Meaning | Omitted when |
+| --- | --- | --- |
+| `lat`, `lon` | Search point, decimal degrees | never (both required to run) |
+| `alt` | Node altitude, metres | the altitude was left blank or auto-filled; the search then sends 0 and `/api/towers` resolves ground elevation itself |
+| `source` | `us`, `ca` or `au` (case-insensitive; anything else reads as auto) | `auto` |
+| `f` | Measured frequencies, MHz, comma-separated | none entered |
+
+For example `https://towers.retina.fm/?lat=49.2648&lon=-123.2502&alt=95&f=99.9,102.1`.
+A link with a missing or out-of-range coordinate, or an unreadable `alt`,
+prefills what it can and waits for Find Towers; frequencies the form would
+reject are dropped. The address, the radius and the map view are not part of
+the link: the resolved coordinates are what the search ran on. The parsing and
+writing live in `frontend/src/utils/sharedSearch.ts`.
+
 ## Dependencies
 
 `uv.lock` pins every package CI tests and the image runs, and `uv sync` builds

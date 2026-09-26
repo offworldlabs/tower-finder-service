@@ -383,3 +383,111 @@ describe("SearchForm address lookup", () => {
     expect(screen.getByLabelText(/^address/i)).toHaveAttribute("maxlength", "200");
   });
 });
+
+describe("SearchForm initial values (share links)", () => {
+  const settle = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const elevationCalls = () =>
+    (globalThis.fetch as unknown as { mock: { calls: [string][] } }).mock.calls.filter((c) =>
+      String(c[0]).includes("/elevation"),
+    );
+
+  it("starts from the values it is given, and submits them", async () => {
+    const user = userEvent.setup();
+    const onSearch = vi.fn();
+    render(
+      <SearchForm
+        onSearch={onSearch}
+        loading={false}
+        initial={{
+          lat: "49.2648",
+          lon: "-123.2502",
+          altitude: "95",
+          source: "ca",
+          frequencies: ["99.9", "102.1"],
+        }}
+      />,
+    );
+
+    expect(screen.getByLabelText(/latitude/i)).toHaveValue(49.2648);
+    expect(screen.getByLabelText(/longitude/i)).toHaveValue(-123.2502);
+    expect(screen.getByLabelText(/altitude/i)).toHaveValue(95);
+    expect(screen.getByLabelText(/data source/i)).toHaveValue("ca");
+    // Open, not collapsed to a count: the recipient should see what is matched.
+    expect(screen.getByLabelText(/^frequency 1/i)).toHaveValue(99.9);
+    expect(screen.getByLabelText(/^frequency 2/i)).toHaveValue(102.1);
+
+    await user.click(screen.getByRole("button", { name: /find towers/i }));
+    expect(onSearch).toHaveBeenCalledWith({
+      lat: 49.2648,
+      lon: -123.2502,
+      altitude: 95,
+      altitudeSet: true,
+      source: "ca",
+      frequencies: [99.9, 102.1],
+    });
+  });
+
+  it("treats an initial altitude as the operator's, so the elevation lookup leaves it", async () => {
+    render(
+      <SearchForm
+        onSearch={vi.fn()}
+        loading={false}
+        initial={{ lat: "49.2648", lon: "-123.2502", altitude: "95" }}
+      />,
+    );
+
+    // Past the 400 ms debounce the lookup would have fired on.
+    await settle(600);
+    expect(elevationCalls()).toHaveLength(0);
+    expect(screen.getByLabelText(/altitude/i)).toHaveValue(95);
+  });
+
+  it("still looks the altitude up when the initial values carry none", async () => {
+    // The control for the test above: same coordinates, no altitude, and the
+    // lookup (answering 42 here) fills the field as it does for typed ones.
+    const user = userEvent.setup();
+    const onSearch = vi.fn();
+    render(
+      <SearchForm onSearch={onSearch} loading={false} initial={{ lat: "49.2648", lon: "-123.2502" }} />,
+    );
+
+    await waitFor(() => expect(screen.getByLabelText(/altitude/i)).toHaveValue(42));
+    await user.click(screen.getByRole("button", { name: /find towers/i }));
+    // Sent, but marked as the prefill so a share link leaves it out.
+    expect(onSearch.mock.calls[0][0]).toMatchObject({ altitude: 42, altitudeSet: false });
+  });
+
+  it.each([
+    ["CA", "ca"],
+    [" Au ", "au"],
+    ["us", "us"],
+    ["xx", "auto"],
+    ["", "auto"],
+  ])("normalises an initial source of %j to %j", (given, shown) => {
+    render(<SearchForm onSearch={vi.fn()} loading={false} initial={{ source: given }} />);
+    expect(screen.getByLabelText(/data source/i)).toHaveValue(shown);
+  });
+
+  it("marks a typed altitude as set, and a cleared one as not", async () => {
+    const user = userEvent.setup();
+    const onSearch = vi.fn();
+    render(<SearchForm onSearch={onSearch} loading={false} />);
+
+    await user.type(screen.getByLabelText(/altitude/i), "120");
+    await fillCoords(user);
+    await user.click(screen.getByRole("button", { name: /find towers/i }));
+    expect(onSearch.mock.calls[0][0]).toMatchObject({ altitude: 120, altitudeSet: true });
+
+    await user.clear(screen.getByLabelText(/altitude/i));
+    await user.click(screen.getByRole("button", { name: /find towers/i }));
+    expect(onSearch.mock.calls[1][0].altitudeSet).toBe(false);
+  });
+
+  it("keeps the collapsed default when the initial values carry no frequencies", () => {
+    render(
+      <SearchForm onSearch={vi.fn()} loading={false} initial={{ lat: "1", lon: "2" }} />,
+    );
+    expect(screen.queryByLabelText(/^frequency 1/i)).not.toBeInTheDocument();
+  });
+});
+

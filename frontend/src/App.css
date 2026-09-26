@@ -275,9 +275,35 @@
   font-weight: 700;
 }
 
+/* The message takes the room; Copy link sits at the far end, dropping to a
+   line of its own only when the banner is too narrow for both, and its
+   fallback field, when shown, always takes a line of its own below. */
+.error-text {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.error-banner {
+  flex-wrap: wrap;
+}
+
+.error-banner .copy-link {
+  margin-left: auto;
+  justify-content: flex-end;
+}
+
+.error-banner .copy-link.is-manual {
+  flex-basis: 100%;
+}
+
 /* ── Empty state ─────────────────────────────────────────────────────────
    dash's shape and padding. The copy names the next action, which is the one
    thing the guide picks out of owl-os's version as worth copying. */
+
+.no-results .copy-link {
+  justify-content: center;
+  margin-top: 16px;
+}
 
 .no-results {
   padding: 48px 20px;
@@ -313,4 +339,30 @@
 .crash-screen p {
   font-size: 13px;
   max-width: 44ch;
+}
+
+/* ── Share link ──────────────────────────────────────────────────────────
+   A secondary button, never the primary: sharing is a side door, and the
+   summary strip already has a primary thing to say. In the strip it sits in a
+   stat card of its own, with the micro-label naming what it does. The
+   fallback field is the shared input rule, set in mono because it is an
+   address to be read and copied rather than prose. */
+
+.copy-link {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.copy-link .btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* Two classes deep to beat the shared input rule's `font: inherit`. */
+.copy-link .copy-link-field {
+  font-family: var(--font-mono);
+  font-size: 12px;
 }

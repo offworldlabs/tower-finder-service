@@ -1,12 +1,14 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import SearchForm from "./components/SearchForm";
+import CopyLink from "./components/CopyLink";
 import ResultsTable from "./components/ResultsTable";
 import TowerMap from "./components/TowerMap";
 import ThemeSwitch from "./components/ThemeSwitch";
 import { useResolvedTheme } from "./context/ThemeContext";
 import { fetchTowers } from "./api";
 import { formatAreaKm2 } from "./utils/format";
-import type { Tower, TowerQuery } from "./types";
+import { readSharedSearch, writeSharedSearch } from "./utils/sharedSearch";
+import type { SearchRequest, Tower, TowerQuery } from "./types";
 
 const SOURCE_LABELS: Record<string, string> = {
   us: "United States (FCC)",
@@ -14,7 +16,15 @@ const SOURCE_LABELS: Record<string, string> = {
   au: "Australia (ACMA)",
 };
 
-function SummaryStrip({ towers, query }: { towers: Tower[]; query: TowerQuery | null }) {
+function SummaryStrip({
+  towers,
+  query,
+  share,
+}: {
+  towers: Tower[];
+  query: TowerQuery | null;
+  share: boolean;
+}) {
   if (!towers.length) return null;
 
   const bands = [...new Set(towers.map((t) => t.band))];
@@ -52,6 +62,12 @@ function SummaryStrip({ towers, query }: { towers: Tower[]; query: TowerQuery | 
           <span className="label stat-label">{SOURCE_LABELS[query.source] || "Data Source"}</span>
         </div>
       )}
+      {share && (
+        <div className="card stat-card share-card">
+          <CopyLink />
+          <span className="label stat-label">Share this search</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -62,9 +78,21 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [highlighted, setHighlighted] = useState<Tower | null>(null);
+  // True once any search has been submitted: the URL is a share link from then
+  // on, whether or not the search succeeded.
+  const [searched, setSearched] = useState(false);
   const theme = useResolvedTheme();
+  // Read once. The form is seeded from it and the first search runs off the
+  // same parsed values, so the two cannot disagree.
+  const [shared] = useState(() => readSharedSearch(window.location.search));
+  const autoRan = useRef(false);
 
-  async function handleSearch({ lat, lon, altitude, source, frequencies }) {
+  async function handleSearch(request: SearchRequest) {
+    const { lat, lon, altitude, source, frequencies } = request;
+    // Before the request, not after it: a search that fails is still worth
+    // sending to someone.
+    writeSharedSearch(request);
+    setSearched(true);
     setLoading(true);
     setError(null);
     setTowers([]);
@@ -81,6 +109,18 @@ export default function App() {
     }
   }
 
+  // A complete link runs its search on load. Altitude is 0 unless the link
+  // carried one, and the elevation lookup is not waited for: /api/towers
+  // resolves ground elevation itself for 0, and the form fills the field for
+  // display in parallel. The ref keeps StrictMode's double effect to one search.
+  useEffect(() => {
+    if (autoRan.current || !shared.request) return;
+    autoRan.current = true;
+    handleSearch(shared.request);
+  }, []);
+
+  const share = searched && !loading;
+
   return (
     <div className="app">
       <header className="app-header">
@@ -94,7 +134,7 @@ export default function App() {
 
       <main className="app-body">
         <div className="top-section">
-          <SearchForm onSearch={handleSearch} loading={loading} />
+          <SearchForm onSearch={handleSearch} loading={loading} initial={shared.initial} />
           <TowerMap
             towers={towers}
             userLocation={query}
@@ -103,7 +143,12 @@ export default function App() {
           />
         </div>
 
-        {error && <div className="error-banner">{error}</div>}
+        {error && (
+          <div className="error-banner">
+            <span className="error-text">{error}</span>
+            {share && <CopyLink />}
+          </div>
+        )}
 
         {loading && (
           <div className="card loading-section">
@@ -117,16 +162,19 @@ export default function App() {
           </div>
         )}
 
-        <SummaryStrip towers={towers} query={query} />
+        <SummaryStrip towers={towers} query={query} share={share} />
 
         {towers.length > 0 && <ResultsTable towers={towers} onHover={setHighlighted} />}
 
         {!loading && query && towers.length === 0 && (
-          <p className="card no-results">
-            No suitable broadcast towers found within {query.radius_km} km. Try a
-            location closer to a populated area, or widen the measured
-            frequencies.
-          </p>
+          <div className="card no-results">
+            <p>
+              No suitable broadcast towers found within {query.radius_km} km. Try a
+              location closer to a populated area, or widen the measured
+              frequencies.
+            </p>
+            {share && <CopyLink />}
+          </div>
         )}
       </main>
     </div>
