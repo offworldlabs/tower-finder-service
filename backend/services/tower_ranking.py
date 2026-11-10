@@ -1615,3 +1615,58 @@ def process_and_rank(
         diagnostics["calibrated_towers"] = calibrated_towers
 
     return towers[:effective_limit]
+
+
+# ── Licence lookup ───────────────────────────────────────────────────────────
+
+
+def licence_record(system: dict, device: dict, lat: float, lon: float, radius_km: float) -> dict | None:
+    """One licence row as the callsign lookup reports it; None when unusable or beyond ``radius_km``.
+
+    Every field it shares with a process_and_rank row is parsed and rounded the
+    same way, so a tower reads the same on both routes. Power and height are
+    what the licence states and nothing more: no per-band placeholder EIRP, no
+    assumed antenna gain, no height borrowed from another record on the mast.
+    A source with licensed figures of its own (the FCC client's
+    ``_fcc_licensed_*``, where an FM licence states only a vertical ERP) has
+    them read in place of ``eirp`` and ``antennaHeight``.
+    """
+    freq_val = _as_float(device.get("frequency"))
+    loc = device.get("location") or {}
+    coords = parse_geom(loc.get("geom"))
+    if freq_val is None or not math.isfinite(freq_val) or coords is None:
+        return None
+
+    tower_lat, tower_lon = coords
+    dist = haversine(lat, lon, tower_lat, tower_lon)
+    # Ranking's radius filter, written so a NaN distance is out as well.
+    if not dist <= radius_km:
+        return None
+
+    eirp = _licensed_eirp_dbm(device)
+    polarisation = device.get("polarisation")
+    return {
+        "callsign": device.get("callsign") or "",
+        "name": loc.get("name") or "",
+        "frequency_mhz": round(freq_val, 3),
+        "band": classify_band(freq_val),
+        "latitude": round(tower_lat, 6),
+        "longitude": round(tower_lon, 6),
+        "eirp_dbm": round(eirp, 1) if eirp is not None else None,
+        "antenna_height_m": device.get("_fcc_licensed_haat", device.get("antennaHeight")),
+        "polarisation": polarisation if polarisation in ("horizontal", "vertical", "circular") else None,
+        "licence_type": (system.get("licence") or {}).get("type") or "",
+        "distance_km": round(dist, 1),
+    }
+
+
+def _licensed_eirp_dbm(device: dict) -> float | None:
+    """The EIRP the record states, read as eirp_dbm_from_device reads it, but None where that would assume a gain."""
+    eirp = _as_float(device.get("_fcc_licensed_eirp", device.get("eirp")))
+    if eirp is not None and eirp > 0:
+        return watts_to_dbm(eirp)
+    tp = _as_float(device.get("transmitPower"))
+    gain = _as_float((device.get("antenna") or {}).get("gain"))
+    if tp is not None and tp > 0 and gain is not None:
+        return watts_to_dbm(tp) + gain
+    return None

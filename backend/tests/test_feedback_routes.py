@@ -6,6 +6,9 @@ store a row. Each test points the store at a tmp file, so nothing here writes
 to the real runtime overlay.
 """
 
+import json
+import sqlite3
+
 import pytest
 from core.auth import ENV_VAR, FEEDBACK_ENV_VAR
 from fastapi.testclient import TestClient
@@ -138,7 +141,7 @@ class TestStores:
         assert summary[0]["rows"] == 3
         assert summary[0]["nodes"] == 3
 
-    def test_an_archive_row(self, client, configured):
+    def test_an_archive_row(self, client, configured, tmp_path):
         archive = {
             "node_id": "node-1",
             "rx_lat": 34.05,
@@ -152,10 +155,18 @@ class TestStores:
             "adsb_match_rate": 0.8,
             "snr_median_db": 11.5,
             "hours_observed": 12.0,
+            "system_constant_db": -152.5,
+            "range_50pct_km": {"narrowbody": 61.5, "helicopter": 18},
             "observed_at": "2026-09-01T12:00:00Z",
         }
         assert post(client, archive).json() == {"stored": 1, "ignored": 0}
         assert tower_feedback.summary(10)[0]["weight"] == 12.0
+
+        conn = sqlite3.connect(tmp_path / "feedback.db")
+        constant, ranges = conn.execute("SELECT system_constant_db, range_50pct_km FROM tower_outcomes").fetchone()
+        conn.close()
+        assert constant == -152.5
+        assert json.loads(ranges) == {"narrowbody": 61.5, "helicopter": 18.0}
 
     def test_an_empty_batch_stores_nothing(self, client, configured):
         assert post(client, []).json() == {"stored": 0, "ignored": 0}
