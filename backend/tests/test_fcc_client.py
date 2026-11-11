@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from app import app
 from clients import fcc
+from tests._helpers import get_towers
 
 # Real licensed records, captured from the two CGI endpoints on 2026-09-16.
 # Synthetic lines are no use here: both parsers read fixed pipe-delimited
@@ -362,3 +363,18 @@ class TestLicensedFigures:
 
         tower = r.json()["tower"]
         assert (tower["polarisation"], tower["eirp_dbm"], tower["antenna_height_m"]) == (None, None, 100.0)
+
+    def test_the_radiation_centre_heights_reach_the_device_and_never_a_tower_response(self):
+        """WLHV, vertical only, states 0.0 m and 260.7 m in the two RCAMSL
+        columns and a bare "m" in the RCAGL one; W02CY-D states 274.9 m and
+        265.5 m. The FM figure kept is the licensed polarisation's."""
+        with _Upstream().patcher():
+            fm = asyncio.run(fcc.fetch_fcc_fm_stations(0, 0, states=["NY"]))
+            tv = asyncio.run(fcc.fetch_fcc_tv_stations(0, 0, states=["NY"]))
+        wlhv, w02cy = fm[0]["devices"][0], tv[0]["devices"][0]
+        assert (wlhv["_fcc_rcamsl"], wlhv["_fcc_rcagl"]) == (260.7, None)
+        assert (w02cy["_fcc_rcamsl"], w02cy["_fcc_rcagl"]) == (274.9, 265.5)
+
+        with TestClient(app) as client:
+            towers = get_towers(client, "lat=41.5&lon=-73.85&source=us", tv + fm).json()["towers"]
+        assert towers and not [key for tower in towers for key in tower if key.startswith("_")]
