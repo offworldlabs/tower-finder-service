@@ -89,9 +89,75 @@ swamps the surveillance channel and the geometry it offers is a sliver around
 the baseline. Area rises with distance to roughly 50 km and then falls away as
 path loss and the horizon take over.
 
-Three fields are added to every tower, and nothing that was there before
-changed name, type or meaning: `expected_area_km2`, `best_azimuth_deg` and
-`horizon_km`.
+Four keys are added to every tower, and nothing that was there before
+changed name, type or meaning: `expected_area_km2`, `best_azimuth_deg`,
+`horizon_km` and `expected_detection_area`, described next. The last is null on
+a tower the model cannot score.
+
+### Detection area per aircraft class
+
+`expected_detection_area` repeats the area count for eight aircraft classes
+(`military_transport`, `widebody`, `regional_jet`, `narrowbody`, `turboprop`,
+`bizjet`, `light_GA`, `helicopter`) at the boresight the ranking chose, with the
+target at 3 km. The record has `calibration` (`default` or `fleet`),
+`system_constant_db`, `tau_db`, `altitude_km`, `azimuth_deg`, `terrain` and
+`classes`. Each class carries `area_km2`, `range_50pct_km`, `range_50pct_bound`,
+`area_km2_low`, `area_km2_high`, `range_50pct_km_low` and `range_50pct_km_high`.
+
+`range_50pct_km` walks out from the receiver in rings one cell wide, over the
+cells inside the beam only (within `yagi_hpbw_deg` / 2 of the boresight, 21
+degrees as shipped), skipping a ring with none. It is the outer edge of the last
+ring in which at least half of those cells detect, before the first ring in
+which fewer than half do. That is the figure retina-server measures on a node,
+from the aircraft inside the node's view. `range_50pct_bound` is `crossed` when
+such a ring ended the walk, and `grid_edge` when no ring falls under half inside
+the grid (`max_range_km`, 80 km as shipped), so the range is a lower bound.
+
+In `default` mode every constant above stays as it is. A class's RCS is
+`target_rcs_m2` (10 m^2 as shipped) x 10^(offset/10), with the offsets in dB:
+military_transport 1.14, widebody 0.77, regional_jet 0.26, narrowbody 0,
+turboprop -0.11, bizjet -0.23, light_GA -0.43, helicopter -0.70. The
+narrowbody area equals the model's `expected_area_km2` before the
+measurement-quality and fleet-feedback factors scale it. `system_constant_db`,
+`tau_db` and the low and high keys are null.
+
+In `fleet` mode the service reads the calibration document that retina-server's
+node-performance job produces. The operator copies it to
+`$TOWER_FINDER_RUNTIME_DIR/fleet_calibration.json` (default `data/runtime/`),
+and it is read again whenever the file or its permissions change. A file that
+fails validation logs one warning and the service stays on the defaults, and so
+does a document with `tau_at_bound` true, whose tau is the bound of the fit's
+search rather than an estimate. The
+system constant S is predicted from the descriptors below; the threshold T,
+`B * T` and the class offsets come from the document. The threshold uses the
+licensed EIRP that S is defined against (the ranking's EIRP only where the
+licence states none) and leaves out the ranking's band offset. The direct-path
+noise term and the horizon loss both drop out. retina-server measures the
+fleet's system constants against a free-space link, so each node's own path to
+its tower, horizon included, is already inside its S, along with the
+direct-path residue. The ranking and `default` mode still charge the horizon
+loss. `tau_db` is the
+fleet's tau. The low and high keys use S minus and plus the prediction's sigma,
+which is tau widened by the fit's own uncertainty.
+
+The tower descriptors are the band, the licensed EIRP, the licensed antenna
+height, the polarisation and the receiver-to-tower distance. A placeholder EIRP
+counts as absent. The receiver descriptors are optional keys in the `receiver`
+section of `tower_config.json`, named as the terms: `sdr_model`, `lna_state`,
+`antenna_model`, `antenna_polarisation`, `local_adsb_receiver`, `notch_dab`,
+`notch_rf`, `gain_reduction_ref_db`, `gain_reduction_surv_db`,
+`antenna_gain_dbi` and `feedline_loss_db`. The first seven are strings (`true`
+or `false` for the switches), the last four numbers in dB. `antenna_gain_dbi` is
+separate from `rx_antenna_gain_dbi`, which the ranking uses. Anything absent
+predicts the fleet average for its term and widens sigma by what that term
+varies by across the fleet: (coefficient^2 + its variance) x `spread`^2 for a
+number, b'Pb + tr(P C) for a category with level coefficients b, their
+covariance C and P = diag(p) - pp' over the fleet's shares p, plus
+`prior_sd_db`^2 for a category value no fitted node held.
+
+`terrain` is `smooth_earth`, the 4/3-earth horizon above. The ranking and
+`expected_area_km2` never read any of this: they keep the default constants
+whatever calibration is installed.
 
 ### Diversity ordering
 

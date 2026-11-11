@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 
+from services.fleet_calibration import CALIBRATION_FILENAME, HARDWARE_TERMS, load_calibration
 from services.tower_scoring import (
     DEFAULT_BAND_OFFSET_DB,
     DEFAULT_BAND_PARAMS,
@@ -52,6 +53,7 @@ SHARED_TRANSMITTER_RADIUS_KM = 0.2
 _SOURCE_DEFAULT_DIR = Path(__file__).resolve().parent.parent / "config"
 _RUNTIME_DIR = Path(os.environ.get("TOWER_FINDER_RUNTIME_DIR", "data/runtime"))
 _CONFIG_PATH = _RUNTIME_DIR / "tower_config.json"
+_CALIBRATION_PATH = _RUNTIME_DIR / CALIBRATION_FILENAME
 
 
 def _seed_defaults() -> None:
@@ -466,6 +468,7 @@ CONFIG_SETTINGS = (
     "BEAM_TILT_DEG",
     "VERTICAL_BEAMWIDTH_DEG",
     "MAX_UNDERBEAM_LOSS_DB",
+    "RX_HARDWARE_DESCRIPTORS",
 )
 
 # The sort_order of every default this image has shipped, newest first. An
@@ -530,9 +533,10 @@ def apply_config(cfg: dict) -> None:
     global BROADCAST_BANDS, BAND_PRIORITY, BAND_OFFSET_DB, DIVERSITY, SORT_ORDER, SCORING_PARAMS
     global DEFAULT_RADIUS_KM, DEFAULT_LIMIT
     global PROPAGATION_MODEL, ENVIRONMENT, RX_HEIGHT_M
-    global BEAM_TILT_DEG, VERTICAL_BEAMWIDTH_DEG, MAX_UNDERBEAM_LOSS_DB
+    global BEAM_TILT_DEG, VERTICAL_BEAMWIDTH_DEG, MAX_UNDERBEAM_LOSS_DB, RX_HARDWARE_DESCRIPTORS
 
     rx = cfg.get("receiver", {})
+    rx_hardware = {name: rx[name] for name in HARDWARE_TERMS if rx.get(name) is not None}
     rx_gain = rx.get("rx_antenna_gain_dbi", 6.0)
     sensitivity = rx.get("sensitivity_dbm", -95.0)
 
@@ -609,6 +613,7 @@ def apply_config(cfg: dict) -> None:
     BEAM_TILT_DEG = beam_tilt
     VERTICAL_BEAMWIDTH_DEG = beamwidths
     MAX_UNDERBEAM_LOSS_DB = max_underbeam
+    RX_HARDWARE_DESCRIPTORS = rx_hardware
 
 
 def _scoring_params() -> ScoringParams:
@@ -1479,6 +1484,10 @@ def process_and_rank(
                     "score": measurement["score"] if measurement else None,
                     "power_db": measurement["power_db"] if measurement else None,
                     "obw_fraction": measurement["obw_fraction"] if measurement else None,
+                    # The descriptors the fleet calibration is evaluated on,
+                    # as the callsign lookup reports them. Private: the scorer
+                    # reads it and the caller drops it before the response.
+                    "_fleet_descriptors": _fleet_descriptors(device, band, dist),
                 }
             )
 
@@ -1521,7 +1530,19 @@ def process_and_rank(
     # score_towers() is per-tower, so the saving is real, and it never reads
     # one tower to score another.
     try:
-        score_towers(towers, user_lat, user_lon, _scoring_params())
+        calibration = load_calibration(_CALIBRATION_PATH)
+    except Exception as exc:
+        logger.warning("Fleet calibration unavailable: %s", exc)
+        calibration = None
+    try:
+        score_towers(
+            towers,
+            user_lat,
+            user_lon,
+            _scoring_params(),
+            calibration=calibration,
+            rx_descriptors=RX_HARDWARE_DESCRIPTORS,
+        )
     except Exception as exc:
         # Fail-soft like the coverage scorer, and for the same reason: a fault
         # in the model must not take the towers endpoint down with it. The
@@ -1534,6 +1555,10 @@ def process_and_rank(
             t.setdefault("expected_area_km2", 0.0)
             t.setdefault("best_azimuth_deg", 0.0)
             t.setdefault("horizon_km", 0.0)
+            t.setdefault("expected_detection_area", None)
+    finally:
+        for t in towers:
+            t.pop("_fleet_descriptors", None)
 
     # Between the model and the feedback: the analyser says how well this node
     # heard the channel today, which discounts the modelled area before anything
@@ -1657,6 +1682,20 @@ def licence_record(system: dict, device: dict, lat: float, lon: float, radius_km
         "polarisation": polarisation if polarisation in ("horizontal", "vertical", "circular") else None,
         "licence_type": (system.get("licence") or {}).get("type") or "",
         "distance_km": round(dist, 1),
+    }
+
+
+def _fleet_descriptors(device: dict, band: str | None, distance_km: float) -> dict:
+    """The tower-side inputs of the fleet calibration, as the callsign lookup reports them."""
+    eirp = _licensed_eirp_dbm(device)
+    height = _as_float(device.get("_fcc_licensed_haat", device.get("antennaHeight")))
+    polarisation = device.get("polarisation")
+    return {
+        "band": band,
+        "tower_eirp_dbm": round(eirp, 1) if eirp is not None else None,
+        "tower_antenna_height_m": height if height is not None and math.isfinite(height) and height > 0 else None,
+        "tower_polarisation": polarisation if polarisation in ("horizontal", "vertical", "circular") else None,
+        "baseline_km": distance_km,
     }
 
 
