@@ -13,10 +13,12 @@ from tests._helpers import (
     device,
     get_towers,
     make_httpx_mock,
+    mocked_upstreams,
     post_towers,
     status_error_response,
     system,
 )
+from tests.test_replay_matching import _load_tower_fixture
 
 
 @pytest.fixture()
@@ -1129,3 +1131,154 @@ class TestResolvedAltitude:
         assert r.json()["towers"], "towers must still be returned"
         assert all(t["elevation_m"] is None for t in r.json()["towers"])
         assert r.json()["query"]["altitude_m"] == 0
+
+
+# ── GET /api/towers/lookup ───────────────────────────────────────────────────
+
+
+class TestCallsignLookup:
+    """The licence row behind a callsign at a tower position, as retina-server asks for it."""
+
+    # Columbia, SC licences exactly as the FCC client parsed them into
+    # tests/fixtures/towers_raw.json. W219CY states no horizontal ERP.
+    _SYSTEMS = [
+        {
+            "id": "fcc-tv-WIS-10",
+            "devices": [
+                {
+                    "callsign": "WIS",
+                    "frequency": 195,
+                    "eirp": 93513.61707237372,
+                    "transmitPower": None,
+                    "antennaHeight": 481.0,
+                    "location": {
+                        "name": "Columbia, SC",
+                        "state": "SC",
+                        "geom": {"string": "POINT(-80.75611111111111 34.125)"},
+                    },
+                    "_fcc_service_type": "DTV",
+                    "_fcc_channel": 10,
+                }
+            ],
+            "licence": {"type": "Broadcasting", "subtype": "Television"},
+        },
+        {
+            "id": "fcc-tv-WOLO-TV-7",
+            "devices": [
+                {
+                    "callsign": "WOLO-TV",
+                    "frequency": 177,
+                    "eirp": 71693.77308881986,
+                    "transmitPower": None,
+                    "antennaHeight": 530.0,
+                    "location": {
+                        "name": "Columbia, SC",
+                        "state": "SC",
+                        "geom": {"string": "POINT(-80.76386111111111 34.11622222222223)"},
+                    },
+                    "_fcc_service_type": "DTV",
+                    "_fcc_channel": 7,
+                }
+            ],
+            "licence": {"type": "Broadcasting", "subtype": "Television"},
+        },
+        {
+            "id": "fcc-fm-W219CY-91.7",
+            "devices": [
+                {
+                    "callsign": "W219CY",
+                    "frequency": 91.7,
+                    "eirp": None,
+                    "transmitPower": None,
+                    "antennaHeight": 0.0,
+                    "location": {
+                        "name": "Irmo, SC",
+                        "state": "SC",
+                        "geom": {"string": "POINT(-80.93686111111111 34.11858333333333)"},
+                    },
+                    "_fcc_service_type": "FX",
+                }
+            ],
+            "licence": {"type": "Broadcasting", "subtype": "FM Radio"},
+        },
+    ]
+
+    def _lookup(self, client, query, systems=_SYSTEMS):
+        with mocked_upstreams(systems):
+            return client.get(f"/api/towers/lookup?{query}")
+
+    def test_a_suffixed_callsign_finds_its_licence(self, client):
+        r = self._lookup(client, "callsign=WIS-TV&frequency_mhz=195&lat=34.12&lon=-80.75")
+
+        assert r.status_code == 200
+        assert r.json() == {
+            "status": "matched",
+            "tower": {
+                "callsign": "WIS",
+                "name": "Columbia, SC",
+                "frequency_mhz": 195.0,
+                "band": "VHF",
+                "latitude": 34.125,
+                "longitude": -80.756111,
+                "eirp_dbm": 79.7,
+                "antenna_height_m": 481.0,
+                "polarisation": None,
+                "licence_type": "Broadcasting",
+                "distance_km": 0.8,
+            },
+            "query": {
+                "callsign": "WIS-TV",
+                "frequency_mhz": 195.0,
+                "latitude": 34.12,
+                "longitude": -80.75,
+                "radius_km": 30,
+                "source": "us",
+            },
+        }
+
+    def test_a_frequency_off_the_licence_is_a_mismatch_naming_the_licence(self, client):
+        r = self._lookup(client, "callsign=WIS&frequency_mhz=201&lat=34.12&lon=-80.75")
+
+        tower = r.json()["tower"]
+        assert (r.json()["status"], tower["callsign"], tower["frequency_mhz"]) == ("frequency_mismatch", "WIS", 195.0)
+
+    def test_an_unknown_callsign_is_not_found(self, client):
+        r = self._lookup(client, "callsign=WXYZ&frequency_mhz=195&lat=34.12&lon=-80.75")
+
+        assert (r.json()["status"], r.json()["tower"]) == ("not_found", None)
+
+    def test_a_licence_stating_no_power_reports_none_not_the_ranking_placeholder(self, client):
+        """GET /api/towers ranks W219CY at 50 dBm, a figure its licence never states."""
+        r = self._lookup(client, "callsign=W219CY&frequency_mhz=91.7&lat=34.1186&lon=-80.9369")
+
+        assert r.json()["status"] == "matched"
+        assert r.json()["tower"]["eirp_dbm"] is None
+
+    def test_a_position_outside_coverage_is_a_422_with_a_reason(self, client):
+        r = self._lookup(client, "callsign=WIS&frequency_mhz=195&lat=48.0&lon=-30.0")
+
+        assert r.status_code == 422
+        assert isinstance(r.json()["detail"], str)
+
+    @pytest.mark.integration
+    def test_a_licence_in_the_recorded_tower_list_is_matched_at_its_own_position(self, client):
+        raw_systems = _load_tower_fixture()
+        if raw_systems is None:
+            pytest.skip("Tower fixture not found. Run:  python backend/tests/capture_fixture.py")
+
+        r = self._lookup(client, "callsign=WIS&frequency_mhz=195&lat=34.125&lon=-80.75611111111111", raw_systems)
+
+        assert r.json()["status"] == "matched"
+        assert r.json()["tower"] == {
+            "callsign": "WIS",
+            "name": "Columbia, SC",
+            "frequency_mhz": 195.0,
+            "band": "VHF",
+            "latitude": 34.125,
+            "longitude": -80.756111,
+            "eirp_dbm": 79.7,
+            "antenna_height_m": 481.0,
+            "polarisation": None,
+            "licence_type": "Broadcasting",
+            "distance_km": 0.0,
+        }

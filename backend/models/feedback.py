@@ -52,6 +52,11 @@ Outcome = Literal[
     "observed",
 ]
 
+# A target class label from the fleet fit (narrowbody, helicopter, ...), and a
+# ground range from the receiver in km, bounded like verified_range_p85_km.
+TargetClass = Annotated[str, Field(min_length=1, max_length=32)]
+RangeKm = Annotated[float, Field(ge=0, le=2000)]
+
 
 class TowerOutcome(BaseModel):
     """One fleet observation of one tower from one receiver."""
@@ -103,6 +108,13 @@ class TowerOutcome(BaseModel):
     adsb_match_rate: float | None = Field(None, ge=0, le=1, description="Fraction of tracks matched to ADS-B")
     snr_median_db: float | None = Field(None, ge=-100, le=200, description="Median SNR over the window")
     hours_observed: float | None = Field(None, ge=0, description="Hours of archive behind this row")
+    # Fleet-fitted figures for this receiver: S_n, the system constant, and per
+    # target class the range at which detection probability falls to 50 %.
+    # Stored for the fit to come; the ranking reads neither yet.
+    system_constant_db: float | None = Field(None, ge=-300, le=100, description="Fitted system constant S_n, dB")
+    range_50pct_km: dict[TargetClass, RangeKm] | None = Field(
+        None, max_length=16, description="Per target class, the range at 50% detection probability, km"
+    )
 
     # Server-filled when absent: a node with a bad clock or no NTP still lands a
     # row we can order, and "when we heard it" is kept separately as received_at.

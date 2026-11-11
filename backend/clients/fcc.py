@@ -8,6 +8,7 @@ holds no broadcast stations.
 
 TV Query: https://transition.fcc.gov/cgi-bin/tvq
 FM Query: https://transition.fcc.gov/cgi-bin/fmq
+Column layout of both: https://www.fcc.gov/media/radio/am-fm-tv-textlist-key
 """
 
 import asyncio
@@ -196,6 +197,31 @@ def _erp_kw_to_eirp_dbm(erp_kw: float) -> float:
     return erp_dbm + 2.15
 
 
+def _erp_kw_to_eirp_w(erp_kw: float | None) -> float | None:
+    """EIRP in watts, the unit a device's ``eirp`` carries; None for an ERP the record does not state."""
+    if erp_kw is None or erp_kw <= 0:
+        return None
+    return 10 ** ((_erp_kw_to_eirp_dbm(erp_kw) - 30) / 10)
+
+
+def _parse_haat(haat_str: str) -> float | None:
+    """HAAT in metres; None for the "-" of a figure the record does not state."""
+    try:
+        return float(haat_str)
+    except (ValueError, TypeError):
+        return None
+
+
+# What the TV listing writes in its polarisation column, by first letter.
+# Elliptical radiates both a horizontal and a vertical component, which is
+# what "circular" stands for here, as for an FM licence stating both ERPs.
+_TV_POLARISATIONS = {"H": "horizontal", "C": "circular", "E": "circular"}
+
+# The FM listing has no polarisation column: a licence says it by which of its
+# two ERPs (horizontal, vertical) it states.
+_FM_POLARISATIONS = {(True, True): "circular", (True, False): "horizontal", (False, True): "vertical"}
+
+
 def _parse_tv_line(line: str) -> dict | None:
     """Parse a pipe-delimited TV Query result line into a device dict.
 
@@ -246,18 +272,10 @@ def _parse_tv_line(line: str) -> dict | None:
             lon = -lon
 
         # Parse antenna height
-        antenna_height_str = parts[16]  # HAAT in meters
-        antenna_height = None
-        try:
-            antenna_height = float(antenna_height_str)
-        except (ValueError, TypeError):
-            pass
+        antenna_height = _parse_haat(parts[16])  # HAAT in meters
 
         # Build Maprad-compatible device dict
-        eirp_watts = None
-        if erp_kw is not None and erp_kw > 0:
-            eirp_dbm = _erp_kw_to_eirp_dbm(erp_kw)
-            eirp_watts = 10 ** ((eirp_dbm - 30) / 10)
+        eirp_watts = _erp_kw_to_eirp_w(erp_kw)
 
         city = parts[10]
         state = parts[11]
@@ -273,6 +291,10 @@ def _parse_tv_line(line: str) -> dict | None:
                 "state": state.strip(),
                 "geom": {"string": f"POINT({lon} {lat})"},
             },
+            # One ERP and one HAAT per TV licence (the two columns beside them
+            # are FM's vertical pair, unused here); the polarisation has a
+            # column of its own, blank where the licence leaves it unstated.
+            "polarisation": _TV_POLARISATIONS.get(parts[32][:1].upper()),
             "_fcc_service_type": service_type,
             "_fcc_channel": channel,
         }
@@ -302,9 +324,10 @@ def _parse_fm_line(line: str) -> dict | None:
             return None
         freq_mhz = float(freq_match.group(1))
 
-        # Parse ERP (two fields: horizontal, vertical)
-        erp_h_str = parts[14]
-        erp_kw = _parse_erp_kw(erp_h_str)
+        # Parse ERP (two fields: horizontal, vertical). A licence radiating in
+        # one polarisation only writes "-" for the other.
+        erp_kw = _parse_erp_kw(parts[14])
+        erp_v_kw = _parse_erp_kw(parts[15])
 
         # Parse coordinates
         lat_ns = parts[19]
@@ -323,18 +346,25 @@ def _parse_fm_line(line: str) -> dict | None:
         if lon_ew == "W":
             lon = -lon
 
-        # Parse antenna height (HAAT)
-        antenna_height_str = parts[16]
-        antenna_height = None
-        try:
-            antenna_height = float(antenna_height_str)
-        except (ValueError, TypeError):
-            pass
+        # Parse antenna height (HAAT, same two fields)
+        antenna_height = _parse_haat(parts[16])
+        antenna_height_v = _parse_haat(parts[17])
 
-        eirp_watts = None
-        if erp_kw is not None and erp_kw > 0:
-            eirp_dbm = _erp_kw_to_eirp_dbm(erp_kw)
-            eirp_watts = 10 ** ((eirp_dbm - 30) / 10)
+        eirp_watts = _erp_kw_to_eirp_w(erp_kw)
+        eirp_v_watts = _erp_kw_to_eirp_w(erp_v_kw)
+
+        # The licensed pair a callsign lookup reports: the horizontal one where
+        # the licence states a horizontal ERP, else the vertical one. Stating
+        # neither leaves no power to report, but the height still stands: the
+        # horizontal HAAT where it is a positive figure, else the vertical one.
+        if eirp_watts is not None:
+            licensed_eirp, licensed_haat = eirp_watts, antenna_height
+        elif eirp_v_watts is not None:
+            licensed_eirp, licensed_haat = eirp_v_watts, antenna_height_v
+        elif antenna_height is not None and antenna_height > 0:
+            licensed_eirp, licensed_haat = None, antenna_height
+        else:
+            licensed_eirp, licensed_haat = None, antenna_height_v
 
         city = parts[10]
         state = parts[11]
@@ -342,6 +372,8 @@ def _parse_fm_line(line: str) -> dict | None:
         return {
             "callsign": callsign,
             "frequency": freq_mhz,
+            # Horizontal only, as ranking has always read them: a vertical-only
+            # licence ranks at the placeholder power, not at its vertical ERP.
             "eirp": eirp_watts,
             "transmitPower": None,
             "antennaHeight": antenna_height,
@@ -350,6 +382,9 @@ def _parse_fm_line(line: str) -> dict | None:
                 "state": state.strip(),
                 "geom": {"string": f"POINT({lon} {lat})"},
             },
+            "polarisation": _FM_POLARISATIONS.get((eirp_watts is not None, eirp_v_watts is not None)),
+            "_fcc_licensed_eirp": licensed_eirp,
+            "_fcc_licensed_haat": licensed_haat,
             "_fcc_service_type": service_type,
         }
     except (ValueError, IndexError) as exc:
