@@ -212,6 +212,19 @@ def _parse_haat(haat_str: str) -> float | None:
         return None
 
 
+def _parse_radiation_centre_m(parts: list[str], index: int) -> float | None:
+    """A radiation-centre height in metres ("260.7  m", "265.5"); None where the record states none.
+
+    The listings write a height not stated as "0.0 m", "-" or a bare "m", and
+    a short line may end before the column.
+    """
+    try:
+        value = float(parts[index].removesuffix("m"))
+    except (IndexError, ValueError):
+        return None
+    return value if math.isfinite(value) and value > 0 else None
+
+
 # What the TV listing writes in its polarisation column, by first letter.
 # Elliptical radiates both a horizontal and a vertical component, which is
 # what "circular" stands for here, as for an FM licence stating both ERPs.
@@ -273,6 +286,9 @@ def _parse_tv_line(line: str) -> dict | None:
 
         # Parse antenna height
         antenna_height = _parse_haat(parts[16])  # HAAT in meters
+        # The radiation centre above mean sea level and above the ground at the tower.
+        rcamsl = _parse_radiation_centre_m(parts, 31)
+        rcagl = _parse_radiation_centre_m(parts, 36)
 
         # Build Maprad-compatible device dict
         eirp_watts = _erp_kw_to_eirp_w(erp_kw)
@@ -295,6 +311,8 @@ def _parse_tv_line(line: str) -> dict | None:
             # are FM's vertical pair, unused here); the polarisation has a
             # column of its own, blank where the licence leaves it unstated.
             "polarisation": _TV_POLARISATIONS.get(parts[32][:1].upper()),
+            "_fcc_rcamsl": rcamsl,
+            "_fcc_rcagl": rcagl,
             "_fcc_service_type": service_type,
             "_fcc_channel": channel,
         }
@@ -353,18 +371,24 @@ def _parse_fm_line(line: str) -> dict | None:
         eirp_watts = _erp_kw_to_eirp_w(erp_kw)
         eirp_v_watts = _erp_kw_to_eirp_w(erp_v_kw)
 
-        # The licensed pair a callsign lookup reports: the horizontal one where
-        # the licence states a horizontal ERP, else the vertical one. Stating
-        # neither leaves no power to report, but the height still stands: the
-        # horizontal HAAT where it is a positive figure, else the vertical one.
+        # The radiation centre above mean sea level, per polarisation like
+        # HAAT, and the one above the ground at the tower (its maximum).
+        rcamsl, rcamsl_v = _parse_radiation_centre_m(parts, 31), _parse_radiation_centre_m(parts, 32)
+        rcagl = _parse_radiation_centre_m(parts, 36)
+
+        # The licensed figures a callsign lookup reports: the horizontal ones
+        # where the licence states a horizontal ERP, else the vertical ones.
+        # Stating neither leaves no power to report, but the heights still
+        # stand: the horizontal ones where the HAAT is a positive figure, else
+        # the vertical ones.
         if eirp_watts is not None:
-            licensed_eirp, licensed_haat = eirp_watts, antenna_height
+            licensed_eirp, licensed_haat, licensed_rcamsl = eirp_watts, antenna_height, rcamsl
         elif eirp_v_watts is not None:
-            licensed_eirp, licensed_haat = eirp_v_watts, antenna_height_v
+            licensed_eirp, licensed_haat, licensed_rcamsl = eirp_v_watts, antenna_height_v, rcamsl_v
         elif antenna_height is not None and antenna_height > 0:
-            licensed_eirp, licensed_haat = None, antenna_height
+            licensed_eirp, licensed_haat, licensed_rcamsl = None, antenna_height, rcamsl
         else:
-            licensed_eirp, licensed_haat = None, antenna_height_v
+            licensed_eirp, licensed_haat, licensed_rcamsl = None, antenna_height_v, rcamsl_v
 
         city = parts[10]
         state = parts[11]
@@ -385,6 +409,9 @@ def _parse_fm_line(line: str) -> dict | None:
             "polarisation": _FM_POLARISATIONS.get((eirp_watts is not None, eirp_v_watts is not None)),
             "_fcc_licensed_eirp": licensed_eirp,
             "_fcc_licensed_haat": licensed_haat,
+            # Of the licensed polarisation, as the two above.
+            "_fcc_rcamsl": licensed_rcamsl,
+            "_fcc_rcagl": rcagl,
             "_fcc_service_type": service_type,
         }
     except (ValueError, IndexError) as exc:

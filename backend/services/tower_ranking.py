@@ -1488,6 +1488,14 @@ def process_and_rank(
                     # as the callsign lookup reports them. Private: the scorer
                     # reads it and the caller drops it before the response.
                     "_fleet_descriptors": _fleet_descriptors(device, band, dist),
+                    # The antenna the terrain profile starts from, as the
+                    # licence states it (the FCC client's radiation-centre
+                    # heights). Private, and dropped with the descriptors.
+                    "_antenna": {
+                        "rcamsl_m": device.get("_fcc_rcamsl"),
+                        "rcagl_m": device.get("_fcc_rcagl"),
+                        "polarisation": device.get("polarisation"),
+                    },
                 }
             )
 
@@ -1559,6 +1567,7 @@ def process_and_rank(
     finally:
         for t in towers:
             t.pop("_fleet_descriptors", None)
+            t.pop("_antenna", None)
 
     # Between the model and the feedback: the analyser says how well this node
     # heard the channel today, which discounts the modelled area before anything

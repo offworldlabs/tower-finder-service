@@ -10,7 +10,9 @@ import random
 import time
 from dataclasses import replace
 
+import numpy as np
 import pytest
+from services import tower_scoring
 from services.tower_scoring import (
     DEFAULT_ANTENNA_HEIGHT_M,
     FleetPrediction,
@@ -387,3 +389,145 @@ class TestClassDetectionAreas:
         assert (default["area_km2"], default["range_50pct_km"]) == (1092.0, 42.0)
         calibrated = class_detection_areas(*tower, fleet)[1]["narrowbody"]
         assert (calibrated["area_km2"], calibrated["range_50pct_km"]) == (232.0, 22.0)
+
+
+# ── Terrain ──────────────────────────────────────────────────────────────────
+
+# A 20 km disk and one boresight, north, with the target 1 km above the
+# receiver's ground: small enough to work every cell out by hand.
+_TERRAIN_PARAMS = replace(_PARAMS, max_range_km=20.0, n_azimuths=1, target_alt_km=1.0)
+
+
+class _Ridge:
+    """Ground 250 m above sea level, and 650 m from 5.95 to 8.05 km north of the receiver, east to west.
+
+    No tile covers the ground at least ``absent_north_km`` north and
+    ``absent_east_km`` east of the receiver: heights there read NaN, and a box
+    or a path reaching into it is told that tile is not on disk. ``cluttered``
+    puts what a surface model shows next to an antenna within 0.5 km of the
+    receiver: 30 m roofs on the 0.3 km square around it, and 40 m trees
+    0.3-0.45 km south of it, 0.4 km wide.
+    """
+
+    def __init__(self, absent_north_km=math.inf, absent_east_km=-math.inf, cluttered=False):
+        self._absent_km = (absent_north_km, absent_east_km)
+        self._cluttered = cluttered
+
+    def _offsets_km(self, lat, lon):
+        lat, lon = np.broadcast_arrays(np.asarray(lat, dtype=float), np.asarray(lon, dtype=float))
+        return (lat - _RX_LAT) * 111.2, (lon - _RX_LON) * 111.2 * math.cos(math.radians(_RX_LAT))
+
+    def missing(self, lat_min, lat_max, lon_min, lon_max):
+        north_km, east_km = self._offsets_km(lat_max, lon_max)
+        reaches = north_km >= self._absent_km[0] and east_km >= self._absent_km[1]
+        return ["Copernicus_DSM_COG_10_N34_00_W084_00_DEM"] if reaches else []
+
+    def missing_along(self, lat_a, lon_a, ends):
+        boxes = (self.missing(min(lat_a, b), max(lat_a, b), min(lon_a, c), max(lon_a, c)) for b, c in ends)
+        return sorted(set().union(*boxes))
+
+    def elevation(self, lat, lon, spacing_deg=0.0):
+        north_km, east_km = self._offsets_km(lat, lon)
+        ground = np.where((north_km >= 5.95) & (north_km <= 8.05), 650.0, 250.0)
+        if self._cluttered:
+            ground = ground + np.where((np.abs(north_km) <= 0.15) & (np.abs(east_km) <= 0.15), 30.0, 0.0)
+            ground = ground + np.where((north_km >= -0.45) & (north_km <= -0.3) & (np.abs(east_km) <= 0.2), 40.0, 0.0)
+        return np.where((north_km >= self._absent_km[0]) & (east_km >= self._absent_km[1]), np.nan, ground)
+
+
+def _terrain_towers() -> list[dict]:
+    """A tower 20 km south in the clear, one 12 km north behind the ridge, one 30 km north beyond the disk."""
+    return [
+        _tower(callsign="KSTH", lat=_north_of_rx(-20.0)),
+        _tower(callsign="KNTH", eirp_dbm=65.0, lat=_north_of_rx(12.0)),
+        _tower(callsign="KFAR", lat=_north_of_rx(30.0)),
+    ]
+
+
+class TestTerrain:
+    def test_a_ridge_hides_the_cells_behind_it_and_costs_a_tower_behind_it_the_diffraction_loss(self, monkeypatch):
+        """Worked by hand from the formulas. From the antenna at 260 m the ridge's
+        face stands 65 mrad up due north, so 23 of the 316 cells, where a target at
+        1250 m sits under that skyline, drop out. The tower in the clear loses them from
+        its area (1188 km^2 on smooth earth) and its range ends at 16 km instead of
+        the grid's 20; its flat path clears the earth, so P.526 charges it nothing.
+        The 300 m mast behind the ridge sits well inside its 73 km radio horizon,
+        so smooth earth charges it nothing; over the ridge P.526's delta-Bullington
+        loss is 42.6 dB, which leaves 40 km^2 of the 380 the mask alone would.
+
+        Roofs and trees within 0.5 km of the receiver change none of it: the
+        ground fit under the receiver reads them as outliers, so its antenna
+        still stands 10 m above 250 m, and nothing that close hides a cell or
+        blocks a path.
+
+        A fleet calibration leaves the ranking as it is, and its record is the one
+        without tiles: the fleet's system constants were measured with each node's
+        own terrain already inside them."""
+        calibration = {
+            "intercept_db": 85.0,
+            "terms": [],
+            "covariance_db2": [[0.0]],
+            "tau_db": 3.0,
+            "threshold_db": 12.0,
+            "processing_gain_db": 61.8,
+            "class_offsets_db": _CLASS_OFFSETS_DB,
+        }
+        fleet_without_tiles = _terrain_towers()
+        score_towers(fleet_without_tiles, _RX_LAT, _RX_LON, _TERRAIN_PARAMS, calibration=calibration)
+
+        monkeypatch.setattr(tower_scoring, "_terrain_source", _Ridge)
+        clear, shadowed, _ = towers = _terrain_towers()
+        score_towers(towers, _RX_LAT, _RX_LON, _TERRAIN_PARAMS)
+        fleet = _terrain_towers()
+        score_towers(fleet, _RX_LAT, _RX_LON, _TERRAIN_PARAMS, calibration=calibration)
+        monkeypatch.setattr(tower_scoring, "_terrain_source", lambda: _Ridge(cluttered=True))
+        cluttered = _terrain_towers()
+        score_towers(cluttered, _RX_LAT, _RX_LON, _TERRAIN_PARAMS)
+
+        assert cluttered == towers
+        assert clear["expected_area_km2"] == 1096.0
+        assert clear["expected_detection_area"]["classes"]["narrowbody"]["range_50pct_km"] == 16.0
+        assert shadowed["expected_area_km2"] == 40.0
+        assert all(t["expected_detection_area"]["terrain"] == "dem" for t in towers)
+        assert [t["expected_area_km2"] for t in fleet] == [t["expected_area_km2"] for t in towers]
+        assert [t["expected_detection_area"] for t in fleet] == [
+            t["expected_detection_area"] for t in fleet_without_tiles
+        ]
+        assert all(t["expected_detection_area"]["terrain"] == "smooth_earth" for t in fleet)
+
+    def test_the_licensed_radiation_centre_is_where_the_profile_starts(self, monkeypatch):
+        """Behind the ridge, on 250 m ground, one antenna at 550 m three ways: an
+        RCAMSL of 550 m on a 50 m mast with a 20 m RCAGL, an RCAGL of 300 m on a
+        50 m mast, and a 300 m mast with no licence heights."""
+        monkeypatch.setattr(tower_scoring, "_terrain_source", _Ridge)
+        towers = [
+            _tower(
+                eirp_dbm=65.0,
+                lat=_north_of_rx(12.0),
+                antenna_height_m=50.0,
+                _antenna={"rcamsl_m": 550.0, "rcagl_m": 20.0},
+            ),
+            _tower(eirp_dbm=65.0, lat=_north_of_rx(12.0), antenna_height_m=50.0, _antenna={"rcagl_m": 300.0}),
+            _tower(eirp_dbm=65.0, lat=_north_of_rx(12.0)),
+        ]
+        score_towers(towers, _RX_LAT, _RX_LON, _TERRAIN_PARAMS)
+        rcamsl, rcagl, mast = ((t["expected_area_km2"], t["expected_detection_area"]) for t in towers)
+        assert rcamsl == rcagl == mast
+        assert mast[0] == 40.0
+
+    def test_a_missing_tile_scores_on_smooth_earth_exactly_as_without_tiles(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("TOWER_FINDER_DEM_DIR", str(tmp_path / "absent"))
+        without_tiles = _terrain_towers()
+        score_towers(without_tiles, _RX_LAT, _RX_LON, _TERRAIN_PARAMS)
+
+        # The tile under a corner of the receiver's square, past its disk, is missing: no tower uses the terrain.
+        monkeypatch.setattr(tower_scoring, "_terrain_source", lambda: _Ridge(absent_north_km=15.0, absent_east_km=15.0))
+        towers = _terrain_towers()
+        score_towers(towers, _RX_LAT, _RX_LON, _TERRAIN_PARAMS)
+        assert towers == without_tiles
+
+        # Only the far tower's path lacks one: still every tower is scored as without tiles, on one model.
+        monkeypatch.setattr(tower_scoring, "_terrain_source", lambda: _Ridge(absent_north_km=25.0))
+        towers = _terrain_towers()
+        score_towers(towers, _RX_LAT, _RX_LON, _TERRAIN_PARAMS)
+        assert towers == without_tiles

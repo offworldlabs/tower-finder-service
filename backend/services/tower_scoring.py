@@ -24,6 +24,17 @@ The terms, per 2 km cell of a disk around the receiver:
   * a bistatic-angle cut: past ``max_bistatic_angle_deg`` the range ellipse is
     too flat to resolve, so those cells count for nothing.
 
+With GLO-30 terrain tiles on disk (``services/dem.py``, ``services/terrain.py``)
+two of those terms read the real ground. The receiver's terrain horizon hides
+every cell where a target would sit behind a ridge, and the ITU-R P.526
+delta-Bullington diffraction loss over the profile from the tower's antenna to
+the receiver's takes the place of the smooth-earth horizon loss, in the direct
+path and in the threshold alike. A query gets both for every tower or neither:
+towers ranked against each other on two models would be ranked on the model as
+much as on the towers, so where a tile under the receiver's square or under
+any tower's path is missing, unreadable or holds no height, every tower is
+scored on the smooth earth exactly as without tiles.
+
 The receiver is a Yagi, so the answer depends on where it points: the model
 sweeps ``n_azimuths`` boresights and reports the best one. That azimuth is the
 second output, and it is actionable — it is where the operator aims.
@@ -36,11 +47,17 @@ half). The default mode keeps every constant above, so an offset of 0 is the
 ranking's own area. The fleet mode swaps the link budget for the fleet
 calibration's predicted system constant, which already holds the receiver's
 gain, noise and direct-path residue, with a low/high band at one prediction
-sigma either side. Neither mode changes the three ranking outputs.
+sigma either side. The constants were fitted with a free-space path and no
+terrain term, so each fleet node's own path, horizon and terrain included, is
+inside them too: the fleet mode charges no horizon or terrain loss, and
+score_towers counts its figures over the smooth earth's cells whatever the
+tiles say, at the boresight the ranking chose. Neither mode changes the three
+ranking outputs.
 
-Pure module: no config I/O of its own. The caller resolves every knob into a
+No config I/O of its own. The caller resolves every knob into a
 ``ScoringParams`` and passes it in; ``services/tower_ranking.py`` builds one
-from tower_config.json.
+from tower_config.json. The one thing read from disk is the terrain, through a
+reader for the folder ``dem_dir()`` names that lives as long as the process.
 
 Ported from a validated pure-Python reference (same equation, same knobs, same
 defaults) and vectorised with numpy, because the reference takes ~13 s for the
@@ -51,14 +68,18 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
+from pathlib import Path
 from typing import NamedTuple
 
 import numpy as np
 
+from services.dem import Dem, dem_dir
 from services.fleet_calibration import CLASS_NAMES, DEFAULT_CLASS_OFFSETS_DB, evaluate
+from services.terrain import Horizon, TowerEnd, diffraction_losses_db, rx_horizon
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +137,10 @@ class ScoringParams:
     max_bistatic_angle_deg: float = 150.0  # beyond this the range ellipse is too flat to resolve
     target_alt_km: float = 3.0
     rx_height_m: float = DEFAULT_RX_HEIGHT_M
+    # With terrain tiles: the receiver's antenna stands rx_height_m above the
+    # ground fitted to the surface within this distance of it, and nothing
+    # within it, nor within it of a tower, is an obstacle (services/terrain.py).
+    terrain_near_km: float = 0.5
     grid_km: float = 2.0
     max_range_km: float = 80.0
     n_azimuths: int = 24
@@ -148,6 +173,14 @@ class FleetPrediction:
     threshold_db: float  # the document's T
     processing_gain_db: float  # the document's G_proc
     eirp_dbm: float  # the tower EIRP the system constant is referenced to
+
+
+@dataclass(frozen=True, eq=False)
+class TowerTerrain:
+    """What the terrain tiles say about one tower, in place of the smooth earth."""
+
+    visible: np.ndarray  # per cell of the grid: a target there clears the receiver's terrain horizon
+    loss_db: float  # diffraction loss toward the tower, where horizon_loss_db goes otherwise
 
 
 def radio_horizon_km(h_tx_m: float, h_rx_m: float = DEFAULT_RX_HEIGHT_M) -> float:
@@ -279,6 +312,7 @@ class _TowerModel(NamedTuple):
     best: int  # the pattern_db row the score was taken at
     base_db: np.ndarray | None  # per cell, pattern excluded; None on an empty grid
     countable: np.ndarray | None  # per cell: whether a detection there counts at all
+    resolvable: np.ndarray | None  # per cell: inside the bistatic-angle cut, what countable is without terrain
     threshold_db: float  # the detection threshold at the best row
     eirp_eff: float
     lam_m: float
@@ -295,6 +329,7 @@ def _evaluate_tower(
     params: ScoringParams,
     grid: CellGrid,
     direct_power_dbm_override: float | None,
+    terrain: TowerTerrain | None,
 ) -> _TowerModel:
     """The model for one tower, shared by the ranking area and the class figures."""
     bp = params.band_params[band]
@@ -309,7 +344,10 @@ def _evaluate_tower(
 
     d_tower_km = math.hypot(tower_x_km, tower_y_km)
     tower_bearing_deg = math.degrees(math.atan2(tower_x_km, tower_y_km)) % 360.0
-    hloss_db = horizon_loss_db(d_tower_km, antenna_height_m, params.rx_height_m)
+    if terrain is None:
+        hloss_db = horizon_loss_db(d_tower_km, antenna_height_m, params.rx_height_m)
+    else:
+        hloss_db = terrain.loss_db
 
     if direct_power_dbm_override is None:
         direct_iso_dbm = eirp_eff - fspl_db(max(d_tower_km, _MIN_DIRECT_KM), freq_mhz) - hloss_db
@@ -318,7 +356,7 @@ def _evaluate_tower(
 
     if grid.x_km.size == 0:
         score = TowerScore(0.0, 0.0, round(radio_horizon_km(antenna_height_m, params.rx_height_m), 1))
-        return _TowerModel(score, 0, None, None, math.nan, eirp_eff, lam_m, hloss_db)
+        return _TowerModel(score, 0, None, None, None, math.nan, eirp_eff, lam_m, hloss_db)
 
     # Both vectors point away from the cell: towards the tower, and towards the
     # receiver. Taking either the other way round computes 180 - beta, which
@@ -335,7 +373,7 @@ def _evaluate_tower(
     beta_deg = np.degrees(np.arccos(np.clip(cos_beta, -1.0, 1.0)))
     resolvable = beta_deg <= params.max_bistatic_angle_deg
     # The one per-cell mask both the ranking count and the class counts apply.
-    countable = resolvable
+    countable = resolvable if terrain is None else resolvable & terrain.visible
 
     # Everything about a cell that does not depend on where the antenna points.
     base_db = -20 * np.log10(r_t_m) - 20 * np.log10(grid.r_r_m)
@@ -363,7 +401,17 @@ def _evaluate_tower(
         best_azimuth_deg=float(grid.azimuths_deg[best]),
         horizon_km=round(radio_horizon_km(antenna_height_m, params.rx_height_m), 1),
     )
-    return _TowerModel(score, best, base_db, countable, float(threshold_db[best]), eirp_eff, lam_m, hloss_db)
+    return _TowerModel(
+        score,
+        best,
+        base_db,
+        countable,
+        resolvable,
+        float(threshold_db[best]),
+        eirp_eff,
+        lam_m,
+        hloss_db,
+    )
 
 
 def expected_detection_area(
@@ -376,6 +424,7 @@ def expected_detection_area(
     params: ScoringParams,
     grid: CellGrid | None = None,
     direct_power_dbm_override: float | None = None,
+    terrain: TowerTerrain | None = None,
 ) -> TowerScore:
     """Detection area and best boresight for one tower, in km^2 and degrees.
 
@@ -384,7 +433,9 @@ def expected_detection_area(
     receiver *before* the antenna pattern is applied — a measured direct path
     (phase 2) says what the DPI really is, where the model only guesses. It
     changes the noise floor, not the target path: the energy that reaches the
-    target is still the licensed EIRP.
+    target is still the licensed EIRP. ``terrain``, on ``grid``'s cells, swaps
+    the smooth earth for the tiles: only visible cells count, and its loss
+    stands where ``horizon_loss_db`` would.
     """
     if grid is None:
         grid = cell_grid_for(params)
@@ -398,6 +449,7 @@ def expected_detection_area(
         params,
         grid,
         direct_power_dbm_override,
+        terrain,
     ).score
 
 
@@ -454,11 +506,14 @@ def class_detection_areas(
     fleet: FleetPrediction | None = None,
     grid: CellGrid | None = None,
     direct_power_dbm_override: float | None = None,
+    terrain: TowerTerrain | None = None,
 ) -> tuple[TowerScore, dict[str, dict]]:
     """The tower's score, and each aircraft class's area and 50 % range at its boresight.
 
     The score is exactly what ``expected_detection_area`` returns for the same
-    arguments; the classes are evaluated on that score's best azimuth only.
+    arguments, ``terrain`` included; the classes are evaluated on that score's
+    best azimuth only, over the same countable cells, and in the default mode
+    with the same loss.
     ``class_offsets_db`` maps a class to its RCS offset in dB (narrowbody 0).
 
     Without ``fleet``, a class is the model's own threshold lowered by its
@@ -470,7 +525,8 @@ def class_detection_areas(
     The ranking's ``eirp_dbm`` and band offset stay out of it: the first can be a
     placeholder power, and the calibration fits the band itself. S already
     holds the receiver gain, noise and direct-path residue, so none of those
-    enter it either. Nor does the horizon loss: retina measures S against a
+    enter it either. Nor does the horizon loss, or the diffraction loss
+    ``terrain`` puts in its place: retina measures S against a
     free-space link, so each node's own path to its tower, horizon included,
     is inside its S, and charging it here would count it twice. The ranking
     and the default mode still pay it.
@@ -481,6 +537,10 @@ def class_detection_areas(
     ``range_50pct_bound`` is "crossed" when a ring under half detected ended
     the range, and "grid_edge" when the grid ran out first, so the range is a
     lower bound.
+
+    ``fleet`` and ``terrain`` together count the fleet thresholds over the cells
+    the tiles leave visible, at the tiles' boresight, for a comparison;
+    score_towers counts a fleet record over the smooth earth's cells.
     """
     if grid is None:
         grid = cell_grid_for(params)
@@ -494,13 +554,30 @@ def class_detection_areas(
         params,
         grid,
         direct_power_dbm_override,
+        terrain,
     )
+    return model.score, _class_figures(model, grid, class_offsets_db, fleet, model.countable)
+
+
+def _class_figures(
+    model: _TowerModel,
+    grid: CellGrid,
+    class_offsets_db: Mapping[str, float],
+    fleet: FleetPrediction | None,
+    countable: np.ndarray | None,
+) -> dict[str, dict]:
+    """Each class's figures at the model's best row, over the ``countable`` cells (see class_detection_areas).
+
+    Without ``fleet`` the thresholds are the model's own, its loss already in
+    them; with it they are the calibration's, which charge no loss toward the
+    tower.
+    """
     names = list(class_offsets_db)
     n = len(names)
 
     if grid.x_km.size == 0:
         empty = None if fleet is None else 0.0
-        return model.score, {
+        return {
             name: {
                 "area_km2": 0.0,
                 "range_50pct_km": 0.0,
@@ -530,7 +607,7 @@ def class_detection_areas(
         ).ravel()
 
     cells_db = grid.pattern_db[model.best] + model.base_db
-    counts, range_km, crossed = _areas_and_ranges(cells_db, model.countable, thresholds_db, grid, model.best)
+    counts, range_km, crossed = _areas_and_ranges(cells_db, countable, thresholds_db, grid, model.best)
 
     classes: dict[str, dict] = {}
     for i, name in enumerate(names):
@@ -546,7 +623,7 @@ def class_detection_areas(
             "range_50pct_km_low": None if low is None else float(range_km[low]),
             "range_50pct_km_high": None if high is None else float(range_km[high]),
         }
-    return model.score, classes
+    return classes
 
 
 def _antenna_height_m(value) -> float:
@@ -561,6 +638,104 @@ def _antenna_height_m(value) -> float:
     if not math.isfinite(value) or value <= 0:
         return DEFAULT_ANTENNA_HEIGHT_M
     return float(value)
+
+
+# One tile reader per folder for the life of the process, so the blocks one
+# request decodes are still cached for the next. Dem guards its own caches.
+_DEMS: dict[Path, Dem] = {}
+_DEMS_LOCK = threading.Lock()
+
+
+def _terrain_source() -> Dem:
+    """The shared reader for the tile folder dem_dir() names at this moment."""
+    root = dem_dir().absolute()
+    with _DEMS_LOCK:
+        if root not in _DEMS:
+            _DEMS[root] = Dem(root)
+        return _DEMS[root]
+
+
+def _receiver_view(horizon: Horizon, params: ScoringParams, grid: CellGrid) -> np.ndarray:
+    """Per cell, whether a target there clears the receiver's terrain horizon.
+
+    The target flies ``target_alt_km`` above the receiver's reference surface,
+    the plane R_r and R_t put it over, which the horizon takes in metres above
+    sea level.
+    """
+    target_alt_m = horizon.rx_ground_m + params.target_alt_km * 1000.0
+    visible = horizon.visible(grid.bearing_deg, np.hypot(grid.x_km, grid.y_km), target_alt_m)
+    visible.setflags(write=False)
+    return visible
+
+
+def _stated_m(value) -> float | None:
+    """A height a record states: a positive, finite number of metres; None for anything else."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        return None
+    return float(value)
+
+
+def _tower_end(tower: dict, height_m: float) -> TowerEnd:
+    """The tower's end of its terrain profile, from the radiation centre and polarisation of its private ``_antenna``.
+
+    The licence's RCAMSL where it states one; else its RCAGL above the tiles'
+    height at the tower; else the mast height the smooth earth uses, above
+    that same height. HAAT, the usual antenna_height_m, is a height above the
+    average terrain around the tower, not above its own ground, and is only
+    the last resort here. Circular, elliptical or unstated polarisation counts
+    as horizontal.
+    """
+    antenna = tower.get("_antenna") or {}
+    rcagl_m = _stated_m(antenna.get("rcagl_m"))
+    return TowerEnd(
+        lat=float(tower["latitude"]),
+        lon=float(tower["longitude"]),
+        freq_mhz=float(tower["frequency_mhz"]),
+        altitude_m=_stated_m(antenna.get("rcamsl_m")),
+        height_m=height_m if rcagl_m is None else rcagl_m,
+        vertical=antenna.get("polarisation") == "vertical",
+    )
+
+
+def _query_terrain(
+    rx_lat: float, rx_lon: float, scored: list[tuple[dict, float]], params: ScoringParams, grid: CellGrid
+) -> list[TowerTerrain] | None:
+    """The terrain of each (tower, mast height) in ``scored``, in order; None to score them all on smooth earth.
+
+    Terrain for one tower means terrain for all of them, and it needs every
+    tile under the receiver's square, rx +- max_range_km, and under the path
+    to each tower, on disk or marked as sea, plus a height at every point the
+    horizon and the profiles read. Absent tiles are found before a height is
+    read and named in one INFO line. Any failure to read or work out the
+    terrain is one WARNING naming it. The horizon and the profiles share the
+    receiver's reference surface and the near zone ``terrain_near_km``.
+    """
+    try:
+        dem = _terrain_source()
+        reach_lat = params.max_range_km / KM_PER_DEG
+        reach_lon = params.max_range_km / (KM_PER_DEG * max(math.cos(math.radians(rx_lat)), _MIN_COS_LAT))
+        absent = set(dem.missing(rx_lat - reach_lat, rx_lat + reach_lat, rx_lon - reach_lon, rx_lon + reach_lon))
+        ends = [(float(tower["latitude"]), float(tower["longitude"])) for tower, _ in scored]
+        absent.update(dem.missing_along(rx_lat, rx_lon, ends))
+        if absent:
+            logger.info("Terrain tiles not on disk, scoring every tower on smooth earth: %s", ", ".join(sorted(absent)))
+            return None
+        near_km = params.terrain_near_km
+        horizon = rx_horizon(dem, rx_lat, rx_lon, params.rx_height_m, params.max_range_km, near_km=near_km)
+        losses = None
+        if horizon is not None:
+            towers = [_tower_end(tower, height_m) for tower, height_m in scored]
+            losses = diffraction_losses_db(
+                dem, rx_lat, rx_lon, horizon.rx_ground_m, params.rx_height_m, towers, near_km=near_km
+            )
+        if losses is None:
+            logger.info("Terrain tiles hold no height where the query reads them, scoring every tower on smooth earth")
+            return None
+        visible = _receiver_view(horizon, params, grid)
+        return [TowerTerrain(visible, loss_db) for loss_db in losses]
+    except Exception as exc:
+        logger.warning("Terrain unreadable, scoring every tower on smooth earth: %s", exc)
+        return None
 
 
 def score_towers(
@@ -592,6 +767,24 @@ def score_towers(
 
     A per-tower ``direct_power_dbm_override`` is honoured if present — phase 2
     will set it from a measured direct path.
+
+    Terrain comes from the GLO-30 tiles in ``dem_dir()``, for the whole query
+    or not at all, so one answer never ranks towers on two models. It is used
+    only when every tile under the receiver's square (rx +- max_range_km) and
+    under the path to every scoreable tower is on disk or marked as sea, and
+    the tiles hold a height at every point read. Then the receiver's horizon
+    is worked out once, and each tower's diffraction loss over its own path,
+    from the radiation centre and in the polarisation of its private
+    ``_antenna`` (``rcamsl_m``, ``rcagl_m``, ``polarisation``, from the licence
+    where it states them); the ranking fields and the default record are
+    scored on them and the record says ``"terrain": "dem"``. Otherwise every
+    tower is scored exactly as without tiles and says ``"smooth_earth"``: the
+    absent tiles are named in one INFO line, a tile that cannot be read in one
+    WARNING. A fleet record charges no horizon or terrain loss and hides no
+    cell behind terrain; it is taken at the boresight the ranking chose and
+    says ``"smooth_earth"``: the calibration's system constants were fitted with
+    a free-space path and no terrain term, so each node's own path, horizon and
+    terrain included, is already in them and the tiles would charge it twice.
     """
     for tower in towers:
         tower["expected_area_km2"] = 0.0
@@ -610,6 +803,7 @@ def score_towers(
         offsets = dict(DEFAULT_CLASS_OFFSETS_DB)
     warned = False
 
+    scored = []
     for tower in towers:
         height_m = _antenna_height_m(tower.get("antenna_height_m"))
         tower["horizon_km"] = round(radio_horizon_km(height_m, params.rx_height_m), 1)
@@ -626,14 +820,20 @@ def score_towers(
             continue
         if not isinstance(freq_mhz, (int, float)) or isinstance(freq_mhz, bool) or not freq_mhz > 0:
             continue
+        scored.append((tower, height_m))
 
+    terrains = _query_terrain(rx_lat, rx_lon, scored, params, grid) if scored else None
+
+    for i, (tower, height_m) in enumerate(scored):
+        eirp = tower["eirp_dbm"]
+        terrain = None if terrains is None else terrains[i]
         # Wrapped, not a bare subtraction: a receiver just east of the
         # antimeridian and a tower just west of it are 20 km apart, not 40000.
         dlon = (float(tower["longitude"]) - rx_lon + 180.0) % 360.0 - 180.0
         x_km = dlon * KM_PER_DEG * cos_lat
         y_km = (float(tower["latitude"]) - rx_lat) * KM_PER_DEG
 
-        args = (x_km, y_km, float(eirp), float(freq_mhz), band, height_m, params)
+        args = (x_km, y_km, float(eirp), float(tower["frequency_mhz"]), tower["band"], height_m, params)
         direct_power_dbm_override = tower.get("direct_power_dbm_override")
         try:
             fleet = None
@@ -656,20 +856,21 @@ def score_towers(
                     float(calibration["processing_gain_db"]),
                     float(licensed_dbm),
                 )
-            score, classes = class_detection_areas(
-                *args,
-                offsets,
-                fleet=fleet,
-                grid=grid,
-                direct_power_dbm_override=direct_power_dbm_override,
-            )
+            model = _evaluate_tower(*args, grid, direct_power_dbm_override, terrain)
+            score = model.score
+            if fleet is None:
+                classes = _class_figures(model, grid, offsets, None, model.countable)
+            else:
+                # The smooth earth's cells at the ranking's boresight, which is the no-tile
+                # record wherever the tiles leave that boresight where it was.
+                classes = _class_figures(model, grid, offsets, fleet, model.resolvable)
             record = {
                 "calibration": "fleet" if calibration is not None else "default",
                 "system_constant_db": fleet.system_constant_db if fleet else None,
                 "tau_db": float(calibration["tau_db"]) if calibration is not None else None,
                 "altitude_km": float(params.target_alt_km),
                 "azimuth_deg": score.best_azimuth_deg,
-                "terrain": "smooth_earth",
+                "terrain": "dem" if terrain is not None and fleet is None else "smooth_earth",
                 "classes": classes,
             }
         except Exception as exc:
@@ -680,6 +881,7 @@ def score_towers(
                 *args,
                 grid=grid,
                 direct_power_dbm_override=direct_power_dbm_override,
+                terrain=terrain,
             )
             record = None
         tower["expected_area_km2"] = score.expected_area_km2
@@ -697,6 +899,7 @@ __all__ = [
     "FleetPrediction",
     "ScoringParams",
     "TowerScore",
+    "TowerTerrain",
     "cell_grid_for",
     "class_detection_areas",
     "expected_detection_area",
