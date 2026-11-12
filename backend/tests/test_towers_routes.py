@@ -1282,3 +1282,108 @@ class TestCallsignLookup:
             "licence_type": "Broadcasting",
             "distance_km": 0.0,
         }
+
+
+class TestDetectionAreaPerClass:
+    """Every scored tower carries the per-class record, from the defaults or from the fleet calibration."""
+
+    _QUERY = "lat=33.9&lon=-84.6&source=us"
+    _CLASSES = [
+        "military_transport",
+        "widebody",
+        "regional_jet",
+        "narrowbody",
+        "turboprop",
+        "bizjet",
+        "light_GA",
+        "helicopter",
+    ]
+    _SYSTEMS = [
+        system(
+            [
+                device(515.0, 34.05, -84.6, callsign="NORTH", eirp=1_000_000),
+                device(527.0, 33.9, -84.35, callsign="EAST"),
+            ],
+            licence_type="Broadcast",
+        )
+    ]
+
+    @pytest.fixture(autouse=True)
+    def _shipped(self, tmp_path, monkeypatch):
+        import json
+
+        from services import tower_ranking
+
+        saved = {name: getattr(tower_ranking, name) for name in tower_ranking.CONFIG_SETTINGS}
+        with (tower_ranking._SOURCE_DEFAULT_DIR / "tower_config.json").open() as f:
+            cfg = json.load(f)
+        cfg["receiver"]["antenna_gain_dbi"] = 9.0
+        tower_ranking.apply_config(cfg)
+        monkeypatch.setattr(tower_ranking, "_CALIBRATION_PATH", tmp_path / "fleet_calibration.json")
+        try:
+            yield
+        finally:
+            for name, value in saved.items():
+                setattr(tower_ranking, name, value)
+
+    def test_without_a_calibration_every_tower_carries_the_default_record(self, client):
+        towers = get_towers(client, self._QUERY, self._SYSTEMS).json()["towers"]
+
+        assert len(towers) == 2
+        for t in towers:
+            record = t["expected_detection_area"]
+            assert record["calibration"] == "default"
+            assert record["system_constant_db"] is None
+            assert record["tau_db"] is None
+            assert record["terrain"] == "smooth_earth"
+            assert record["altitude_km"] == 3.0
+            assert record["azimuth_deg"] == t["best_azimuth_deg"]
+            assert list(record["classes"]) == self._CLASSES
+            assert all(
+                c["area_km2_low"] is None and c["range_50pct_km_high"] is None for c in record["classes"].values()
+            )
+            assert not [key for key in t if key.startswith("_")]
+
+    def test_with_a_calibration_the_record_is_predicted_from_the_tower_and_the_receiver(self, client, tmp_path):
+        import json
+
+        term = {"prior_mean_db": 0.0, "prior_sd_db": 1.0, "nodes": 5, "kind": "linear", "spread": 3.0}
+        (tmp_path / "fleet_calibration.json").write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "kind": "retina-fleet-calibration",
+                    "fitted_on": "2026-11-01",
+                    "window": ["2026-10-01", "2026-10-31"],
+                    "nodes": 5,
+                    "intercept_db": 70.0,
+                    "terms": [
+                        {**term, "name": "tower_eirp_dbm", "centre": 80.0, "coefficient_db": 0.5},
+                        {**term, "name": "antenna_gain_dbi", "centre": 6.0, "coefficient_db": 1.0},
+                    ],
+                    "covariance_db2": [[0.25, 0, 0], [0, 0.01, 0], [0, 0, 0.04]],
+                    "tau_db": 2.0,
+                    "tau_at_bound": False,
+                    "effective_parameters": 3.0,
+                    "dropped_terms": {},
+                    "threshold_db": 13.0,
+                    "processing_gain_db": 60.0,
+                    "class_offsets_db": dict(
+                        zip(self._CLASSES, (1.1, 0.8, 0.3, 0.0, -0.1, -0.2, -0.4, -0.7), strict=True)
+                    ),
+                }
+            )
+        )
+
+        towers = {t["callsign"]: t for t in get_towers(client, self._QUERY, self._SYSTEMS).json()["towers"]}
+
+        # 70 + 0.5 * (90 - 80) + (9 - 6); the second tower states no power, so its EIRP term is the fleet average.
+        assert towers["NORTH"]["expected_detection_area"]["system_constant_db"] == pytest.approx(78.0, abs=1e-9)
+        assert towers["EAST"]["expected_detection_area"]["system_constant_db"] == pytest.approx(73.0, abs=1e-9)
+        for t in towers.values():
+            record = t["expected_detection_area"]
+            assert record["calibration"] == "fleet"
+            assert record["tau_db"] == 2.0
+            for c in record["classes"].values():
+                assert c["area_km2_low"] <= c["area_km2"] <= c["area_km2_high"]
+                assert c["range_50pct_km_low"] <= c["range_50pct_km"] <= c["range_50pct_km_high"]

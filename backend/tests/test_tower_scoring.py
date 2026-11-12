@@ -13,7 +13,9 @@ from dataclasses import replace
 import pytest
 from services.tower_scoring import (
     DEFAULT_ANTENNA_HEIGHT_M,
+    FleetPrediction,
     ScoringParams,
+    class_detection_areas,
     expected_detection_area,
     horizon_loss_db,
     radio_horizon_km,
@@ -267,3 +269,121 @@ class TestScoreTowers:
         score_towers(towers, _RX_LAT, _RX_LON, _PARAMS)
         elapsed = time.perf_counter() - started
         assert elapsed < 2.0, f"scoring 200 towers took {elapsed:.2f}s"
+
+
+# ── Per aircraft class ───────────────────────────────────────────────────────
+
+# RCS offsets in dB relative to a narrowbody, in the shape the calibration carries.
+_CLASS_OFFSETS_DB = {
+    "military_transport": -1.9,
+    "widebody": 0.6,
+    "regional_jet": -1.1,
+    "narrowbody": 0.0,
+    "turboprop": -2.6,
+    "bizjet": -3.2,
+    "light_GA": -3.6,
+    "helicopter": -2.0,
+}
+
+# A UHF tower 25 km north-east of the receiver; its best boresight is not north.
+_CLASS_TOWER = (20.0, 15.0, 75.0, 550.0, "UHF", 400.0, _PARAMS)
+
+
+class TestClassDetectionAreas:
+    def test_the_narrowbody_class_is_the_ranking_area_at_its_boresight(self):
+        score, classes = class_detection_areas(*_CLASS_TOWER, _CLASS_OFFSETS_DB)
+        assert score == expected_detection_area(*_CLASS_TOWER)
+        assert score.expected_area_km2 == 8632.0
+        assert classes["narrowbody"]["area_km2"] == 8632.0
+
+    def test_a_larger_class_offset_never_detects_less(self):
+        _, classes = class_detection_areas(*_CLASS_TOWER, _CLASS_OFFSETS_DB)
+        assert list(classes) == list(_CLASS_OFFSETS_DB)
+        assert all(f["area_km2_low"] is None and f["range_50pct_km_high"] is None for f in classes.values())
+
+        areas = [classes[name]["area_km2"] for name in sorted(_CLASS_OFFSETS_DB, key=_CLASS_OFFSETS_DB.get)][::-1]
+        assert areas == sorted(areas, reverse=True)
+        assert areas[0] > areas[-1]
+
+    def test_the_fleet_calibration_sets_each_class_area_range_and_band(self):
+        """A tower on the receiver keeps it doable by hand: R_t = R_r, no horizon
+        loss, one boresight on a flat pattern, nothing cut. 2 km cells to 6 km sit
+        at 2, 2.8, 4, 4.5 (8 of them), 5.7 and 6 km (4 each): rings of 4, 8, 16.
+        The 42 degree beam north holds one of each, at 2, 4 and 6 km, so those
+        three set the range. The ranking scores the tower at a 50 dBm stand-in
+        plus a 5 dB UHF offset; the classes take the 70 dBm the system constant
+        is referenced to."""
+        params = replace(
+            _PARAMS,
+            n_azimuths=1,
+            yagi_front_to_back_db=0.0,
+            max_bistatic_angle_deg=180.0,
+            max_range_km=6.0,
+            band_offset_db={"UHF": 5.0, "VHF": 0.0, "FM": 0.0},
+        )
+        fleet = FleetPrediction(
+            system_constant_db=67.5, prediction_sigma_db=3.5, threshold_db=12.0, processing_gain_db=64.0, eirp_dbm=70.0
+        )
+        _, classes = class_detection_areas(0.0, 0.0, 50.0, 600.0, "UHF", 300.0, params, _CLASS_OFFSETS_DB, fleet)
+
+        # The edge falls between the 4.5 and 5.7 km cells, so the 6 km one is missed.
+        assert classes["narrowbody"] == {
+            "area_km2": 80.0,
+            "range_50pct_km": 4.0,
+            "range_50pct_bound": "crossed",
+            "area_km2_low": 32.0,
+            "area_km2_high": 112.0,
+            "range_50pct_km_low": 2.0,
+            "range_50pct_km_high": 6.0,
+        }
+        # 3.6 dB smaller: the 2.8 km half of ring 2, so the 4 km cell is missed.
+        assert classes["light_GA"] == {
+            "area_km2": 32.0,
+            "range_50pct_km": 2.0,
+            "range_50pct_bound": "crossed",
+            "area_km2_low": 16.0,
+            "area_km2_high": 80.0,
+            "range_50pct_km_low": 2.0,
+            "range_50pct_km_high": 4.0,
+        }
+        for f in classes.values():
+            assert f["area_km2_low"] <= f["area_km2"] <= f["area_km2_high"]
+            assert f["range_50pct_km_low"] <= f["range_50pct_km"] <= f["range_50pct_km_high"]
+            assert all(type(v) is float for k, v in f.items() if k != "range_50pct_bound")
+
+    def test_the_range_is_walked_over_the_beam_alone(self):
+        """A node measures its range from the aircraft in its view. Off the main
+        lobe a cell needs up to 20 dB more, so over whole rings the range would
+        end where the back lobe stops (12 km here), while the beam still sees
+        out to 36 km. The areas count every cell. Tower on the receiver,
+        boresight north, the shipped grid and Yagi."""
+        params = replace(_PARAMS, n_azimuths=1)
+        fleet = FleetPrediction(
+            system_constant_db=85.0, prediction_sigma_db=3.0, threshold_db=6.0, processing_gain_db=61.8, eirp_dbm=80.0
+        )
+        _, classes = class_detection_areas(0.0, 0.0, 60.0, 550.0, "UHF", 300.0, params, {"narrowbody": 0.0}, fleet)
+        assert classes["narrowbody"] == {
+            "area_km2": 988.0,
+            "range_50pct_km": 36.0,
+            "range_50pct_bound": "crossed",
+            "area_km2_low": 700.0,
+            "area_km2_high": 1404.0,
+            "range_50pct_km_low": 30.0,
+            "range_50pct_km_high": 42.0,
+        }
+
+    def test_the_fleet_figures_do_not_charge_the_horizon_loss_twice(self):
+        """retina measures S against a free-space link, so a node's own path to
+        its tower, horizon included, is already inside it. This VHF tower sits
+        60 km south on a 100 m mast, 13 km past its 47 km horizon. The default
+        mode charges it 26.5 dB; charged again in the fleet mode it would wipe
+        out every cell. Boresight north, away from the tower, the shipped grid."""
+        params = replace(_PARAMS, n_azimuths=1)
+        tower = (0.0, -60.0, 80.0, 195.0, "VHF", 100.0, params, {"narrowbody": 0.0})
+        fleet = FleetPrediction(
+            system_constant_db=80.0, prediction_sigma_db=3.0, threshold_db=5.0, processing_gain_db=60.0, eirp_dbm=80.0
+        )
+        default = class_detection_areas(*tower)[1]["narrowbody"]
+        assert (default["area_km2"], default["range_50pct_km"]) == (1092.0, 42.0)
+        calibrated = class_detection_areas(*tower, fleet)[1]["narrowbody"]
+        assert (calibrated["area_km2"], calibrated["range_50pct_km"]) == (232.0, 22.0)

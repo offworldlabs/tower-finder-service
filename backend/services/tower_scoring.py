@@ -28,6 +28,16 @@ The receiver is a Yagi, so the answer depends on where it points: the model
 sweeps ``n_azimuths`` boresights and reports the best one. That azimuth is the
 second output, and it is actionable — it is where the operator aims.
 
+Per aircraft class (``class_detection_areas``), at that same boresight: a
+class's RCS offset in dB moves the one threshold, so each class gets its own
+area and 50 % range (walking ``grid_km`` rings over the cells in the beam, the
+outer edge of the last ring at least half detected before the first ring under
+half). The default mode keeps every constant above, so an offset of 0 is the
+ranking's own area. The fleet mode swaps the link budget for the fleet
+calibration's predicted system constant, which already holds the receiver's
+gain, noise and direct-path residue, with a low/high band at one prediction
+sigma either side. Neither mode changes the three ranking outputs.
+
 Pure module: no config I/O of its own. The caller resolves every knob into a
 ``ScoringParams`` and passes it in; ``services/tower_ranking.py`` builds one
 from tower_config.json.
@@ -39,12 +49,18 @@ defaults) and vectorised with numpy, because the reference takes ~13 s for the
 
 from __future__ import annotations
 
+import logging
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import NamedTuple
 
 import numpy as np
+
+from services.fleet_calibration import CLASS_NAMES, DEFAULT_CLASS_OFFSETS_DB, evaluate
+
+logger = logging.getLogger(__name__)
 
 C_M_S = 299_792_458.0
 
@@ -123,6 +139,17 @@ class TowerScore(NamedTuple):
     horizon_km: float
 
 
+@dataclass(frozen=True)
+class FleetPrediction:
+    """The fleet calibration's figures for one tower."""
+
+    system_constant_db: float  # S_pred, from the calibration evaluator
+    prediction_sigma_db: float  # its prediction sigma
+    threshold_db: float  # the document's T
+    processing_gain_db: float  # the document's G_proc
+    eirp_dbm: float  # the tower EIRP the system constant is referenced to
+
+
 def radio_horizon_km(h_tx_m: float, h_rx_m: float = DEFAULT_RX_HEIGHT_M) -> float:
     """Line-of-sight range in km over a 4/3-earth, for two antenna heights.
 
@@ -156,18 +183,25 @@ class CellGrid:
     """The receiver's surveillance disk, and the Yagi pattern over it.
 
     Everything here is tower-independent — cell offsets are relative to the
-    receiver and the pattern only needs a cell's bearing — so it is built once
-    per distinct set of geometry knobs and reused for every tower and every
-    request. That is the whole reason 200 towers score in well under a second:
-    the per-tower work is one (n_azimuths x n_cells) comparison.
+    receiver, and the pattern and the beam only need a cell's bearing — so it
+    is built once per distinct set of geometry knobs and reused for every tower
+    and every request. That is the whole reason 200 towers score in well under
+    a second: the per-tower work is one (n_azimuths x n_cells) comparison.
     """
 
     x_km: np.ndarray  # east offset of each cell from the receiver
     y_km: np.ndarray  # north offset
     r_r_m: np.ndarray  # receiver-to-cell slant range, target altitude included
+    bearing_deg: np.ndarray  # bearing of each cell from the receiver, in [0, 360)
     azimuths_deg: np.ndarray  # the boresights swept
     pattern_db: np.ndarray  # (n_azimuths, n_cells) Yagi response, relative to boresight gain
+    in_beam: np.ndarray  # (n_azimuths, n_cells) within half the beamwidth of the boresight
     cell_area_km2: float
+    # Rings of grid_km around the receiver, for the 50 % range. Only rings that
+    # hold a cell are listed, innermost first; ``ring`` indexes into the other two.
+    ring: np.ndarray  # per cell: its ring
+    beam_ring_cells: np.ndarray  # (n_azimuths, n_rings) how many of a ring's cells each beam holds
+    ring_outer_km: np.ndarray  # per ring: its outer edge, capped at max_range_km
 
 
 def _yagi_pattern_db(off_boresight_deg, hpbw_deg: float, front_to_back_db: float):
@@ -199,14 +233,30 @@ def _build_cell_grid(
     bearing_deg = np.degrees(np.arctan2(x, y)) % 360.0
     azimuths = np.arange(n_azimuths, dtype=float) * 360.0 / n_azimuths
     pattern = _yagi_pattern_db(bearing_deg[None, :] - azimuths[:, None], yagi_hpbw_deg, yagi_front_to_back_db)
+    # The view a node measures its own range in: at most half the beamwidth
+    # off boresight, edge included, the angle wrapped to [-180, 180).
+    in_beam = np.abs((bearing_deg[None, :] - azimuths[:, None] + 180.0) % 360.0 - 180.0) <= yagi_hpbw_deg / 2
+
+    # Ring j holds the cells with (j-1)*grid_km < ground <= j*grid_km. The
+    # epsilon keeps a cell that sits on an edge in the inner ring when the
+    # division rounds a hair above the integer.
+    ring_j = np.ceil(ground_km / grid_km - 1e-9).astype(np.int64)
+    ring_ids, ring = np.unique(ring_j, return_inverse=True)
+    n_rings = ring_ids.size
+    beam_slot = np.arange(n_azimuths)[:, None] * n_rings + ring[None, :]
 
     return CellGrid(
         x_km=x,
         y_km=y,
         r_r_m=r_r_m,
+        bearing_deg=bearing_deg,
         azimuths_deg=azimuths,
         pattern_db=pattern,
+        in_beam=in_beam,
         cell_area_km2=grid_km**2,
+        ring=ring,
+        beam_ring_cells=np.bincount(beam_slot[in_beam], minlength=n_azimuths * n_rings).reshape(n_azimuths, n_rings),
+        ring_outer_km=np.minimum(ring_ids * grid_km, max_range_km),
     )
 
 
@@ -220,6 +270,100 @@ def cell_grid_for(params: ScoringParams) -> CellGrid:
         float(params.yagi_hpbw_deg),
         float(params.yagi_front_to_back_db),
     )
+
+
+class _TowerModel(NamedTuple):
+    """One tower run through the model: its score, and what the class figures reuse."""
+
+    score: TowerScore
+    best: int  # the pattern_db row the score was taken at
+    base_db: np.ndarray | None  # per cell, pattern excluded; None on an empty grid
+    countable: np.ndarray | None  # per cell: whether a detection there counts at all
+    threshold_db: float  # the detection threshold at the best row
+    eirp_eff: float
+    lam_m: float
+    hloss_db: float
+
+
+def _evaluate_tower(
+    tower_x_km: float,
+    tower_y_km: float,
+    eirp_dbm: float,
+    freq_mhz: float,
+    band: str,
+    antenna_height_m: float,
+    params: ScoringParams,
+    grid: CellGrid,
+    direct_power_dbm_override: float | None,
+) -> _TowerModel:
+    """The model for one tower, shared by the ranking area and the class figures."""
+    bp = params.band_params[band]
+    bw_hz = float(bp["bw_hz"])
+    cpi_s = float(bp["cpi_s"])
+    eirp_eff = float(eirp_dbm) + float(params.band_offset_db.get(band, 0.0))
+
+    lam_m = C_M_S / (freq_mhz * 1e6)
+    noise_dbm = -174.0 + 10 * math.log10(bw_hz) + params.noise_figure_db
+    gproc_db = 10 * math.log10(bw_hz * cpi_s)
+    const_db = 10 * math.log10(lam_m**2 * params.target_rcs_m2 / (4 * math.pi) ** 3)
+
+    d_tower_km = math.hypot(tower_x_km, tower_y_km)
+    tower_bearing_deg = math.degrees(math.atan2(tower_x_km, tower_y_km)) % 360.0
+    hloss_db = horizon_loss_db(d_tower_km, antenna_height_m, params.rx_height_m)
+
+    if direct_power_dbm_override is None:
+        direct_iso_dbm = eirp_eff - fspl_db(max(d_tower_km, _MIN_DIRECT_KM), freq_mhz) - hloss_db
+    else:
+        direct_iso_dbm = float(direct_power_dbm_override)
+
+    if grid.x_km.size == 0:
+        score = TowerScore(0.0, 0.0, round(radio_horizon_km(antenna_height_m, params.rx_height_m), 1))
+        return _TowerModel(score, 0, None, None, math.nan, eirp_eff, lam_m, hloss_db)
+
+    # Both vectors point away from the cell: towards the tower, and towards the
+    # receiver. Taking either the other way round computes 180 - beta, which
+    # inverts the cut — it would then discard the forward-scatter cells and
+    # keep the unresolvable baseline ones.
+    to_tx_x = tower_x_km - grid.x_km
+    to_tx_y = tower_y_km - grid.y_km
+    to_rx_x, to_rx_y = -grid.x_km, -grid.y_km
+    r_t_m = np.maximum(np.sqrt(to_tx_x * to_tx_x + to_tx_y * to_tx_y + params.target_alt_km**2) * 1000.0, _MIN_RANGE_M)
+
+    # Bistatic angle at the target, in the horizontal plane as the reference does.
+    dot = to_rx_x * to_tx_x + to_rx_y * to_tx_y
+    cos_beta = dot / (np.hypot(to_rx_x, to_rx_y) * np.hypot(to_tx_x, to_tx_y) + 1e-9)
+    beta_deg = np.degrees(np.arccos(np.clip(cos_beta, -1.0, 1.0)))
+    resolvable = beta_deg <= params.max_bistatic_angle_deg
+    # The one per-cell mask both the ranking count and the class counts apply.
+    countable = resolvable
+
+    # Everything about a cell that does not depend on where the antenna points.
+    base_db = -20 * np.log10(r_t_m) - 20 * np.log10(grid.r_r_m)
+
+    # Per azimuth: the surviving direct path raises the noise floor.
+    dpi_dbm = (
+        direct_iso_dbm
+        + params.rx_gain_dbi
+        + _yagi_pattern_db(tower_bearing_deg - grid.azimuths_deg, params.yagi_hpbw_deg, params.yagi_front_to_back_db)
+        - params.cancellation_db
+    )
+    n_eff_dbm = 10 * np.log10(10 ** (noise_dbm / 10) + 10 ** (dpi_dbm / 10))
+
+    # Detection test, rearranged so the only (azimuth x cell) array is the one
+    # comparison: pattern + base >= threshold(azimuth).
+    threshold_db = params.snr_min_db + n_eff_dbm + hloss_db - eirp_eff - params.rx_gain_dbi - const_db - gproc_db
+    detected = (grid.pattern_db + base_db[None, :]) >= threshold_db[:, None]
+    counts = np.count_nonzero(detected & countable[None, :], axis=1)
+
+    # argmax takes the first maximum and the azimuths ascend, so a tie picks the
+    # lowest azimuth — the reference's tie-break, and stable across runs.
+    best = int(np.argmax(counts))
+    score = TowerScore(
+        expected_area_km2=float(counts[best] * grid.cell_area_km2),
+        best_azimuth_deg=float(grid.azimuths_deg[best]),
+        horizon_km=round(radio_horizon_km(antenna_height_m, params.rx_height_m), 1),
+    )
+    return _TowerModel(score, best, base_db, countable, float(threshold_db[best]), eirp_eff, lam_m, hloss_db)
 
 
 def expected_detection_area(
@@ -244,70 +388,165 @@ def expected_detection_area(
     """
     if grid is None:
         grid = cell_grid_for(params)
+    return _evaluate_tower(
+        tower_x_km,
+        tower_y_km,
+        eirp_dbm,
+        freq_mhz,
+        band,
+        antenna_height_m,
+        params,
+        grid,
+        direct_power_dbm_override,
+    ).score
 
-    bp = params.band_params[band]
-    bw_hz = float(bp["bw_hz"])
-    cpi_s = float(bp["cpi_s"])
-    eirp_eff = float(eirp_dbm) + float(params.band_offset_db.get(band, 0.0))
 
-    lam_m = C_M_S / (freq_mhz * 1e6)
-    noise_dbm = -174.0 + 10 * math.log10(bw_hz) + params.noise_figure_db
-    gproc_db = 10 * math.log10(bw_hz * cpi_s)
-    const_db = 10 * math.log10(lam_m**2 * params.target_rcs_m2 / (4 * math.pi) ** 3)
+def _areas_and_ranges(
+    cells_db: np.ndarray, countable: np.ndarray, thresholds_db: np.ndarray, grid: CellGrid, row: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Cell count, 50 % range and whether it crossed, per threshold, on one pattern row.
 
-    d_tower_km = math.hypot(tower_x_km, tower_y_km)
-    tower_bearing_deg = math.degrees(math.atan2(tower_x_km, tower_y_km)) % 360.0
-    hloss_db = horizon_loss_db(d_tower_km, antenna_height_m, params.rx_height_m)
+    The count takes every cell, the range only the cells in that row's beam: a
+    node measures its range from the aircraft in its view, and over whole rings
+    the Yagi's back lobe would end the walk early. A ring's share is its
+    counted beam cells over all its beam cells, so a cell that is not countable
+    reads as not detected, and a ring with no beam cell is skipped. The range
+    is the outer edge of the last ring before the first one under half (0.0
+    when there is none), or of the last ring when none falls under half.
+    """
+    n_thr, n_rings = thresholds_db.size, grid.ring_outer_km.size
+    order = np.argsort(thresholds_db, kind="stable")
+    # A cell is counted at threshold t when cells_db >= t: with the thresholds
+    # sorted, exactly the first `cleared` of them, ties included (side="right").
+    cleared = np.searchsorted(thresholds_db[order], cells_db[countable], side="right")
+    # One bin per ring, in the beam or not, and thresholds cleared.
+    slot = (grid.ring[countable] * 2 + grid.in_beam[row][countable]) * (n_thr + 1) + cleared
+    by_slot = np.bincount(slot, minlength=n_rings * 2 * (n_thr + 1)).reshape(n_rings, 2, n_thr + 1)
+    # Sorted threshold p counts the cells that cleared more than p of them.
+    at_least = np.cumsum(by_slot[..., ::-1], axis=2)[..., ::-1][..., 1:]
+    counts = np.empty(n_thr, dtype=np.int64)
+    counts[order] = at_least.sum(axis=(0, 1))
+    beam_hits = np.empty((n_thr, n_rings), dtype=np.int64)
+    beam_hits[order] = at_least[:, 1, :].T
 
-    if direct_power_dbm_override is None:
-        direct_iso_dbm = eirp_eff - fspl_db(max(d_tower_km, _MIN_DIRECT_KM), freq_mhz) - hloss_db
-    else:
-        direct_iso_dbm = float(direct_power_dbm_override)
+    beam_cells = grid.beam_ring_cells[row]
+    held = beam_cells > 0
+    under_half = held & (2 * beam_hits < beam_cells)  # integers, so exactly half is not under
+    crossed = under_half.any(axis=1)
+    first = np.argmax(under_half, axis=1)
+    # Per ring, the outer edge of the last ring up to it that holds a beam
+    # cell; the edges grow outward, so that is a running maximum.
+    edge_km = np.maximum.accumulate(np.where(held, grid.ring_outer_km, 0.0))
+    inner_edge_km = np.where(first > 0, edge_km[first - 1], 0.0)
+    range_km = np.where(crossed, inner_edge_km, edge_km[-1])
+    return counts, range_km, crossed
+
+
+def class_detection_areas(
+    tower_x_km: float,
+    tower_y_km: float,
+    eirp_dbm: float,
+    freq_mhz: float,
+    band: str,
+    antenna_height_m: float,
+    params: ScoringParams,
+    class_offsets_db: Mapping[str, float],
+    fleet: FleetPrediction | None = None,
+    grid: CellGrid | None = None,
+    direct_power_dbm_override: float | None = None,
+) -> tuple[TowerScore, dict[str, dict]]:
+    """The tower's score, and each aircraft class's area and 50 % range at its boresight.
+
+    The score is exactly what ``expected_detection_area`` returns for the same
+    arguments; the classes are evaluated on that score's best azimuth only.
+    ``class_offsets_db`` maps a class to its RCS offset in dB (narrowbody 0).
+
+    Without ``fleet``, a class is the model's own threshold lowered by its
+    offset, i.e. ``target_rcs_m2`` scaled by ``10**(offset/10)``; the low/high
+    figures are None. With ``fleet``, the threshold is the calibration's
+    ``T - S - offset - EIRP - 20 log10(lambda) - G_proc + 30 log10(4 pi)``,
+    with S the predicted system constant (low and high at S minus and plus the
+    prediction sigma) and EIRP ``fleet.eirp_dbm``, the one S is defined against.
+    The ranking's ``eirp_dbm`` and band offset stay out of it: the first can be a
+    placeholder power, and the calibration fits the band itself. S already
+    holds the receiver gain, noise and direct-path residue, so none of those
+    enter it either. Nor does the horizon loss: retina measures S against a
+    free-space link, so each node's own path to its tower, horizon included,
+    is inside its S, and charging it here would count it twice. The ranking
+    and the default mode still pay it.
+
+    The areas count every cell. ``range_50pct_km`` walks the rings over the
+    cells inside the beam only, within ``yagi_hpbw_deg / 2`` of the boresight,
+    because retina measures a node's range from the aircraft in its view.
+    ``range_50pct_bound`` is "crossed" when a ring under half detected ended
+    the range, and "grid_edge" when the grid ran out first, so the range is a
+    lower bound.
+    """
+    if grid is None:
+        grid = cell_grid_for(params)
+    model = _evaluate_tower(
+        tower_x_km,
+        tower_y_km,
+        eirp_dbm,
+        freq_mhz,
+        band,
+        antenna_height_m,
+        params,
+        grid,
+        direct_power_dbm_override,
+    )
+    names = list(class_offsets_db)
+    n = len(names)
 
     if grid.x_km.size == 0:
-        return TowerScore(0.0, 0.0, round(radio_horizon_km(antenna_height_m, params.rx_height_m), 1))
+        empty = None if fleet is None else 0.0
+        return model.score, {
+            name: {
+                "area_km2": 0.0,
+                "range_50pct_km": 0.0,
+                "range_50pct_bound": "grid_edge",
+                "area_km2_low": empty,
+                "area_km2_high": empty,
+                "range_50pct_km_low": empty,
+                "range_50pct_km_high": empty,
+            }
+            for name in names
+        }
 
-    # Both vectors point away from the cell: towards the tower, and towards the
-    # receiver. Taking either the other way round computes 180 - beta, which
-    # inverts the cut — it would then discard the forward-scatter cells and
-    # keep the unresolvable baseline ones.
-    to_tx_x = tower_x_km - grid.x_km
-    to_tx_y = tower_y_km - grid.y_km
-    to_rx_x, to_rx_y = -grid.x_km, -grid.y_km
-    r_t_m = np.maximum(np.sqrt(to_tx_x * to_tx_x + to_tx_y * to_tx_y + params.target_alt_km**2) * 1000.0, _MIN_RANGE_M)
+    offsets_db = np.array([float(class_offsets_db[name]) for name in names], dtype=float)
+    if fleet is None:
+        thresholds_db = model.threshold_db - offsets_db
+    else:
+        s_pred, sigma = fleet.system_constant_db, fleet.prediction_sigma_db
+        s_db = np.array([s_pred, s_pred - sigma, s_pred + sigma])  # mid, low, high
+        thresholds_db = (
+            fleet.threshold_db
+            - s_db[:, None]
+            - offsets_db[None, :]
+            - fleet.eirp_dbm
+            - 20 * math.log10(model.lam_m)
+            - fleet.processing_gain_db
+            + 30 * math.log10(4 * math.pi)
+        ).ravel()
 
-    # Bistatic angle at the target, in the horizontal plane as the reference does.
-    dot = to_rx_x * to_tx_x + to_rx_y * to_tx_y
-    cos_beta = dot / (np.hypot(to_rx_x, to_rx_y) * np.hypot(to_tx_x, to_tx_y) + 1e-9)
-    beta_deg = np.degrees(np.arccos(np.clip(cos_beta, -1.0, 1.0)))
-    resolvable = beta_deg <= params.max_bistatic_angle_deg
+    cells_db = grid.pattern_db[model.best] + model.base_db
+    counts, range_km, crossed = _areas_and_ranges(cells_db, model.countable, thresholds_db, grid, model.best)
 
-    # Everything about a cell that does not depend on where the antenna points.
-    base_db = -20 * np.log10(r_t_m) - 20 * np.log10(grid.r_r_m)
-
-    # Per azimuth: the surviving direct path raises the noise floor.
-    dpi_dbm = (
-        direct_iso_dbm
-        + params.rx_gain_dbi
-        + _yagi_pattern_db(tower_bearing_deg - grid.azimuths_deg, params.yagi_hpbw_deg, params.yagi_front_to_back_db)
-        - params.cancellation_db
-    )
-    n_eff_dbm = 10 * np.log10(10 ** (noise_dbm / 10) + 10 ** (dpi_dbm / 10))
-
-    # Detection test, rearranged so the only (azimuth x cell) array is the one
-    # comparison: pattern + base >= threshold(azimuth).
-    threshold_db = params.snr_min_db + n_eff_dbm + hloss_db - eirp_eff - params.rx_gain_dbi - const_db - gproc_db
-    detected = (grid.pattern_db + base_db[None, :]) >= threshold_db[:, None]
-    counts = np.count_nonzero(detected & resolvable[None, :], axis=1)
-
-    # argmax takes the first maximum and the azimuths ascend, so a tie picks the
-    # lowest azimuth — the reference's tie-break, and stable across runs.
-    best = int(np.argmax(counts))
-    return TowerScore(
-        expected_area_km2=float(counts[best] * grid.cell_area_km2),
-        best_azimuth_deg=float(grid.azimuths_deg[best]),
-        horizon_km=round(radio_horizon_km(antenna_height_m, params.rx_height_m), 1),
-    )
+    classes: dict[str, dict] = {}
+    for i, name in enumerate(names):
+        low = high = None
+        if fleet is not None:
+            low, high = n + i, 2 * n + i
+        classes[name] = {
+            "area_km2": float(counts[i] * grid.cell_area_km2),
+            "range_50pct_km": float(range_km[i]),
+            "range_50pct_bound": "crossed" if crossed[i] else "grid_edge",
+            "area_km2_low": None if low is None else float(counts[low] * grid.cell_area_km2),
+            "area_km2_high": None if high is None else float(counts[high] * grid.cell_area_km2),
+            "range_50pct_km_low": None if low is None else float(range_km[low]),
+            "range_50pct_km_high": None if high is None else float(range_km[high]),
+        }
+    return model.score, classes
 
 
 def _antenna_height_m(value) -> float:
@@ -324,13 +563,32 @@ def _antenna_height_m(value) -> float:
     return float(value)
 
 
-def score_towers(towers: list[dict], rx_lat: float, rx_lon: float, params: ScoringParams) -> None:
-    """Stamp ``expected_area_km2``, ``best_azimuth_deg`` and ``horizon_km`` in place.
+def score_towers(
+    towers: list[dict],
+    rx_lat: float,
+    rx_lon: float,
+    params: ScoringParams,
+    calibration: Mapping | None = None,
+    rx_descriptors: Mapping[str, object] | None = None,
+) -> None:
+    """Stamp ``expected_area_km2``, ``best_azimuth_deg``, ``horizon_km`` and ``expected_detection_area`` in place.
 
-    Every tower gets all three keys, always: the fields are part of the
+    Every tower gets all four keys, always: the fields are part of the
     response contract, and a tower the model cannot score (unknown band,
-    no EIRP) carries 0.0 rather than a missing key the sort would then have to
-    guess at. They are written before anything can raise for the same reason.
+    no EIRP) carries 0.0 and a null ``expected_detection_area`` rather than a
+    missing key the sort would then have to guess at. They are written before
+    anything can raise for the same reason.
+
+    ``expected_detection_area`` is the per-class record: each aircraft class's
+    area and 50 % range at the boresight the ranking chose. Without a
+    ``calibration`` it uses the model's own constants (``"default"``); with the
+    fleet calibration document it predicts the system constant from the tower's
+    ``_fleet_descriptors`` and ``rx_descriptors`` (``"fleet"``), referenced to
+    their licensed ``tower_eirp_dbm``, or to the tower's ``eirp_dbm`` without
+    the band offset where the licence states none. Either way the
+    calibration never touches the three ranking fields. If the per-class
+    evaluation fails for a tower, that tower falls back to the plain score and a
+    null record.
 
     A per-tower ``direct_power_dbm_override`` is honoured if present — phase 2
     will set it from a measured direct path.
@@ -339,12 +597,18 @@ def score_towers(towers: list[dict], rx_lat: float, rx_lon: float, params: Scori
         tower["expected_area_km2"] = 0.0
         tower["best_azimuth_deg"] = 0.0
         tower["horizon_km"] = 0.0
+        tower["expected_detection_area"] = None
 
     if not towers:
         return
 
     grid = cell_grid_for(params)
     cos_lat = max(math.cos(math.radians(rx_lat)), _MIN_COS_LAT)
+    if calibration is not None:
+        offsets = {name: float(calibration["class_offsets_db"][name]) for name in CLASS_NAMES}
+    else:
+        offsets = dict(DEFAULT_CLASS_OFFSETS_DB)
+    warned = False
 
     for tower in towers:
         height_m = _antenna_height_m(tower.get("antenna_height_m"))
@@ -369,20 +633,59 @@ def score_towers(towers: list[dict], rx_lat: float, rx_lon: float, params: Scori
         x_km = dlon * KM_PER_DEG * cos_lat
         y_km = (float(tower["latitude"]) - rx_lat) * KM_PER_DEG
 
-        score = expected_detection_area(
-            x_km,
-            y_km,
-            float(eirp),
-            float(freq_mhz),
-            band,
-            height_m,
-            params,
-            grid=grid,
-            direct_power_dbm_override=tower.get("direct_power_dbm_override"),
-        )
+        args = (x_km, y_km, float(eirp), float(freq_mhz), band, height_m, params)
+        direct_power_dbm_override = tower.get("direct_power_dbm_override")
+        try:
+            fleet = None
+            if calibration is not None:
+                descriptors = {**(rx_descriptors or {}), **(tower.get("_fleet_descriptors") or {})}
+                mean_db, sigma_db = evaluate(calibration, descriptors)
+                # The measured S was computed with the licensed EIRP, which the
+                # ranking's EIRP need not be (it can be a 50/60 dBm stand-in).
+                licensed_dbm = descriptors.get("tower_eirp_dbm")
+                if (
+                    isinstance(licensed_dbm, bool)
+                    or not isinstance(licensed_dbm, (int, float))
+                    or not math.isfinite(licensed_dbm)
+                ):
+                    licensed_dbm = eirp
+                fleet = FleetPrediction(
+                    mean_db,
+                    sigma_db,
+                    float(calibration["threshold_db"]),
+                    float(calibration["processing_gain_db"]),
+                    float(licensed_dbm),
+                )
+            score, classes = class_detection_areas(
+                *args,
+                offsets,
+                fleet=fleet,
+                grid=grid,
+                direct_power_dbm_override=direct_power_dbm_override,
+            )
+            record = {
+                "calibration": "fleet" if calibration is not None else "default",
+                "system_constant_db": fleet.system_constant_db if fleet else None,
+                "tau_db": float(calibration["tau_db"]) if calibration is not None else None,
+                "altitude_km": float(params.target_alt_km),
+                "azimuth_deg": score.best_azimuth_deg,
+                "terrain": "smooth_earth",
+                "classes": classes,
+            }
+        except Exception as exc:
+            if not warned:
+                logger.warning("Per-class detection area failed, scoring without it: %s", exc)
+                warned = True
+            score = expected_detection_area(
+                *args,
+                grid=grid,
+                direct_power_dbm_override=direct_power_dbm_override,
+            )
+            record = None
         tower["expected_area_km2"] = score.expected_area_km2
         tower["best_azimuth_deg"] = score.best_azimuth_deg
         tower["horizon_km"] = score.horizon_km
+        tower["expected_detection_area"] = record
 
 
 __all__ = [
@@ -391,9 +694,11 @@ __all__ = [
     "DEFAULT_BAND_PARAMS",
     "DEFAULT_RX_HEIGHT_M",
     "CellGrid",
+    "FleetPrediction",
     "ScoringParams",
     "TowerScore",
     "cell_grid_for",
+    "class_detection_areas",
     "expected_detection_area",
     "horizon_loss_db",
     "radio_horizon_km",
