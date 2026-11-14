@@ -41,6 +41,7 @@ Optional env vars:
 | --- | --- | --- |
 | GET | `/api/towers?lat&lon&altitude&radius_km&limit&source&frequencies` | Ranked towers near (lat, lon). The direct path uses a terrestrial path-loss model and an under-beam derating for towers close to a tall mast (see "Path-loss model"); each row carries the breakdown as `path_loss_db`, `excess_path_loss_db` and `underbeam_loss_db`. Ranked by expected detection area (`expected_area_km2`, see "Ranking"), then reordered so the top of the list is not ten channels of one mast; every tower also carries `best_azimuth_deg` (where to aim the Yagi), `horizon_km`, and the site annotations `site_id`, `site_channels` and `diversity_penalty`. `query.ranking` names the ordering that ran (`expected_area_mmr`, `expected_area` or `sort_order`). `frequencies` boosts towers near a frequency the caller names, in MHz; it never drops one, and the boosted towers keep the top of the list whatever the diversity pass does inside each group. Accepts both spellings a client might send: comma-separated (`frequencies=95.5,101.1`) and repeated (`frequencies=95.5&frequencies=101.1`), including a mix of the two. Up to ten values are used and echoed back as `query.user_frequencies_mhz`. Stations licensed on one transmitter (FCC channel-sharing pairs, LPFM time-shares) are merged into a single row; the partners' callsigns are listed in `shared_callsigns`. |
 | POST | `/api/towers` | Same tower search, enriched with spectrum-analyser measurements. Body: `MeasurementPayload` (see `backend/models/measurements.py`). Only towers the SDR can see are returned; unmatched towers are excluded. Matched towers carry real measured fields (`snr_db`, `score`, `obw_fraction`, `power_db`, `measured=true`). The sweep also calibrates the model: `query.calibration_offset_db` and `query.calibrated_towers` say whether it could be done and over how many towers, each matched tower says whether its direct path is `measured` or modelled (`direct_power_source`) and what the analyser's `score` discounted it by (`measurement_quality`). See "Ranking". At most 2000 measurements per request, 422 beyond that: ranking pairs every tower with every measurement, synchronously on the one event loop. |
+| GET | `/api/towers/lookup?callsign&frequency_mhz&lat&lon&source` | The licence record behind one callsign. `lat` and `lon` are the tower's position, never a receiver's. Searches 30 km around it, with the same upstreams and caches as `GET /api/towers`; nothing is ranked and no elevation is fetched. `status` is `matched`, `frequency_mismatch` or `not_found`. `eirp_dbm` is what the licence states, or null. `polarisation` is set only where the source states it. 422 for a point outside coverage, 400 for an invalid `source`. See "Callsign lookup". |
 | GET | `/api/elevation?lat&lon` | Ground elevation at a point. The search form pre-fills altitude from this; `GET /api/towers` resolves altitude itself when none is given. 503 when the upstream cannot be reached, 404 for a point it has no data for: two different facts, so a caller can tell an outage from a gap. `GET /api/towers` treats both as best-effort and still returns towers, with a null elevation. A coordinate's elevation does not change, so answers are cached for the life of the process; open-meteo caps a request at 100 coordinates, so a larger search is chunked and a chunk that fails costs only its own coordinates. A 429 puts the upstream in a cooldown that lengthens with each further failure, rather than being retried into. |
 | POST | `/api/geocode` | Address, place or ZIP → a point, for the search box. Body `{"query": "..."}`, 1–200 characters once stripped. Tries the US Census geocoder first (authoritative for street addresses, unkeyed, no usage policy) and falls back to Nominatim, which is the only one of the two that answers a city or a bare ZIP. `precision` (`street`/`postcode`/`locality`) says how far to trust the point; the form warns on anything below street level, since a city-centre fix can sit 10 km from the real site. 404 when both answered and neither knew it, 503 when one could not be reached and no other matched — a search box has to tell "check the spelling" from "try again". Unauthenticated, so it is capped at four concurrent lookups, caches for 24 h, and holds Nominatim to its one request per second. The query text is never logged. |
 | POST | `/api/feedback/tower-outcome` | Fleet feedback ingest: what a node's Auto-Calibrate actually got out of a tower we ranked. Body: one `TowerOutcome` or a list of up to 100 (see `backend/models/feedback.py`). Requires the feedback bearer token (see `TOWER_FINDER_FEEDBACK_TOKEN`); unset closes it with a 503. Unknown keys are a 422, so a misspelled field is loud rather than silently dropped. Rows carrying a `run_id` are stored once per node, run and tower, so a retried post is safe. Returns `{"stored": n, "ignored": m}`. See "Fleet feedback". |
@@ -49,6 +50,23 @@ Optional env vars:
 | PUT | `/api/config` | Replace ranking config; sanity-capped at 1 MB. Requires the admin bearer token (see `TOWER_FINDER_ADMIN_TOKEN`). Validated and applied before it is written (400 if either fails), so the file on the persistent volume only ever holds a config the running process has accepted. |
 | POST | `/api/feedback/tower-outcome` | Fleet feedback ingest: what a node (or the archive job) actually got out of a tower we ranked. Body: one `TowerOutcome` or a list of up to 100 (see `backend/models/feedback.py`). Requires the feedback bearer token (see `TOWER_FINDER_FEEDBACK_TOKEN`); unset closes it with a 503. Unknown keys are a 422, so a misspelled field is loud rather than silently dropped. Returns `{"stored": n}`. See "Fleet feedback". |
 | GET | `/api/feedback/summary?limit=` | Per-tower rollup of stored outcomes, busiest first: row and node counts, distinct receiver cells, mean multiplier, callsigns seen, last observation. Requires the admin bearer token, not the feedback one: the rollup names sites and node counts. |
+
+## Callsign lookup
+
+`GET /api/towers/lookup` returns the one licence record behind a callsign, as licensed. `lat` and `lon` are the tower's own position, not a receiver's. The search covers 30 km around it, from the same upstreams and caches as `GET /api/towers`, with no ranking and no elevation. `callsign` is 1-32 characters and `source` defaults to `auto`.
+
+Both sides of the match are uppercased, cut to the first word and stripped of one service suffix (`-TV`, `-DT`, `-D`, `-LD`, `-LP`, `-CD`, `-CA`, `-FM`, `-HD`), so `WIS-TV` finds `WIS`. Only licensed systems are searched. Stations on a shared transmitter are each found by their own callsign. The nearest frequency wins, then the nearest distance. `status` is `matched` within 3.5 MHz of `frequency_mhz`. Beyond that it is `frequency_mismatch`, with the nearest-frequency record. With no record at all it is `not_found` and `tower` is null.
+
+A tower has `callsign`, `name`, `frequency_mhz`, `band`, `latitude`, `longitude`, `eirp_dbm`, `antenna_height_m`, `polarisation`, `licence_type` and `distance_km`. `eirp_dbm` is what the licence states, or null. It is never the placeholder power ranking falls back on, nor an assumed antenna gain. FCC FM has no polarisation column, so it comes from which ERPs the licence states: both is `circular`, horizontal only is `horizontal`, vertical only is `vertical`. A vertical-only licence reports its vertical ERP and height. FCC TV reads the listing's polarisation field, which the recorded listings leave blank, so TV towers return null until the FCC fills it in. Maprad gives none, so it is null.
+
+```bash
+curl 'https://tower-finder.retina.fm/api/towers/lookup?callsign=WIS-TV&frequency_mhz=195&lat=34.12&lon=-80.75'
+# {"status":"matched","tower":{"callsign":"WIS","name":"Columbia, SC","frequency_mhz":195.0,
+#  "band":"VHF","latitude":34.125,"longitude":-80.756111,"eirp_dbm":79.7,"antenna_height_m":481.0,
+#  "polarisation":null,"licence_type":"Broadcasting","distance_km":0.8},
+#  "query":{"callsign":"WIS-TV","frequency_mhz":195.0,"latitude":34.12,"longitude":-80.75,
+#  "radius_km":30,"source":"us"}}
+```
 
 ## Ranking
 
@@ -361,7 +379,11 @@ Two producers post the same row shape:
 
 - **Archive.** A later retina-server job posts archive-derived aggregates per
   tower per window: `verified_range_p85_km`, `adsb_match_rate`, `snr_median_db`,
-  `hours_observed`, with `outcome: "observed"`.
+  `hours_observed`, with `outcome: "observed"`. Two fleet-fitted figures can
+  ride along: `system_constant_db`, the fitted system constant S_n (-300 to 100
+  dB), and `range_50pct_km`, a map of target class to the range in km where
+  detection falls to 50% (at most 16 classes, names 1-32 characters, values 0 to
+  2000).
 
 Payload (`backend/models/feedback.py`), one object or a list of up to 100:
 
@@ -394,7 +416,10 @@ or an older node) are never deduplicated.
 **Where it lives.** A SQLite file at `<TOWER_FINDER_RUNTIME_DIR>/feedback.db`,
 the same persistent overlay as `tower_config.json` (default
 `./data/runtime/feedback.db`). The table keeps its newest 200,000 rows and drops
-the rest on insert, so nothing has to prune it on a schedule.
+the rest on insert, so nothing has to prune it on a schedule. The two figures
+above are stored, the map as JSON text, and the ranking does not read them yet.
+A `feedback.db` from an older release gains their columns on its next connect,
+and its rows are kept.
 
 **How it enters the ranking.** On each tower search, one query pulls every row
 from receivers within 30 km of the caller, groups them by tower (about 100 m of

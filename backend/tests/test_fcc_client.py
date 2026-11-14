@@ -11,7 +11,9 @@ import unittest.mock
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 
+from app import app
 from clients import fcc
 
 # Real licensed records, captured from the two CGI endpoints on 2026-09-16.
@@ -59,7 +61,7 @@ def junk_body():
 class _Upstream:
     """Stands in for transition.fcc.gov, counting and pacing the requests."""
 
-    def __init__(self, delay=0.0, fail_states=(), error_states=(), junk_states=()):
+    def __init__(self, delay=0.0, fail_states=(), error_states=(), junk_states=(), fm_line=FM_LINE):
         self.calls = []
         self.requests = []
         self.in_flight = 0
@@ -68,6 +70,7 @@ class _Upstream:
         self._fail_states = set(fail_states)
         self._error_states = set(error_states)
         self._junk_states = set(junk_states)
+        self._fm_line = fm_line
 
     async def get(self, url, **kwargs):
         state = kwargs["params"]["state"]
@@ -83,7 +86,7 @@ class _Upstream:
                 return error_body(500)
             if state in self._junk_states:
                 return junk_body()
-            return body(TV_LINE if url.endswith("tvq") else FM_LINE)
+            return body(TV_LINE if url.endswith("tvq") else self._fm_line)
         finally:
             self.in_flight -= 1
 
@@ -334,3 +337,28 @@ class TestParseIsolation:
         assert len(systems) == 1, "the state that parsed must still be returned"
         assert "unreadable" in caplog.text
         assert "NJ" in caplog.text
+
+
+class TestLicensedFigures:
+    def test_a_vertical_only_licence_reaches_the_lookup_with_its_vertical_figures(self):
+        """WLHV states "-" and 0.0 m in the horizontal ERP and HAAT columns,
+        the ones ranking reads, and 0.91 kW and 116.2 m in the vertical ones."""
+        up = _Upstream()
+        with up.patcher(), TestClient(app) as client:
+            r = client.get("/api/towers/lookup?callsign=WLHV&frequency_mhz=88.1&lat=42.0987&lon=-73.7301&source=us")
+
+        tower = r.json()["tower"]
+        assert (tower["polarisation"], tower["eirp_dbm"], tower["antenna_height_m"]) == ("vertical", 61.7, 116.2)
+
+    def test_a_licence_stating_neither_erp_reaches_the_lookup_with_its_horizontal_height(self):
+        """WLHV's line with "-" in both ERP columns, 100.0 m in the horizontal
+        HAAT and 0.0 m in the vertical one: no power and no polarisation to
+        report, and the height is the one the licence states."""
+        parts = FM_LINE.split("|")
+        parts[14:18] = ["-      kW ", "-      kW ", "100.0   ", "0.0     "]
+        up = _Upstream(fm_line="|".join(parts))
+        with up.patcher(), TestClient(app) as client:
+            r = client.get("/api/towers/lookup?callsign=WLHV&frequency_mhz=88.1&lat=42.0987&lon=-73.7301&source=us")
+
+        tower = r.json()["tower"]
+        assert (tower["polarisation"], tower["eirp_dbm"], tower["antenna_height_m"]) == (None, None, 100.0)

@@ -119,6 +119,48 @@ class TestRoundTrip:
         assert stored["device_error"] == 1
         assert (stored["gain_a"], stored["gain_b"], stored["lna_state"]) == (41, 35, 6)
 
+    def test_a_store_from_an_older_release_gains_the_fleet_figure_columns(self, store):
+        """CREATE TABLE IF NOT EXISTS never alters a deployed table, so the first
+        connect after an upgrade has to add the columns, and keep every row."""
+        # The schema an older release created, statement for statement.
+        conn = sqlite3.connect(store)
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS tower_outcomes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, received_at TEXT NOT NULL, observed_at TEXT NOT NULL,
+                node_id TEXT NOT NULL, rx_lat REAL NOT NULL, rx_lon REAL NOT NULL, tx_lat REAL NOT NULL,
+                tx_lon REAL NOT NULL, fc_hz REAL NOT NULL, callsign TEXT, source TEXT NOT NULL, outcome TEXT NOT NULL,
+                run_id TEXT, max_evidence INTEGER, max_detections INTEGER, duration_s REAL, gain_a INTEGER,
+                gain_b INTEGER, lna_state INTEGER, device_error INTEGER, verified_range_p85_km REAL,
+                adsb_match_rate REAL, snr_median_db REAL, hours_observed REAL, tower_key TEXT NOT NULL,
+                rx_cell TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_tower_outcomes_rx ON tower_outcomes (rx_lat, rx_lon);
+            CREATE INDEX IF NOT EXISTS idx_tower_outcomes_key ON tower_outcomes (tower_key);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_tower_outcomes_run
+                ON tower_outcomes (node_id, run_id, tower_key) WHERE run_id IS NOT NULL;
+        """)
+        names = "received_at, observed_at, node_id, rx_lat, rx_lon, tx_lat, tx_lon, fc_hz, source, outcome, "
+        names += "adsb_match_rate, hours_observed, tower_key, rx_cell"
+        old = ("2026-11-02T04:00:00+00:00", "2026-11-01T00:00:00+00:00", "node-old", RX_LAT, RX_LON, TX_LAT, TX_LON)
+        old += (FC_HZ, "archive", "observed", 0.8, 12.0, "34.230|-118.060|98700000", "34.05|-118.25")
+        conn.execute(f"INSERT INTO tower_outcomes ({names}) VALUES ({', '.join('?' * len(old))})", old)
+        conn.commit()
+        conn.close()
+
+        ranges = {"narrowbody": 61.5, "helicopter": 18.0}
+        new = row(source="archive", outcome="observed", system_constant_db=-152.5, range_50pct_km=ranges)
+        assert tower_feedback.record(new) == 1
+        # A second connect, on the upgraded table, must find nothing to add.
+        assert tower_feedback.summary(10)[0]["rows"] == 2
+
+        conn = sqlite3.connect(store)
+        figures = "system_constant_db, range_50pct_km"
+        stored_old = conn.execute(f"SELECT {names}, {figures} FROM tower_outcomes WHERE id = 1").fetchone()
+        stored_new = conn.execute(f"SELECT {figures} FROM tower_outcomes WHERE id = 2").fetchone()
+        conn.close()
+        assert stored_old == (*old, None, None)
+        assert stored_new == (-152.5, '{"helicopter": 18.0, "narrowbody": 61.5}')
+
     def test_a_run_is_stored_once_per_tower(self, store):
         run = [row(run_id="run-1"), row(run_id="run-1", fc_hz=101_100_000.0)]
         assert tower_feedback.record_many(run) == 2
