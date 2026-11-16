@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { MapContainer, TileLayer, Marker, Popup, Circle, useMap } from "react-leaflet";
+import { MapContainer, TileLayer, Marker, Popup, Circle, useMap } from "../lib/leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import "./TowerMap.css";
@@ -126,8 +126,8 @@ export default function TowerMap({ towers, userLocation, highlighted, theme = "l
               radius={80000}
               // Colour comes from the class, not from a `color` option: that
               // lands in an SVG presentation attribute, where a var() is not
-              // substituted. The class has to be a top-level prop — react-leaflet
-              // replays `pathOptions` through setStyle, which ignores className,
+              // substituted. The class has to be a top-level prop — the map wrapper
+              // applies `pathOptions` through setStyle, which ignores className,
               // so one passed there is silently dropped.
               className="search-radius"
               pathOptions={{

@@ -254,7 +254,7 @@ Three rules keep it working:
   exception that cannot read a property at all — a `pathOptions` colour lands in
   an SVG presentation attribute, where `var()` is not substituted, so a themed
   vector takes a class, passed as a top-level `className` prop because
-  react-leaflet replays `pathOptions` through `setStyle` and that drops it.
+  the map wrapper applies `pathOptions` through `setStyle` and that drops it.
   `themeTokens.test.ts` enforces this, and that the two dark blocks stay
   identical.
 - **`system` stamps no attribute.** It is the default, and the
