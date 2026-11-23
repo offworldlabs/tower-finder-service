@@ -58,7 +58,14 @@ def create_app() -> FastAPI:
     dist = Path(os.getenv("TOWER_FINDER_FRONTEND_DIST", Path(__file__).parent / "frontend" / "dist"))
     application = FastAPI(
         title="tower-finder-service",
-        description="Ranks broadcast towers near a node from FCC + Maprad data.",
+        description=(
+            "Ranks broadcast towers near a node from FCC + Maprad data. Where terrain tiles are installed, the "
+            "detection areas are produced using Copernicus WorldDEM-30 © DLR e.V. 2010-2014 and © Airbus Defence "
+            "and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA; all rights reserved. "
+            "The organisations in charge of the Copernicus programme by law or by delegation do not incur any "
+            "liability for any use of the Copernicus WorldDEM-30. This service is not endorsed by the European "
+            "Union, ESA, DLR, Airbus or any other body in charge of the Copernicus programme."
+        ),
         lifespan=lifespan,
     )
     application.include_router(router)

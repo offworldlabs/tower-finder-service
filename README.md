@@ -155,9 +155,81 @@ number, b'Pb + tr(P C) for a category with level coefficients b, their
 covariance C and P = diag(p) - pp' over the fleet's shares p, plus
 `prior_sd_db`^2 for a category value no fitted node held.
 
-`terrain` is `smooth_earth`, the 4/3-earth horizon above. The ranking and
-`expected_area_km2` never read any of this: they keep the default constants
-whatever calibration is installed.
+`terrain` is `smooth_earth`, the 4/3-earth horizon above, or `dem` (see
+Terrain below). The ranking and `expected_area_km2` never read the
+calibration: they keep the default constants whatever calibration is installed.
+
+### Terrain
+
+With Copernicus GLO-30 elevation tiles on disk the model reads the real ground
+in two places:
+
+- The receiver's terrain horizon (every 0.5 degrees, sampled each 0.1 km out to
+  `max_range_km`, 4/3 earth) hides each cell where the target, `altitude_km`
+  above the receiver's ground, would be below a ridge. Hidden cells count for
+  neither the area nor the 50 % range.
+- Toward the tower, the diffraction loss over the profile by the ITU-R
+  P.526-16 s4.5 delta-Bullington method (4/3 earth, land ground, horizontal
+  polarisation unless the licence is vertical only) replaces the smooth-earth
+  horizon loss, in the direct path and in the threshold. The tower's antenna
+  stands at the licence's RCAMSL where it states one, else at its RCAGL above
+  the tiles' height at the tower, else `antenna_height_m` above it.
+
+GLO-30 is a surface model, and next to an antenna its pixels are roofs and
+trees that it cannot place above or below the antenna. P.526-16 s4.5 takes the
+terrain height under each antenna, and raises a terminal under the cover to
+the cover height with a separate height-gain correction. The model simplifies
+that: the terrain height under the receiver is estimated from the surface
+model, as a robust quadratic surface fitted to the samples within 0.5 km of
+it, with the roofs and trees among them read as outliers. The antenna stands
+`rx_height_m` above that, with no height-gain correction, so a receiver on a
+hilltop stays on it and one in a valley stays in it. Nothing within 0.5 km of
+the receiver, or of either end of a tower's path, counts as an obstacle. The
+horizon and the paths read each tile's first overview, about 60 m between
+samples, finer than their 0.1 km steps.
+
+Both feed `expected_area_km2`, `best_azimuth_deg` and the default class
+figures, so the ranking moves with the terrain. A request uses terrain for every
+tower or for none: only when every tile under the receiver's square (receiver
++- `max_range_km`) and under the path to every scored tower is on disk, and
+then the default records say `"terrain": "dem"`; otherwise every tower is
+scored exactly as without tiles and says `smooth_earth`, and one INFO line
+names the missing tiles (a tile that cannot be read does the same, with a
+WARNING naming the file). The fleet record (`"calibration": "fleet"`) uses no
+horizon or terrain loss and no terrain mask, at the boresight the ranking
+chose, and says `smooth_earth`: retina-server measures the fleet's system
+constants against a free-space link, so each node's own path to its tower,
+terrain included, is already inside its S. GLO-30 has no tiles
+over open sea, so `fetch_dem.py` leaves an empty `<tile>.sea` marker for a cell
+that neither the GLO-30 nor the GLO-90 tile list holds, and the service reads
+it as 0 m; land GLO-30 has not released gets no marker and stays missing.
+Without tiles nothing changes.
+
+Tiles go in `$TOWER_FINDER_DEM_DIR`, default `$TOWER_FINDER_RUNTIME_DIR/dem`
+(`data/runtime/dem`), named as on the bucket. They are about 45 MB each and
+never go into git or the image; the service keeps up to 256 MiB of them
+decoded in memory. Fetch them from the public AWS Open Data
+bucket, no account needed:
+
+```sh
+python3 scripts/fetch_dem.py --point 34.0,-84.0 --margin-km 160
+python3 scripts/fetch_dem.py --bbox 33.0 35.0 -85.0 -83.0 --dem-dir /path/to/dem
+```
+
+The margin should be at least the search radius plus `max_range_km` (80 + 80
+km by default), so every path is covered. Tiles already on disk at the
+bucket's size are skipped, and the service reads a new tile on the next
+request. For a compose deployment, point `--dem-dir` at `dem/` in the host
+folder of the `runtime-data` volume.
+
+Terrain data notices:
+
+Terrain-aware detection areas are produced using Copernicus WorldDEM-30 © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA; all rights reserved.
+
+The organisations in charge of the Copernicus programme by law or by delegation do not incur any liability for any use of the Copernicus WorldDEM-30.
+
+This service is not endorsed by the European Union, ESA, DLR, Airbus or any
+other body in charge of the Copernicus programme.
 
 ### Diversity ordering
 
