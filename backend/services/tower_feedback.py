@@ -23,6 +23,7 @@ area, not erase the tower, while a hundred rows saying it converge on what they
 say. k = 5 means a single confirmed track moves the area about 7%.
 """
 
+import json
 import logging
 import math
 import os
@@ -78,6 +79,16 @@ ARCHIVE_HOURS_CAP = 24.0
 
 EARTH_RADIUS_KM = 6371.0
 
+# Columns added after the table first shipped, as (name, SQLite type): the one
+# list both the CREATE TABLE and the on-connect migration read. They go last in
+# both, so a migrated store and a new one end up with the same layout.
+_ADDED_COLUMNS = (
+    ("system_constant_db", "REAL"),
+    ("range_50pct_km", "TEXT"),
+)
+# Held as JSON object text: SQLite has no map type, and nothing queries inside it.
+_JSON_COLUMNS = frozenset({"range_50pct_km"})
+
 _COLUMNS = (
     "node_id",
     "rx_lat",
@@ -100,9 +111,10 @@ _COLUMNS = (
     "adsb_match_rate",
     "snr_median_db",
     "hours_observed",
+    *(name for name, _ in _ADDED_COLUMNS),
 )
 
-_SCHEMA = """
+_TABLE_SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS tower_outcomes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     received_at TEXT NOT NULL,
@@ -129,8 +141,12 @@ CREATE TABLE IF NOT EXISTS tower_outcomes (
     snr_median_db REAL,
     hours_observed REAL,
     tower_key TEXT NOT NULL,
-    rx_cell TEXT NOT NULL
+    rx_cell TEXT NOT NULL,
+    {", ".join(f"{name} {sql_type}" for name, sql_type in _ADDED_COLUMNS)}
 );
+"""
+
+_INDEX_SCHEMA = """
 CREATE INDEX IF NOT EXISTS idx_tower_outcomes_rx ON tower_outcomes (rx_lat, rx_lon);
 CREATE INDEX IF NOT EXISTS idx_tower_outcomes_key ON tower_outcomes (tower_key);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tower_outcomes_run
@@ -199,8 +215,44 @@ def _connect() -> sqlite3.Connection:
     # IF NOT EXISTS throughout, so this is the first-use creation and a no-op
     # every time after. Cheaper than tracking whether we have seeded this path,
     # which a test's monkeypatch of _DB_PATH would invalidate anyway.
-    conn.executescript(_SCHEMA)
+    conn.executescript(_TABLE_SCHEMA)
+    _add_missing_columns(conn)
+    # After the columns, so an index may name one the table gained on upgrade.
+    conn.executescript(_INDEX_SCHEMA)
     return conn
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    """Add any of _ADDED_COLUMNS a store created before them lacks.
+
+    CREATE TABLE IF NOT EXISTS leaves a deployed table as it was, so this is how
+    a feedback.db from an older release gains a column. Additive only: existing
+    rows keep every value and read NULL in the new column.
+    """
+
+    def missing() -> list[tuple[str, str]]:
+        present = {info["name"] for info in conn.execute("PRAGMA table_info(tower_outcomes)")}
+        return [(name, sql_type) for name, sql_type in _ADDED_COLUMNS if name not in present]
+
+    if not missing():
+        return
+    # Two first connects can race here, from another worker or a container
+    # overlapping this one on the volume, and _LOCK cannot help: record_many
+    # already holds it when it calls _connect. So the check is repeated inside
+    # BEGIN IMMEDIATE: the second connection waits for the first one's write
+    # lock, then re-reads the columns after it commits and finds none missing.
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        for name, sql_type in missing():
+            conn.execute(f"ALTER TABLE tower_outcomes ADD COLUMN {name} {sql_type}")
+
+
+def _column_value(row: dict, name: str):
+    value = row.get(name)
+    if value is not None and name in _JSON_COLUMNS:
+        # Sorted keys, so two equal maps store equal text.
+        return json.dumps(value, sort_keys=True)
+    return value
 
 
 def _isoformat(value) -> str:
@@ -228,7 +280,7 @@ def record_many(rows: Iterable[dict]) -> int:
     now = datetime.now(timezone.utc).isoformat()
     params = []
     for row in rows:
-        values = [row.get(name) for name in _COLUMNS]
+        values = [_column_value(row, name) for name in _COLUMNS]
         params.append(
             (
                 now,

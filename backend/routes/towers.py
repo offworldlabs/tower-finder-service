@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -17,6 +18,7 @@ from services.region_lookup import SUPPORTED_REGIONS, classify_region, unsupport
 from services.tower_ranking import (
     allowed_bands_for_region,
     apply_config,
+    licence_record,
     parse_user_frequencies,
     process_and_rank,
     reload_config,
@@ -35,11 +37,29 @@ async def health():
 
 API_KEY = os.getenv("MAPRAD_API_KEY", "")
 
+# How far from the tower position it is given the callsign lookup searches:
+# room for a configured position a few km off the licensed site, short of a
+# namesake in the next market.
+LOOKUP_RADIUS_KM = 30
+
+# A lookup outside coverage. Its radius is fixed, so unlike the tower search's
+# 422 this one has no larger radius to suggest.
+_LOOKUP_UNSUPPORTED_DETAIL = (
+    f"No tower data within {LOOKUP_RADIUS_KM} km of this position "
+    f"(coverage: {', '.join(s.upper() for s in SUPPORTED_REGIONS)})."
+)
+
+# The callsign lookup follows retina-server's own match against a tower list:
+# a frequency within this of the licensed one is the same tower, and a service
+# suffix (WXXX-TV against WXXX) is not part of the name.
+_LOOKUP_MAX_FREQUENCY_OFFSET_MHZ = 3.5
+_CALLSIGN_SUFFIX_RE = re.compile(r"-(?:TV|DT|D|LD|LP|CD|CA|FM|HD)$")
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def _detect_source(lat: float, lon: float, radius_km: float) -> str:
+def _detect_source(lat: float, lon: float, radius_km: float, unsupported_detail: str | None = None) -> str:
     """The database to search for (lat, lon): the nearest supported region within ``radius_km``.
 
     ``radius_km`` is the request's effective search radius. The question is
@@ -52,16 +72,19 @@ def _detect_source(lat: float, lon: float, radius_km: float) -> str:
         return region
     # We only have tower data + an ATSC demod for the supported regions, and
     # none of them comes within the search radius (open ocean, another
-    # continent), so there is nothing meaningful to serve. The detail names the
-    # radius because widening it is what can change the answer.
-    raise HTTPException(status_code=422, detail=unsupported_region_detail(radius_km))
+    # continent), so there is nothing meaningful to serve. The shared detail
+    # names the radius because widening it is what can change the answer; a
+    # caller whose radius is fixed passes a detail of its own.
+    raise HTTPException(status_code=422, detail=unsupported_detail or unsupported_region_detail(radius_km))
 
 
-def _resolve_source(source: str, lat: float, lon: float, radius_km: float) -> str:
+def _resolve_source(
+    source: str, lat: float, lon: float, radius_km: float, unsupported_detail: str | None = None
+) -> str:
     """Normalise + validate the requested source, resolving "auto" by geo-lookup within ``radius_km``."""
     source = source.lower()
     if source == "auto":
-        source = _detect_source(lat, lon, radius_km)
+        source = _detect_source(lat, lon, radius_km, unsupported_detail)
     if source not in SUPPORTED_REGIONS:
         raise HTTPException(status_code=400, detail=f"Invalid source. Use: {', '.join(SUPPORTED_REGIONS)}, auto")
     return source
@@ -71,7 +94,7 @@ async def _fetch_raw_towers(source: str, lat: float, lon: float, radius_km: int)
     """Fetch raw broadcast systems for a resolved source.
 
     US comes from the FCC database; every other region uses Maprad. Shared by
-    GET and POST /api/towers.
+    GET and POST /api/towers and the callsign lookup.
     """
     try:
         if source == "us":
@@ -131,6 +154,36 @@ async def _enrich_with_elevation(towers: list, query_point: tuple[float, float] 
     return elevations.get(elevation.key(*query_point)) if query_point is not None else None
 
 
+def _bare_callsign(callsign: object) -> str:
+    """Uppercased first token less one service suffix, the same on both sides of the match; "" for none."""
+    tokens = callsign.upper().split() if isinstance(callsign, str) else []
+    return _CALLSIGN_SUFFIX_RE.sub("", tokens[0]) if tokens else ""
+
+
+def _match_licence(raw: list, callsign: str, frequency_mhz: float, lat: float, lon: float) -> tuple[dict | None, str]:
+    """The licence record behind ``callsign`` near (lat, lon), and how far its frequency can be trusted."""
+    wanted = _bare_callsign(callsign)
+    candidates = []
+    # The licence rows as fetched, before ranking merges a shared transmitter
+    # into one row: each partner is found here by its own callsign, which is
+    # what retina-server gets by also reading a ranked row's shared_callsigns.
+    for system in raw if wanted else ():
+        if not (system.get("licence") or {}).get("type"):
+            continue
+        for device in system.get("devices") or []:
+            if _bare_callsign(device.get("callsign")) != wanted:
+                continue
+            record = licence_record(system, device, lat, lon, LOOKUP_RADIUS_KM)
+            if record is not None:
+                candidates.append(record)
+    if not candidates:
+        return None, "not_found"
+
+    best = min(candidates, key=lambda r: (abs(r["frequency_mhz"] - frequency_mhz), r["distance_km"]))
+    offset = abs(best["frequency_mhz"] - frequency_mhz)
+    return best, "matched" if offset <= _LOOKUP_MAX_FREQUENCY_OFFSET_MHZ else "frequency_mismatch"
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 
@@ -186,6 +239,42 @@ async def find_towers(
             "ranking": diagnostics.get("ranking"),
         },
         "count": len(towers),
+    }
+
+
+@router.get("/towers/lookup")
+async def lookup_tower(
+    callsign: str = Query(..., min_length=1, max_length=32),
+    frequency_mhz: float = Query(..., gt=0, lt=10000),
+    lat: float = Query(..., ge=-90, le=90),
+    lon: float = Query(..., ge=-180, le=180),
+    source: str = Query("auto"),
+):
+    """The one licence record behind a callsign at a tower position.
+
+    ``lat``/``lon`` are the tower's own position, never a receiver's: the
+    search is centred on the transmitter, and where a receiver sits stays with
+    the system that holds it. The figures are what the licence states (EIRP
+    and antenna height, null where it states none, never the ranking
+    placeholder; polarisation only where the source gives one), from the same
+    upstreams and caches as GET /api/towers, with no elevation and no ranking.
+    ``status`` is ``matched`` within 3.5 MHz, ``frequency_mismatch`` with the
+    nearest-frequency record otherwise, ``not_found`` with no record.
+    """
+    resolved = _resolve_source(source, lat, lon, LOOKUP_RADIUS_KM, _LOOKUP_UNSUPPORTED_DETAIL)
+    raw = await _fetch_raw_towers(resolved, lat, lon, LOOKUP_RADIUS_KM)
+    tower, status = _match_licence(raw, callsign, frequency_mhz, lat, lon)
+    return {
+        "status": status,
+        "tower": tower,
+        "query": {
+            "callsign": callsign,
+            "frequency_mhz": frequency_mhz,
+            "latitude": lat,
+            "longitude": lon,
+            "radius_km": LOOKUP_RADIUS_KM,
+            "source": resolved,
+        },
     }
 
 
