@@ -6,7 +6,7 @@ import App from "../App";
 import { ThemeProvider } from "../context/ThemeContext";
 import { stubBrowser } from "./browser";
 
-// react-leaflet needs a real layout box; jsdom gives it none and Leaflet throws
+// The map wrapper needs a real layout box; jsdom gives it none and Leaflet throws
 // on init. The map isn't what these tests are about — the e2e suite asserts the
 // real .leaflet-container renders.
 vi.mock("../components/TowerMap", () => ({

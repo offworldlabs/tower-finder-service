@@ -504,7 +504,7 @@ test.describe("Tower Finder — theme", () => {
   });
 
   // The vectors are the one part of the surface that custom properties cannot
-  // reach directly, and the failure is silent: react-leaflet replays
+  // reach directly, and the failure is silent: the map wrapper applies
   // `pathOptions` through setStyle, which drops `className`, so a ring styled
   // that way keeps Leaflet's own blue in both themes and nothing errors.
   test("draws the search radius in the theme's accent", async ({ browser }) => {
