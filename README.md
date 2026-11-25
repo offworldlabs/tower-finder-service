@@ -34,14 +34,17 @@ Optional env vars:
 - `TOWER_FINDER_GEOCODER_CONTACT` — contact string in the `User-Agent` `POST /api/geocode` sends to Nominatim (default the repo URL). Nominatim's usage policy requires an identifying contact and one request per second; unidentified traffic gets blocked, and it is the fallback for city and ZIP lookups.
 - `TOWER_FINDER_ADMIN_TOKEN` — shared secret gating `PUT /api/config`, presented as `Authorization: Bearer <token>`. Unset closes the endpoint (503) rather than opening it, so a deploy that omits it cannot silently expose a public config write.
 - `TOWER_FINDER_FEEDBACK_TOKEN` — shared secret gating `POST /api/feedback/tower-outcome`, same bearer shape and the same fail-closed rule. Separate from the admin token on purpose: every node in the fleet holds this one, so a node that is lost or read must not also hand over the ranking config. See "Fleet feedback" below.
+- `TOWER_FINDER_CELLULAR_ENABLED` — switches the cellular tower search on for `1`, `true` or `yes`, read per request; anything else, or unset, is off. Off, every response is what it was before cellular existed and `GET /api/cellular` is the 404 any unknown `/api` path gets. In a container the value comes from the root `.env` that `deploy/env.<env>.example` is copied to (Compose sets it from there), so a value in `backend/.env` is overridden. See "Cellular transmitters" and "Cell database".
+- `TOWER_FINDER_CELL_DB` — path of the cell SQLite file (default `data/cells/cells.sqlite`, which is `/app/data/cells/cells.sqlite` in the container, on the `cells-data` volume). Opened read-only on every request, so a file copied over it is served from the next one. With cellular on and the file present, startup reads it into an in-memory index in the background (about 190 MB and 4-6 s for 2.7 million rows); health answers meanwhile, and a cellular search that arrives first waits for that read. A file that appears or changes later is read by the next cellular search. A missing, empty, unreadable or wrong-schema file makes cellular report `unavailable`, never a 500.
 
 ## API
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/towers?lat&lon&altitude&radius_km&limit&source&frequencies` | Ranked towers near (lat, lon). The direct path uses a terrestrial path-loss model and an under-beam derating for towers close to a tall mast (see "Path-loss model"); each row carries the breakdown as `path_loss_db`, `excess_path_loss_db` and `underbeam_loss_db`. Ranked by expected detection area (`expected_area_km2`, see "Ranking"), then reordered so the top of the list is not ten channels of one mast; every tower also carries `best_azimuth_deg` (where to aim the Yagi), `horizon_km`, and the site annotations `site_id`, `site_channels` and `diversity_penalty`. `query.ranking` names the ordering that ran (`expected_area_mmr`, `expected_area` or `sort_order`). `frequencies` boosts towers near a frequency the caller names, in MHz; it never drops one, and the boosted towers keep the top of the list whatever the diversity pass does inside each group. Accepts both spellings a client might send: comma-separated (`frequencies=95.5,101.1`) and repeated (`frequencies=95.5&frequencies=101.1`), including a mix of the two. Up to ten values are used and echoed back as `query.user_frequencies_mhz`. Stations licensed on one transmitter (FCC channel-sharing pairs, LPFM time-shares) are merged into a single row; the partners' callsigns are listed in `shared_callsigns`. |
-| POST | `/api/towers` | Same tower search, enriched with spectrum-analyser measurements. Body: `MeasurementPayload` (see `backend/models/measurements.py`). Only towers the SDR can see are returned; unmatched towers are excluded. Matched towers carry real measured fields (`snr_db`, `score`, `obw_fraction`, `power_db`, `measured=true`). The sweep also calibrates the model: `query.calibration_offset_db` and `query.calibrated_towers` say whether it could be done and over how many towers, each matched tower says whether its direct path is `measured` or modelled (`direct_power_source`) and what the analyser's `score` discounted it by (`measurement_quality`). See "Ranking". At most 2000 measurements per request, 422 beyond that: ranking pairs every tower with every measurement, synchronously on the one event loop. |
+| GET | `/api/towers?lat&lon&altitude&radius_km&limit&source&frequencies` | Ranked towers near (lat, lon). The direct path uses a terrestrial path-loss model and an under-beam derating for towers close to a tall mast (see "Path-loss model"); each row carries the breakdown as `path_loss_db`, `excess_path_loss_db` and `underbeam_loss_db`. Ranked by expected detection area (`expected_area_km2`, see "Ranking"), then reordered so the top of the list is not ten channels of one mast; every tower also carries `best_azimuth_deg` (where to aim the Yagi), `horizon_km`, and the site annotations `site_id`, `site_channels` and `diversity_penalty`. `query.ranking` names the ordering that ran (`expected_area_mmr`, `expected_area` or `sort_order`). `frequencies` boosts towers near a frequency the caller names, in MHz; it never drops one, and the boosted towers keep the top of the list whatever the diversity pass does inside each group. Accepts both spellings a client might send: comma-separated (`frequencies=95.5,101.1`) and repeated (`frequencies=95.5&frequencies=101.1`), including a mix of the two. Up to ten values are used and echoed back as `query.user_frequencies_mhz`. Stations licensed on one transmitter (FCC channel-sharing pairs, LPFM time-shares) are merged into a single row; the partners' callsigns are listed in `shared_callsigns`. With cellular on, `kind=broadcast\|cellular\|both` (default `broadcast`) picks what is searched: `broadcast` answers exactly as without the flag, which the fleet's Auto-Calibrate relies on, `cellular` skips the broadcast fetch, and `both` ranks the two together. Anything else is a 400 (`Invalid kind. Use: broadcast, cellular, both`). `cellular` and `both` add `query.kind` and a top-level `cellular` block, see "Cellular rows". With cellular off, `kind` is ignored. |
+| POST | `/api/towers` | Same tower search, enriched with spectrum-analyser measurements. Body: `MeasurementPayload` (see `backend/models/measurements.py`). Only towers the SDR can see are returned; unmatched towers are excluded. Matched towers carry real measured fields (`snr_db`, `score`, `obw_fraction`, `power_db`, `measured=true`). The sweep also calibrates the model: `query.calibration_offset_db` and `query.calibrated_towers` say whether it could be done and over how many towers, each matched tower says whether its direct path is `measured` or modelled (`direct_power_source`) and what the analyser's `score` discounted it by (`measurement_quality`). See "Ranking". At most 2000 measurements per request, 422 beyond that: ranking pairs every tower with every measurement, on the one event loop for a broadcast-only search (cellular and `both` rank in a worker thread). Takes the same `kind` field in the body, with the same values and default; a cellular row matches a measurement anywhere inside its channel, and calibration still uses VHF/UHF towers only. |
 | GET | `/api/towers/lookup?callsign&frequency_mhz&lat&lon&source` | The licence record behind one callsign. `lat` and `lon` are the tower's position, never a receiver's. Searches 30 km around it, with the same upstreams and caches as `GET /api/towers`; nothing is ranked and no elevation is fetched. `status` is `matched`, `frequency_mismatch` or `not_found`. `eirp_dbm` is what the licence states, or null. `polarisation` is set only where the source states it. 422 for a point outside coverage, 400 for an invalid `source`. See "Callsign lookup". |
+| GET | `/api/cellular` | Only with cellular on: `{enabled, status, detail, built_at, countries, sources, attribution}`. `countries` counts the database's rows for `us`, `ca` and `au`; `sources` gives each source's rows, licence and source date; `attribution` holds the credit texts the licences ask for. `status` is `unavailable`, with a `detail` sentence, when the cell database is missing, empty, unreadable or of another schema. With cellular off it is the 404 any unknown `/api` path gets. |
 | GET | `/api/elevation?lat&lon` | Ground elevation at a point. The search form pre-fills altitude from this; `GET /api/towers` resolves altitude itself when none is given. 503 when the upstream cannot be reached, 404 for a point it has no data for: two different facts, so a caller can tell an outage from a gap. `GET /api/towers` treats both as best-effort and still returns towers, with a null elevation. A coordinate's elevation does not change, so answers are cached for the life of the process; open-meteo caps a request at 100 coordinates, so a larger search is chunked and a chunk that fails costs only its own coordinates. A 429 puts the upstream in a cooldown that lengthens with each further failure, rather than being retried into. |
 | POST | `/api/geocode` | Address, place or ZIP → a point, for the search box. Body `{"query": "..."}`, 1–200 characters once stripped. Tries the US Census geocoder first (authoritative for street addresses, unkeyed, no usage policy) and falls back to Nominatim, which is the only one of the two that answers a city or a bare ZIP. `precision` (`street`/`postcode`/`locality`) says how far to trust the point; the form warns on anything below street level, since a city-centre fix can sit 10 km from the real site. 404 when both answered and neither knew it, 503 when one could not be reached and no other matched — a search box has to tell "check the spelling" from "try again". Unauthenticated, so it is capped at four concurrent lookups, caches for 24 h, and holds Nominatim to its one request per second. The query text is never logged. |
 | POST | `/api/feedback/tower-outcome` | Fleet feedback ingest: what a node's Auto-Calibrate actually got out of a tower we ranked. Body: one `TowerOutcome` or a list of up to 100 (see `backend/models/feedback.py`). Requires the feedback bearer token (see `TOWER_FINDER_FEEDBACK_TOKEN`); unset closes it with a 503. Unknown keys are a 422, so a misspelled field is loud rather than silently dropped. Rows carrying a `run_id` are stored once per node, run and tower, so a retried post is safe. Returns `{"stored": n, "ignored": m}`. See "Fleet feedback". |
@@ -50,6 +53,20 @@ Optional env vars:
 | PUT | `/api/config` | Replace ranking config; sanity-capped at 1 MB. Requires the admin bearer token (see `TOWER_FINDER_ADMIN_TOKEN`). Validated and applied before it is written (400 if either fails), so the file on the persistent volume only ever holds a config the running process has accepted. |
 | POST | `/api/feedback/tower-outcome` | Fleet feedback ingest: what a node (or the archive job) actually got out of a tower we ranked. Body: one `TowerOutcome` or a list of up to 100 (see `backend/models/feedback.py`). Requires the feedback bearer token (see `TOWER_FINDER_FEEDBACK_TOKEN`); unset closes it with a 503. Unknown keys are a 422, so a misspelled field is loud rather than silently dropped. Returns `{"stored": n}`. See "Fleet feedback". |
 | GET | `/api/feedback/summary?limit=` | Per-tower rollup of stored outcomes, busiest first: row and node counts, distinct receiver cells, mean multiplier, callsigns seen, last observation. Requires the admin bearer token, not the feedback one: the rollup names sites and node counts. |
+
+### Cellular rows
+
+With `kind=cellular` or `both`, a cellular row carries every field a broadcast row does, plus:
+
+- `kind: "cellular"` (in `both`, broadcast rows say `"broadcast"`);
+- `cell_site_id`, the database's site key (`site_id` keeps its diversity meaning), and `cell_id`;
+- `operator`, `radio`, `azimuth_deg`, `beamwidth_deg` and `bandwidth_mhz`;
+- `data_source`, `licence` and `confidence`;
+- `modelled`, the list of values that were estimated and not read from a record: the builder's own flags, plus any of `bandwidth`, `eirp`, `height`, `tilt` and `beamwidth` the ranking had to fill in.
+
+Its `expected_detection_area` is always the `default` record, counted on the carrier's own grid (see "Cellular transmitters").
+
+Its `callsign` is a label built from the row: the radio (`LTE`, `NR`, `UMTS`, `GSM` or `CDMA`), a space, the site, and `/<cell>` when the row has a cell id, so `LTE <site>/<cell>`. A row with no radio, as every ACMA and FCC row, starts with `CELL` instead: `CELL <site>/<cell>`. The `cellular` block is `{status, detail, built_at, attribution}`: `status` is `ok` or `unavailable`, and `attribution` lists `{source, licence, text}` for the sources behind the returned rows. An unavailable database is still HTTP 200, with `status: "unavailable"` and a `detail`; `kind=cellular` then has no rows, and `kind=both` still returns the broadcast ones.
 
 ## Callsign lookup
 
@@ -330,6 +347,27 @@ operator who does not want it sets `enabled` to false with a PUT. The knobs an
 overlay does name are kept and the rest defaulted, so a partial section is a
 partial override rather than a reset.
 
+### Cellular transmitters
+
+A transmitter in the cell database (one sector on one carrier) is ranked by the same expected detection area, through the same `score_towers` in `backend/services/tower_scoring.py`, on the carrier's own terms. What differs is set in `backend/config/cellular_config.json`, which is read at import and shipped in the image only: it is not part of `tower_config.json`, so `GET`/`PUT /api/config` neither show nor move it. Cellular and `both` searches rank in a worker thread, so the single worker keeps answering other requests.
+
+- **Bands.** Ten downlink groups used for cellular rows only: `CELL600` (617-652 MHz), `CELL700` (716-803), `CELL850` (859-894), `CELL900` (925-960), `CELL1800` (1805-1880), `CELL1900` (1930-1995), `CELL2100` (2110-2200), `CELL2300` (2300-2400), `CELL2600` (2496-2690) and `CELL3500` (3300-4200). Edges from 3GPP TS 36.101 and TS 38.104. A row in none of them is dropped.
+- **Bandwidth.** The row's own. Without one: GSM 0.2 MHz, UMTS 5 MHz, CDMA 1.25 MHz by radio, else 10 MHz (20 MHz in `CELL3500`). 10 MHz is a standard LTE channel that fits every LTE band here (NTIA, 3GPP TS 36.101); 20 MHz is the LTE maximum, the low end for NR.
+- **Processing gain.** `B * T` with a 0.2 s integration time, the one in the published LTE-downlink tracking experiment (Sun et al., arXiv:2412.20788), scaled by the share of the signal that is always on air, since an idle cell sends little else. LTE -10.2 dB (2-port CRS, 16 of 168 resource elements, 3GPP TS 36.211 6.10.1). NR -24 dB, approximate: it has no CRS, so this is the SS/PBCH block alone (TS 38.211 7.4.3). UMTS -10 dB, CDMA -7 dB and GSM 0 dB are chosen values (pilot or beacon share; the GSM carrier is keyed in every slot). A row with no radio is treated as LTE, except one wider than 20 MHz (the LTE maximum), which can only be NR and takes the NR share.
+- **EIRP.** The row's. Without one, NTIA's 61 dBm per carrier up to 5 MHz, plus `10 * log10(bw / 5)` above that.
+- **Height.** The row's, else 30 m (NTIA, TR 36.942). A height below 30 m is used as given, never raised.
+- **Horizontal pattern.** 3GPP TR 36.942, 65 degrees wide when the row has no beamwidth, at most 20 dB down. It is applied to the received power, to the direct path and to the illumination of every grid cell. No azimuth means omni.
+- **Vertical pattern.** `12 * ((depression - tilt) / 10 degrees)^2` on the received power (the row's `underbeam_loss_db`), at most 20 dB, with the row's tilt or 3 degrees (NTIA). Horizontal and vertical together are capped at the same 20 dB. The 10 degree beamwidth is an approximation from the gain-beamwidth estimate for a typical 65 degree panel.
+- **Grid.** 0.5 km cells out to 30 km, not the broadcast grid: a cellular footprint is a few km across, and 30 km is the radio horizon of a 30 m mast seen from the receiver.
+- **Per aircraft class.** `expected_detection_area` is counted on the carrier's own model and grid, at its best boresight, with the default class offsets. Its `calibration` is always `default`, even where a fleet calibration is installed: the fleet's system constants, threshold and class offsets were fitted on broadcast towers. `range_50pct_km` walks 0.5 km rings, so `grid_edge` means at least 30 km.
+- **Terrain.** With tiles on disk, as for a broadcast tower (see "Terrain"): the receiver's horizon hides the carrier's cells behind a ridge, and the P.526 delta-Bullington loss at the carrier's own frequency replaces the smooth-earth horizon loss. Neither reads a band table. The antenna stands `antenna_height_m` above the tiles' height at the site, in horizontal polarisation, since no row states one. A `both` search makes one terrain decision for all its rows, so a tile missing under one carrier's path puts its broadcast rows on smooth earth too. A `cellular` search needs the tiles under the receiver +- 30 km and under each carrier's path. With tiles on disk the cellular search currently ranks every row in the radius.
+- **Candidates.** Every site inside the search radius is a candidate, whatever its country, so a cell across a border counts; rows past `receiver.sensitivity_dbm` are dropped. Each carrier gets an upper bound on its ranked area from its distance, power, band, bandwidth, height and sector, and sites are read and scored in bound order until no unscored carrier can enter the answer, so the list is the one ranking every row would give. `site_id` and `site_channels` count the masts among the scored carriers, not every mast in the radius. With terrain tiles on disk, or a sort order not led by the area, the cellular search ranks every row in the radius, which is exact but much slower (about 2 minutes at Toronto on smooth earth); an unexpected fault answers the cell part as unavailable.
+- **Dedupe.** By `(source, site, cell, frequency)`, with the azimuth added when the cell id is unknown, keeping the stronger. Cellular rows are never merged as shared transmitters: two sectors on one mast are two transmitters.
+- **Measurements.** On POST a cellular row matches an analyser peak within half its channel bandwidth. Calibration stays VHF/UHF.
+- **`modelled`.** Every value the ranking fills in is added to the row's `modelled` list.
+
+The area is whatever the model gives. Nothing is added to make a carrier look like a broadcast tower, so a carrier that illuminates little ground shows a small `expected_area_km2`. One known limit: the vertical pattern is not applied to the target path in the area model, as the under-beam derating is not for broadcast either, so LTE areas lean optimistic.
+
 ## Path-loss model
 
 `received_power_dbm` is what a receiver with `receiver.rx_antenna_gain_dbi` of
@@ -361,6 +399,8 @@ Two terms do that, both in the `propagation` config section:
 Both apply to the direct path only. An overlay written before this section
 existed gets the shipped model, not free space: nothing needs a config PUT.
 
+**Cellular carriers** use the same `propagation` section but not the same clamps. With `model: "hata"` the excess loss is Okumura-Hata up to 1500 MHz and COST 231 Hata above it (Cm = 0 dB), with the same `environment` corrections, and free space as the floor; `free_space` still turns it off. COST 231 is valid for 1500-2000 MHz, transmitter heights of 30-200 m, receiver heights of 1-10 m and 1-20 km. Outside that the model is extrapolated, not refused: above 2000 MHz (`CELL2100` to `CELL3500`) it keeps COST 231's 33.9 dB/decade frequency slope, below 30 m the real height goes in unchanged, and past 20 km it runs on. The frequency is not clamped to 1500 MHz and the height is not raised to 30 m, as they are for broadcast. The receiver height is still held to 1-10 m and the distance to at least 1 km.
+
 ## Layout
 
 | Path | What's there |
@@ -372,6 +412,11 @@ existed gets the shipped model, not free space: nothing needs a config PUT.
 | `backend/services/elevation.py` | Ground elevation from open-meteo, with the cache, the 100-coordinate chunking and the 429 cooldown |
 | `backend/routes/feedback.py` | Feedback ingest + admin summary routes |
 | `backend/models/feedback.py` | `TowerOutcome` payload model |
+| `backend/routes/cellular.py` | `GET /api/cellular` |
+| `backend/services/cell_sites.py` | Cell database reader: the flag, the read-only open, the in-memory index of every row, the per-search candidates, the status and attribution |
+| `backend/config/cellular_config.json` | Cellular ranking parameters (image-shipped, not part of `tower_config.json`) |
+| `scripts/build_cell_db.py` | Builds the cell SQLite from regulator files on disk; see "Cell database" |
+| `scripts/cell_sources/` | The builder's per-source readers |
 | `backend/services/tower_feedback.py` | Fleet feedback store (SQLite) and the `apply_feedback` correction |
 | `backend/services/tower_ranking.py` | Ranking algorithm + config loader/validator |
 | `backend/services/tower_scoring.py` | Bistatic detection-area model: what the rank is computed from |
@@ -384,6 +429,8 @@ existed gets the shipped model, not free space: nothing needs a config PUT.
 | `backend/tests/` | pytest suite (176 tests); integration tests require running `capture_fixture.py` first) |
 | `frontend/` | The standalone React UI (Vite). Built into the image and served by `app.py`; `npm test` / `npm run test:e2e` cover it |
 | `frontend/src/surface.css` | Design tokens and the shared console idioms; the only file holding a palette value |
+| `frontend/src/utils/cellularMode.ts` | The `?cellular=1` flag and the one `/api/cellular` check that grants the view; see "Cellular view" |
+| `frontend/src/components/cellular/` | The cellular view: map, results table, summary, notices and the data-source credits |
 | `pyproject.toml`, `uv.lock` | Dependencies, their lock, and tooling config |
 
 ## UI surface
@@ -449,8 +496,40 @@ For example `https://towers.retina.fm/?lat=49.2648&lon=-123.2502&alt=95&f=99.9,1
 A link with a missing or out-of-range coordinate, or an unreadable `alt`,
 prefills what it can and waits for Find Towers; frequencies the form would
 reject are dropped. The address, the radius and the map view are not part of
-the link: the resolved coordinates are what the search ran on. The parsing and
-writing live in `frontend/src/utils/sharedSearch.ts`.
+the link: the resolved coordinates are what the search ran on. Query keys the
+page does not own, such as `cellular`, are carried over unchanged. The parsing
+and writing live in `frontend/src/utils/sharedSearch.ts`.
+
+### Cellular view
+
+`?cellular=1` (also `true` or `yes`, in any case; with the key repeated the
+first value counts) asks for the cell-site version of the page. The flag only
+asks. The page sends one `GET /api/cellular`, and the view turns on only when
+that answers 200 with a JSON object whose `enabled` is `true`. Any other answer
+(the 404 of a server with cellular off, another status, a body that is not that
+object, a network error) or no answer within 60 seconds shows the notice
+"Cellular view not available here / Showing the standard tower search." above
+the normal page. A search from a shared link, or one submitted before the
+answer is in, waits for it and then runs as the cellular or the normal search.
+
+In the view the search is `kind=cellular` with a limit of 100 (the normal page
+asks for 20), never `both`, and only rows with `kind: "cellular"` are shown. If
+the `cellular.status` of the answer is not `ok`, a "Cell tower data
+unavailable" notice with the server's `detail` replaces the results. The map has
+one diamond marker per site, with a wedge for each known sector azimuth or a
+dashed ring when the site's cells are omni or have none, and one popup per site
+listing its cells with band chip, sector azimuth, frequency and rank. The table
+adds the operator. A "≈" after a value marks it as modelled, a default where the
+source record has none, with one legend line saying so. A "Cell data sources"
+block under the results prints the attribution texts the API returns for each
+source, with links to the source and its licence.
+
+A share link keeps `cellular`. Without the flag the page renders and requests
+exactly what it did before, and never calls `/api/cellular`. The server side is
+on only in test (`deploy/env.test.example`); staging and production leave
+`TOWER_FINDER_CELLULAR_ENABLED` off, so there the flag shows the notice. The
+code is `frontend/src/utils/cellularMode.ts` and
+`frontend/src/components/cellular/`.
 
 ## Dependencies
 
@@ -774,7 +853,8 @@ above. Nothing has to be redeployed here.
 ### One-time setup
 
 Every environment needs steps 1, 2 and 4 below on its own droplet, plus its
-own pair of repository secrets. Step 3 is already in place everywhere.
+own pair of repository secrets. Step 3 is already in place everywhere. Step 5
+is only for an environment that has cellular switched on.
 
 **1. Deploy SSH key (run locally, once per droplet):**
 
@@ -858,6 +938,38 @@ docker compose up -d --build
 
 After this, every push to `main` deploys to staging first, then to
 production once staging deploys and passes its smoke test.
+
+**5. Cell database (only where cellular is on):**
+
+The cell data is never in the image or the repo (`data/cells` is in `.gitignore` and `.dockerignore`). It is built once, offline, and placed in the `cells-data` volume, which `docker-compose.yml` mounts at `/app/data/cells`. The test example turns the flag on; the staging and prod examples keep it `false`.
+
+Build it from the regulator files, already downloaded into one directory:
+
+```bash
+uv run python scripts/build_cell_db.py --raw-dir <dir> --out cells.sqlite --counts COUNTS.txt
+```
+
+`<dir>` holds `ised/Site_Data_Extract_FX.zip`, `acma/spectra_rrl.zip`, `fcc/l_cell.zip` and `fcc/r_tower.zip`, plus `opencellid/*.csv[.gz]` once `opencellid/READY` exists. The script never fetches anything; a source whose file is missing is skipped and named in `COUNTS.txt`. Check the per-country and per-source counts there before using the file.
+
+The builder applies these rules to the rows it writes:
+
+- ISED: a filed bandwidth wider than one carrier is first cut to one carrier (next rule), and the EIRP checks use that carrier width. An antenna gain above 30 dBi is ignored; a power-derived EIRP above 65.16 dBm/MHz of the carrier (3280 W/MHz; for a carrier of 1 MHz or less, such as GSM, 65.16 dBm in total) or below 0 dBm is replaced by the modelled default for the carrier width and flagged.
+- Every row is one carrier: a row wider than one carrier (NR 100 MHz, LTE 20, UMTS 5, CDMA 1.25, GSM 0.2; with no radio, 100 MHz in CELL3500, else 20 MHz) is reduced to that width. A row with a radio keeps its EIRP, flagged `bandwidth`: ISED files the licensed block as the bandwidth but the power of one carrier. A row without one keeps the same power density, flagged `bandwidth,eirp`.
+- OpenCelliD sites snapped to an FCC ASR structure use the structure height as the antenna height, flagged `height`; under 3 m it falls back to 30 m.
+- ACMA: an azimuth of 0 on an antenna with no horizontal beamwidth is the register's placeholder and is stored as unknown (omni), unless the same licence registers that antenna at the same site at another azimuth, which makes it a real north-facing sector.
+
+Copy it into the running container's volume under a temporary name, then rename it over the live file, so no search ever reads a half-copied file:
+
+```bash
+docker cp cells.sqlite <container>:/app/data/cells/cells.sqlite.new
+docker exec <container> mv /app/data/cells/cells.sqlite.new /app/data/cells/cells.sqlite
+```
+
+No restart is needed. The service opens the file on every request and notices a replaced one by its inode, size, mtime and ctime. The file must be readable by the container's `appuser`. To switch cellular on in another environment, set `TOWER_FINDER_CELLULAR_ENABLED=true` in its `deploy/env.<env>.example`; the next deploy copies that into `.env`.
+
+Then `GET /api/cellular` should answer `status: "ok"`, non-zero `countries` and a `built_at`. If it says `unavailable`, its `detail` says why (not installed, unreadable, empty, or another schema).
+
+Every source carries its own licence: ISED `OGL-Canada-2.0`, ACMA `ACMA-RRL`, FCC `US-Gov-PD`, OpenCelliD `CC-BY-SA-4.0`. Anything that shows cellular rows owes the credit those licences ask for. The OpenCelliD attribution links the CC BY-SA 4.0 licence. The API returns the attribution texts, in `/api/cellular` and in the `cellular` block of a search, so the cellular view prints them.
 
 ### Metered upstream
 

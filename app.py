@@ -12,6 +12,7 @@ straight back here.
 import logging
 import mimetypes
 import os
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -19,10 +20,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from routes.cellular import router as cellular_router
 from routes.geocode import router as geocode_router
 from routes.feedback import router as feedback_router
 from routes.towers import router
+from services.cell_sites import cell_db_path, cellular_enabled, warm_index
 from services.region_lookup import warm_borders
+from services.tower_ranking import warm_cell_bounds
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +54,21 @@ async def lifespan(app: FastAPI):
         # loads on demand and surfaces the real error on the request that
         # needs it. Raising here would crash-loop the container instead.
         logger.exception("Warming the border polygons failed; region lookup will load on demand")
+    # The cell index takes seconds to read. Started, never awaited, so health
+    # and readiness answer meanwhile; a cellular search that arrives first
+    # waits for this build rather than starting another. Flag off, or no file,
+    # loads nothing.
+    if cellular_enabled() and Path(cell_db_path()).is_file():
+        threading.Thread(target=_warm_cellular, name="cell-index", daemon=True).start()
     yield
+
+
+def _warm_cellular() -> None:
+    try:
+        if warm_index():
+            warm_cell_bounds()
+    except Exception:
+        logger.exception("Preparing the cell index failed; the first cellular search will build it")
 
 
 def create_app() -> FastAPI:
@@ -73,6 +91,9 @@ def create_app() -> FastAPI:
     # Shares the /api first segment with the router above, so the SPA catch-all
     # keeps 404-ing unknown feedback paths rather than serving index.html.
     application.include_router(feedback_router)
+    # Also under /api. With the flag off a GET of it gets the 404 any unknown
+    # /api path gets, byte for byte, so switching cellular off restores it.
+    application.include_router(cellular_router)
 
     # Mounted AFTER the API router so /api/* keeps winning; the catch-all below
     # would otherwise swallow it. Absent in a bare checkout where nobody has run

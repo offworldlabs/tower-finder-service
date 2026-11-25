@@ -34,7 +34,7 @@ function makeTowerIcon(color: string, isHighlighted: boolean) {
   });
 }
 
-const userIcon = L.divIcon({
+export const userIcon = L.divIcon({
   className: "user-marker",
   html: `<div style="
     width:16px;height:16px;
@@ -54,7 +54,7 @@ const userIcon = L.divIcon({
  * was drawn against, and dimming it far enough to sit under navy leaves a grey
  * wash with no geography left in it.
  */
-const TILE_URLS = {
+export const TILE_URLS = {
   light: "https://{s}.basemaps.cartocdn.com/rastertiles/light_all/{z}/{x}/{y}{r}.png",
   dark: "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
 } as const;
@@ -64,7 +64,7 @@ const TILE_URLS = {
  * to. The panel now stretches to its grid cell, so adding a frequency row to
  * the form beside it changes that size with no window resize to notice.
  */
-function InvalidateOnResize() {
+export function InvalidateOnResize() {
   const map = useMap();
 
   useEffect(() => {

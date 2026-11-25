@@ -8,7 +8,7 @@
  * - Results table, summary strip, error states
  * - Map rendering
  */
-import { test, expect } from "@playwright/test";
+import { test, expect, type BrowserContext, type Page } from "@playwright/test";
 import { hosts } from "../playwright.config";
 
 const BASE = hosts.frontend;
@@ -368,6 +368,92 @@ test.describe("Tower Finder — share links", () => {
     await page.waitForLoadState("networkidle");
     expect(searched).toBe(false);
     await expect(page.locator(".error-banner")).toHaveCount(0);
+  });
+
+  test("a cellular search's link keeps the flag and opens fresh in the cellular view", async ({
+    page,
+    context,
+    browser,
+  }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"], {
+      origin: new URL(BASE).origin,
+    });
+    const sydney = { latitude: -33.8688, longitude: 151.2093 };
+    // Made-up operator and ids; the one served licence text.
+    const status = {
+      enabled: true,
+      status: "ok",
+      detail: null,
+      built_at: null,
+      countries: { au: 1 },
+      sources: {},
+      attribution: [
+        { source: "acma", licence: "ACMA-RRL", text: "Based on Australian Communications and Media Authority information" },
+      ],
+    };
+    const cell = tower({
+      ...sydney,
+      kind: "cellular",
+      callsign: "CELL 900002/7",
+      name: "Example Mobile",
+      band: "CELL900",
+      frequency_mhz: 947.5,
+      site_id: "example-site-2",
+      operator: "Example Mobile",
+      radio: "LTE",
+      azimuth_deg: 235,
+      beamwidth_deg: 65,
+      data_source: "acma",
+      modelled: ["eirp"],
+    });
+    const routeCellular = async (target: Page | BrowserContext, towersUrls: string[]) => {
+      await target.route("**/api/cellular", (route) =>
+        route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(status) }),
+      );
+      await target.route("**/api/towers**", (route) => {
+        towersUrls.push(route.request().url());
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            towers: [cell],
+            query: query({ ...sydney, source: "au", kind: "cellular" }),
+            count: 1,
+            cellular: { status: "ok", detail: null, built_at: null, attribution: [] },
+          }),
+        });
+      });
+    };
+
+    await routeCellular(page, []);
+    await page.goto(`${BASE}/?cellular=1`);
+    await expect(page.getByLabel("Cellular view", { exact: true })).toBeVisible();
+    await page.getByLabel(/latitude/i).fill("-33.8688");
+    await page.getByLabel(/longitude/i).fill("151.2093");
+    await page.locator("button[type='submit']").filter({ hasText: /Find Towers/i }).click();
+    await expect(page).toHaveURL(`${BASE}/?lat=-33.8688&lon=151.2093&cellular=1`);
+
+    await page.locator(".summary-strip").getByRole("button", { name: "Copy link" }).click();
+    await expect(page.locator(".summary-strip").getByRole("button", { name: "Copied" })).toBeVisible();
+    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    expect(new URL(copied).searchParams.get("cellular")).toBe("1");
+
+    // A recipient with nothing of this session: the link's own search is the
+    // cellular one, sent without a click.
+    const fresh = await browser.newContext();
+    const freshTowersUrls: string[] = [];
+    await fresh.route("**/api/elevation**", (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ elevation_m: 43 }) }),
+    );
+    await routeCellular(fresh, freshTowersUrls);
+    const reopened = await fresh.newPage();
+    await reopened.goto(copied);
+    await expect(reopened.getByLabel("Cellular view", { exact: true })).toBeVisible();
+    await expect
+      .poll(() => freshTowersUrls.map((u) => new URL(u).searchParams.get("kind")))
+      .toEqual(["cellular"]);
+    await expect(reopened.getByText("CELL 900002/7").first()).toBeVisible();
+    await fresh.close();
   });
 });
 

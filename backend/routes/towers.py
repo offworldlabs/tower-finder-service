@@ -7,15 +7,19 @@ import re
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse
 
 from clients.fcc import fetch_fcc_broadcast_systems
 from clients.maprad import MapradQueryError, fetch_broadcast_systems
 from core.auth import require_admin
 from models.measurements import MeasurementPayload
-from services import elevation, tower_ranking
+from services import cell_sites, elevation, tower_ranking
+from services.cell_sites import CellCandidates, CellDataChanged, CellLookup
 from services.elevation import ElevationUnavailable
 from services.region_lookup import SUPPORTED_REGIONS, classify_region, unsupported_region_detail
 from services.tower_ranking import (
+    CellRankingFailed,
     allowed_bands_for_region,
     apply_config,
     licence_record,
@@ -88,6 +92,89 @@ def _resolve_source(
     if source not in SUPPORTED_REGIONS:
         raise HTTPException(status_code=400, detail=f"Invalid source. Use: {', '.join(SUPPORTED_REGIONS)}, auto")
     return source
+
+
+def _resolve_kind(kind: object) -> str | None:
+    """The requested tower kind: None for the broadcast-only search, else "cellular" or "both".
+
+    ``kind`` counts only while cellular data is switched on. With it off the
+    value is ignored whatever it holds, so a deployment that has not switched
+    cellular on answers every request as it did before ``kind`` existed. With it
+    on, "broadcast" is that same broadcast-only search, because the fleet's
+    calibration calls this route without a kind and must see no change.
+    """
+    if kind is None or not cell_sites.cellular_enabled():
+        return None
+    value = kind.strip().lower() if isinstance(kind, str) else None
+    if value == "broadcast":
+        return None
+    if value not in ("cellular", "both"):
+        raise HTTPException(status_code=400, detail="Invalid kind. Use: broadcast, cellular, both")
+    return value
+
+
+async def _search_inputs(kind: str | None, source: str, lat: float, lon: float, radius_km: int) -> list:
+    """Raw broadcast systems for a search of ``kind``: none for kind "cellular"."""
+    return [] if kind == "cellular" else await _fetch_raw_towers(source, lat, lon, radius_km)
+
+
+def _rank_with_cells(raw: list, lat: float, lon: float, radius_km: int, **kwargs) -> tuple[list, CellLookup]:
+    """The cell candidates within ``radius_km`` and process_and_rank over them, in one worker thread.
+
+    A database copied over the old one between the two, or one that can no
+    longer be read through, is read again once; a second change mid-search
+    costs the search its cell rows, not a 500. So does any other fault of the
+    cell ranking, which process_and_rank has already logged.
+    """
+    fallback = cell_sites.unreadable_lookup
+    for attempt in (1, 2):
+        cells = cell_sites.cell_candidates(lat, lon, radius_km)
+        try:
+            return process_and_rank(raw, lat, lon, radius_km=radius_km, cellular_rows=cells.rows, **kwargs), cells
+        except CellDataChanged as exc:
+            if attempt == 2:
+                # Failed again on the retry, so most likely a file that cannot
+                # be read through; the answer's "could not be read" names
+                # neither the file nor the error.
+                logging.warning("Cellular data unavailable from %s: %r", cell_sites.cell_db_path(), exc)
+                break
+        except CellRankingFailed:
+            fallback = cell_sites.failed_lookup
+            break
+        finally:
+            if isinstance(cells.rows, CellCandidates):
+                cells.rows.close()
+    cells = fallback()
+    return process_and_rank(raw, lat, lon, radius_km=radius_km, cellular_rows=cells.rows, **kwargs), cells
+
+
+async def _rank(kind: str | None, raw: list, lat: float, lon: float, **kwargs) -> tuple[list, CellLookup | None]:
+    """process_and_rank, with the cell candidates and in a worker thread when the search includes cell rows.
+
+    A cellular ranking keeps the CPU busy for up to a couple of seconds in a
+    dense area (and the first search after the database appears or changes
+    builds its index), and this service runs a single worker: inline, it would
+    hold every other request on the event loop (health checks, the fleet's
+    broadcast searches) for that long. The broadcast-only ranking stays inline,
+    so a request without a kind runs exactly as it did before kind existed.
+
+    In the thread the ranking reads the settings that PUT /api/config swaps.
+    A config change landing mid-ranking can leave that one response ranked
+    with some old and some new settings; each setting is replaced whole, never
+    edited in place, and a search that starts after the change sees only the
+    new config.
+    """
+    if kind is None:
+        return process_and_rank(raw, lat, lon, **kwargs), None
+    return await run_in_threadpool(_rank_with_cells, raw, lat, lon, **kwargs)
+
+
+def _with_cellular(body: dict, kind: str | None, cells: CellLookup | None) -> dict:
+    """The response ``body``, plus query.kind and the cellular block when cell rows were asked for."""
+    if kind is not None:
+        body["query"]["kind"] = kind
+        body["cellular"] = cell_sites.cellular_block(cells)
+    return body
 
 
 async def _fetch_raw_towers(source: str, lat: float, lon: float, radius_km: int) -> list:
@@ -196,7 +283,9 @@ async def find_towers(
     limit: int = Query(0, ge=0, le=200),
     source: str = Query("auto"),
     frequencies: list[str] = Query(default=[]),
+    kind: str | None = Query(None),
 ):
+    kind = _resolve_kind(kind)
     # Before the source: "auto" picks the nearest database within the radius.
     effective_radius = radius_km if radius_km > 0 else tower_ranking.DEFAULT_RADIUS_KM
     source = _resolve_source(source, lat, lon, effective_radius)
@@ -207,12 +296,13 @@ async def find_towers(
     # that spans what would otherwise be a join boundary.
     user_freqs = parse_user_frequencies(frequencies)
 
-    raw = await _fetch_raw_towers(source, lat, lon, effective_radius)
+    raw = await _search_inputs(kind, source, lat, lon, effective_radius)
 
     # Filled in by process_and_rank; echoed back so a client can tell which
     # ordering it got rather than inferring it from the rows.
     diagnostics: dict = {}
-    towers = process_and_rank(
+    towers, cells = await _rank(
+        kind,
         raw,
         lat,
         lon,
@@ -227,7 +317,7 @@ async def find_towers(
     query_elev = await _enrich_with_elevation(towers, query_point=(lat, lon) if altitude == 0 else None)
     resolved_altitude = altitude if query_elev is None else query_elev
 
-    return {
+    body = {
         "towers": towers,
         "query": {
             "latitude": lat,
@@ -240,6 +330,10 @@ async def find_towers(
         },
         "count": len(towers),
     }
+    body = _with_cellular(body, kind, cells)
+    # A cellular answer holds only JSON-native values and tens of thousands of
+    # them: rendered directly, the bytes are the same without the generic encoder.
+    return body if kind is None else JSONResponse(body)
 
 
 @router.get("/towers/lookup")
@@ -288,16 +382,18 @@ async def find_towers_with_measurements(payload: MeasurementPayload):
     towers are excluded entirely.  Matched towers carry real measured quality
     fields (``snr_db``, ``score``, ``power_db``, ``obw_fraction``, ``measured=True``).
     """
+    kind = _resolve_kind(payload.kind)
     # Before the source: "auto" picks the nearest database within the radius.
     effective_radius = payload.radius_km if payload.radius_km > 0 else tower_ranking.DEFAULT_RADIUS_KM
     source = _resolve_source(payload.source, payload.lat, payload.lon, effective_radius)
     effective_limit = payload.limit if payload.limit > 0 else tower_ranking.DEFAULT_LIMIT
     measurements = [m.model_dump() for m in payload.measurements]
 
-    raw = await _fetch_raw_towers(source, payload.lat, payload.lon, effective_radius)
+    raw = await _search_inputs(kind, source, payload.lat, payload.lon, effective_radius)
 
     diagnostics: dict = {}
-    towers = process_and_rank(
+    towers, cells = await _rank(
+        kind,
         raw,
         payload.lat,
         payload.lon,
@@ -309,7 +405,7 @@ async def find_towers_with_measurements(payload: MeasurementPayload):
     )
     await _enrich_with_elevation(towers)
 
-    return {
+    body = {
         "towers": towers,
         "query": {
             "latitude": payload.lat,
@@ -326,6 +422,7 @@ async def find_towers_with_measurements(payload: MeasurementPayload):
         },
         "count": len(towers),
     }
+    return _with_cellular(body, kind, cells)
 
 
 @router.get("/elevation")

@@ -1,0 +1,58 @@
+{
+  "bands": {
+    "CELL600": [617.0, 652.0],
+    "CELL700": [716.0, 803.0],
+    "CELL850": [859.0, 894.0],
+    "CELL900": [925.0, 960.0],
+    "CELL1800": [1805.0, 1880.0],
+    "CELL1900": [1930.0, 1995.0],
+    "CELL2100": [2110.0, 2200.0],
+    "CELL2300": [2300.0, 2400.0],
+    "CELL2600": [2496.0, 2690.0],
+    "CELL3500": [3300.0, 4200.0]
+  },
+  "default_bandwidth_mhz": {
+    "CELL600": 10.0,
+    "CELL700": 10.0,
+    "CELL850": 10.0,
+    "CELL900": 10.0,
+    "CELL1800": 10.0,
+    "CELL1900": 10.0,
+    "CELL2100": 10.0,
+    "CELL2300": 10.0,
+    "CELL2600": 10.0,
+    "CELL3500": 20.0
+  },
+  "radio_bandwidth_mhz": {
+    "GSM": 0.2,
+    "UMTS": 5.0,
+    "CDMA": 1.25
+  },
+  "cpi_s": 0.2,
+  "reference_share_db": {
+    "LTE": -10.2,
+    "NR": -24.0,
+    "UMTS": -10.0,
+    "CDMA": -7.0,
+    "GSM": 0.0
+  },
+  "unknown_radio": "LTE",
+  "eirp": {
+    "reference_dbm": 61.0,
+    "reference_bandwidth_mhz": 5.0
+  },
+  "default_height_m": 30.0,
+  "sector": {
+    "beamwidth_deg": 65.0,
+    "max_attenuation_db": 20.0
+  },
+  "vertical": {
+    "beamwidth_deg": 10.0,
+    "tilt_deg": 3.0,
+    "max_attenuation_db": 20.0
+  },
+  "grid": {
+    "grid_km": 0.5,
+    "max_range_km": 30.0
+  }
+}

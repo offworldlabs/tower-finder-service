@@ -1,12 +1,21 @@
 """Tests for tower-finding and helper functions."""
 
+import asyncio
+import itertools
+import logging
+import sqlite3
+import threading
+import time
 import unittest.mock
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from app import app
 from core.auth import ENV_VAR
+from services import cell_sites, tower_feedback
+from services.tower_ranking import process_and_rank
 from tests._helpers import (
     CONSUMER_FIELDS,
     CONSUMER_NULLABLE_FIELDS,
@@ -19,6 +28,7 @@ from tests._helpers import (
     system,
 )
 from tests.test_replay_matching import _load_tower_fixture
+from tests.test_cell_sites import FCC, write_cell_db
 
 
 @pytest.fixture()
@@ -1387,3 +1397,234 @@ class TestDetectionAreaPerClass:
             for c in record["classes"].values():
                 assert c["area_km2_low"] <= c["area_km2"] <= c["area_km2_high"]
                 assert c["range_50pct_km_low"] <= c["range_50pct_km"] <= c["range_50pct_km_high"]
+
+
+# ── kind: broadcast, cellular or both ────────────────────────────────────────
+
+_GREENVILLE = {"lat": 34.8526, "lon": -82.394, "source": "us"}
+_GREENVILLE_SYSTEMS = [
+    _raw_system([_raw_device(95.5, 34.86, -82.39, "WTESTFM"), _raw_device(545.0, 34.84, -82.4, "WTESTTV")])
+]
+# Made-up carriers 1 km north (2140 MHz, the default) and 1 km south of the point.
+_GREENVILLE_CELLS = [
+    {**FCC, "site_id": "GVL-01", "lat": 34.8616, "lon": -82.394},
+    {**FCC, "site_id": "GVL-02", "lat": 34.8436, "lon": -82.394, "freq_mhz": 751.0},
+]
+_CELL_META = {"schema_version": "1", "built_at": "2026-01-01T00:00:00Z", "attribution:fcc_uls": "Example attribution."}
+_INVALID_KIND = "Invalid kind. Use: broadcast, cellular, both"
+
+
+def _search(client, params=None, payload=None):
+    """GET (``params``) or POST (``payload``) /api/towers with the FCC fetch and elevation stubbed."""
+    fcc = unittest.mock.AsyncMock(return_value=_GREENVILLE_SYSTEMS)
+    with (
+        unittest.mock.patch("routes.towers.API_KEY", ""),
+        unittest.mock.patch("routes.towers.fetch_fcc_broadcast_systems", new=fcc),
+        unittest.mock.patch("services.elevation.lookup_many", new=unittest.mock.AsyncMock(return_value={})),
+    ):
+        r = client.get("/api/towers", params=params) if payload is None else client.post("/api/towers", json=payload)
+    return r, fcc
+
+
+class TestTowerKind:
+    """kind=cellular|both adds cell rows while cellular is on; any other request answers as before."""
+
+    @pytest.fixture()
+    def cell_db(self, tmp_path, monkeypatch):
+        """Cellular switched on; the database path, holding no file yet."""
+        monkeypatch.setenv("TOWER_FINDER_CELLULAR_ENABLED", "true")
+        monkeypatch.setenv("TOWER_FINDER_CELL_DB", str(tmp_path / "cells.sqlite"))
+        return tmp_path / "cells.sqlite"
+
+    def test_flag_off_or_broadcast_answers_byte_for_byte_as_before(self, client, cell_db, monkeypatch):
+        write_cell_db(cell_db, _GREENVILLE_CELLS, _CELL_META)
+        payload = {**_GREENVILLE, "measurements": [_VALID_MEASUREMENT]}
+        monkeypatch.delenv("TOWER_FINDER_CELLULAR_ENABLED")
+        before = _search(client, _GREENVILLE)[0]
+        flag_off = [_search(client, {**_GREENVILLE, "kind": kind})[0] for kind in ("cellular", "nope")]
+        posts = [_search(client, payload=body)[0] for body in (payload, {**payload, "kind": 5})]
+        monkeypatch.setenv("TOWER_FINDER_CELLULAR_ENABLED", "true")
+        flag_on = [
+            _search(client, {**_GREENVILLE, **kind})[0] for kind in ({}, {"kind": "broadcast"}, {"kind": " Broadcast "})
+        ]
+
+        assert [r.content for r in flag_off + flag_on] == [before.content] * 5
+        assert posts[0].content == posts[1].content
+        for body in (before.json(), posts[0].json()):
+            assert body["towers"] and not any("kind" in t for t in body["towers"])
+            assert "cellular" not in body and "kind" not in body["query"]
+
+    def test_cellular_returns_cell_rows_alone_with_the_status(self, client, cell_db):
+        write_cell_db(cell_db, _GREENVILLE_CELLS, _CELL_META)
+        r, fcc = _search(client, {**_GREENVILLE, "kind": "cellular"})
+
+        fcc.assert_not_awaited()
+        body = r.json()
+        rows = sorted((t["kind"], t["cell_site_id"], t["callsign"]) for t in body["towers"])
+        assert rows == [("cellular", "GVL-01", "CELL GVL-01"), ("cellular", "GVL-02", "CELL GVL-02")]
+        assert list(body) == ["towers", "query", "count", "cellular"]
+        assert (body["query"]["source"], list(body["query"])[-1], body["query"]["kind"]) == ("us", "kind", "cellular")
+        block = body["cellular"]
+        assert (block["status"], block["detail"], block["built_at"]) == ("ok", None, "2026-01-01T00:00:00Z")
+        assert block["attribution"] == [{"source": "fcc_uls", "licence": "US-Gov-PD", "text": "Example attribution."}]
+
+    def test_both_ranks_broadcast_and_cell_rows_together(self, client, cell_db):
+        write_cell_db(cell_db, _GREENVILLE_CELLS, _CELL_META)
+        r, fcc = _search(client, {**_GREENVILLE, "kind": "both"})
+
+        fcc.assert_awaited_once()
+        assert r.json()["query"]["kind"] == "both"
+        assert sorted((t["kind"], t["callsign"]) for t in r.json()["towers"]) == [
+            ("broadcast", "WTESTFM"),
+            ("broadcast", "WTESTTV"),
+            ("cellular", "CELL GVL-01"),
+            ("cellular", "CELL GVL-02"),
+        ]
+
+    async def test_health_answers_while_a_cellular_ranking_runs(self, cell_db):
+        write_cell_db(cell_db, _GREENVILLE_CELLS, _CELL_META)
+        finished, ranking = [], threading.Event()
+
+        def slow_ranking(*args, **kwargs):
+            ranking.set()
+            time.sleep(1.0)
+            finished.append("ranking")
+            return process_and_rank(*args, **kwargs)
+
+        async def get(http, name, url, params=None):
+            if name == "health":
+                await asyncio.to_thread(ranking.wait, 5)  # sent once the search is inside the ranking
+            r = await http.get(url, params=params)
+            finished.append(name)
+            return r.status_code
+
+        with (
+            unittest.mock.patch("routes.towers.process_and_rank", slow_ranking),
+            unittest.mock.patch("routes.towers.fetch_fcc_broadcast_systems", new=unittest.mock.AsyncMock()),
+            unittest.mock.patch("services.elevation.lookup_many", new=unittest.mock.AsyncMock(return_value={})),
+        ):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as http:
+                search = get(http, "search", "/api/towers", {**_GREENVILLE, "kind": "cellular"})
+                codes = await asyncio.gather(search, get(http, "health", "/api/health"))
+
+        assert (codes, finished) == ([200, 200], ["health", "ranking", "search"])
+
+    def test_cellular_ranks_every_site_in_the_radius_as_the_full_ranking_does(self, client, cell_db):
+        # 600 weak carriers 100 m out, past what a nearest-rows cut would read,
+        # and one full-power site 15 km north that models the largest area.
+        near = [
+            {**FCC, "site_id": f"NEAR-{i:03d}", "lat": 34.8535, "lon": -82.394, "eirp_dbm": 30.0} for i in range(600)
+        ]
+        far = {**FCC, "site_id": "FAR", "lat": 34.9876, "lon": -82.394, "eirp_dbm": 65.0, "height_m": 60.0}
+        write_cell_db(cell_db, [*near, far], _CELL_META)
+        r, _ = _search(client, {**_GREENVILLE, "kind": "cellular", "limit": 10})
+
+        every_row = cell_sites.lookup_cells(_GREENVILLE["lat"], _GREENVILLE["lon"], 80.0).rows
+        full = process_and_rank(
+            [], _GREENVILLE["lat"], _GREENVILLE["lon"], limit=10, radius_km=80, cellular_rows=every_row
+        )
+        unshared = ("site_id", "site_channels", "elevation_m", "altitude_m")
+        towers = [{k: v for k, v in t.items() if k not in unshared} for t in r.json()["towers"]]
+        assert towers[0]["cell_site_id"] == "FAR"
+        assert towers == [{k: v for k, v in t.items() if k not in unshared} for t in full]
+
+    def test_cellular_search_keeps_to_the_requested_radius(self, client, cell_db):
+        # One carrier 1 km north; one about 11 km out on the diagonal, inside the 10 km box but past the radius.
+        inside = {**FCC, "site_id": "IN-1KM", "lat": 34.8616, "lon": -82.394}
+        outside = {**FCC, "site_id": "OUT-11KM", "lat": 34.9226, "lon": -82.309}
+        write_cell_db(cell_db, [inside, outside], _CELL_META)
+        r, _ = _search(client, {**_GREENVILLE, "kind": "cellular", "radius_km": 10})
+
+        assert [t["cell_site_id"] for t in r.json()["towers"]] == ["IN-1KM"]
+
+    def test_post_cellular_keeps_the_carrier_a_measurement_saw(self, client, cell_db):
+        write_cell_db(cell_db, _GREENVILLE_CELLS, _CELL_META)
+        seen = {**_VALID_MEASUREMENT, "freq_mhz": 2140.0}
+        r, _ = _search(client, payload={**_GREENVILLE, "kind": "cellular", "measurements": [seen]})
+
+        assert [(t["cell_site_id"], t["measured"]) for t in r.json()["towers"]] == [("GVL-01", True)]
+
+    def test_an_invalid_kind_is_a_400_ahead_of_the_source(self, client, cell_db):
+        get = _search(client, {**_GREENVILLE, "source": "nowhere", "kind": "nope"})[0]
+        posts = [_search(client, payload={**_GREENVILLE, "kind": kind})[0] for kind in ("nope", 5)]
+
+        assert [(r.status_code, r.json()["detail"]) for r in (get, *posts)] == [(400, _INVALID_KIND)] * 3
+
+    def test_cellular_without_a_database_is_a_200_saying_so(self, client, cell_db):
+        r, _ = _search(client, {**_GREENVILLE, "kind": "cellular"})
+
+        assert (r.status_code, r.json()["towers"], r.json()["cellular"]["status"]) == (200, [], "unavailable")
+        assert r.json()["cellular"]["detail"].startswith("Cellular data unavailable")
+
+    def test_both_with_an_empty_database_still_returns_the_broadcast_rows(self, client, cell_db):
+        write_cell_db(cell_db, [], _CELL_META)
+        r, _ = _search(client, {**_GREENVILLE, "kind": "both"})
+
+        assert (r.status_code, r.json()["cellular"]["status"]) == (200, "unavailable")
+        assert {t["callsign"]: t["kind"] for t in r.json()["towers"]} == {
+            "WTESTFM": "broadcast",
+            "WTESTTV": "broadcast",
+        }
+
+    def test_fleet_feedback_lifts_the_carrier_it_names_and_moves_nothing_else(self, client, cell_db, monkeypatch):
+        # Two carriers on one mast 1 km north; the weaker models about 60% of the other's area.
+        strong = {**FCC, "site_id": "MAST", "lat": 34.8616, "lon": -82.394}
+        write_cell_db(cell_db, [strong, {**strong, "freq_mhz": 2130.0, "eirp_dbm": 59.0}], _CELL_META)
+        monkeypatch.setattr(tower_feedback, "_DB_PATH", cell_db.parent / "feedback.db")
+        params = {**_GREENVILLE, "kind": "cellular", "limit": 1}
+        # A day of archive windows that matched every track: about twice the area of the tower they name.
+        window = {"rx_lat": 34.8526, "rx_lon": -82.394, "source": "archive", "outcome": "observed"}
+        window |= {"adsb_match_rate": 1.0, "hours_observed": 24.0}
+
+        def lift(tx_lat, tx_lon, fc_hz):
+            tower = {"tx_lat": tx_lat, "tx_lon": tx_lon, "fc_hz": fc_hz}
+            tower_feedback.record_many([{**window, **tower, "node_id": f"node-{i}"} for i in range(10)])
+            return _search(client, params)[0]
+
+        before = _search(client, params)[0]
+        fm_lifted = lift(34.86, -82.39, 95.5e6)  # the FM tower, no carrier
+        weak_lifted = lift(34.8616, -82.394, 2130e6)
+
+        assert fm_lifted.content == before.content
+        assert [t["frequency_mhz"] for t in before.json()["towers"] + weak_lifted.json()["towers"]] == [2140.0, 2130.0]
+
+    def test_a_fault_ranking_the_cell_rows_costs_the_answer_its_cell_rows(self, client, cell_db):
+        write_cell_db(cell_db, _GREENVILLE_CELLS, _CELL_META)
+        broken = unittest.mock.Mock(**{"execute.side_effect": RuntimeError("unexpected")})
+        with (
+            unittest.mock.patch.object(cell_sites.CellCandidates, "_connection", lambda self: broken),
+            unittest.mock.patch.object(cell_sites.CellCandidates, "all_rows") as every_row,
+        ):
+            r, _ = _search(client, {**_GREENVILLE, "kind": "cellular"})
+
+        cell = r.json()["cellular"]
+        assert (r.status_code, r.json()["towers"], cell["status"]) == (200, [], "unavailable")
+        assert cell["detail"] == "Cellular data unavailable: ranking the cell rows failed for this search."
+        every_row.assert_not_called()
+
+    def test_a_database_that_keeps_failing_to_read_answers_so_and_logs_it_once(self, client, cell_db, caplog):
+        write_cell_db(cell_db, _GREENVILLE_CELLS, _CELL_META)
+        broken = unittest.mock.Mock()
+        broken.execute.side_effect = sqlite3.DatabaseError("database disk image is malformed")
+        real = cell_sites.CellCandidates._connection
+        failing = iter([True])  # one failed read, then the file reads again
+        params = {**_GREENVILLE, "kind": "cellular"}
+        with (
+            unittest.mock.patch.object(
+                cell_sites.CellCandidates, "_connection", lambda self: broken if next(failing, False) else real(self)
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            once = _search(client, params)[0]
+            warned_once = [r.getMessage() for r in caplog.records]
+            failing = itertools.repeat(True)
+            caplog.clear()
+            every = _search(client, params)[0]
+
+        assert every.status_code == 200
+        assert (every.json()["towers"], every.json()["cellular"]["status"]) == ([], "unavailable")
+        assert every.json()["cellular"]["detail"] == "Cellular data unavailable: the cell database could not be read."
+        warnings = [r.getMessage() for r in caplog.records]
+        assert len(warnings) == 1 and str(cell_db) in warnings[0] and "disk image is malformed" in warnings[0], warnings
+        assert (once.status_code, once.json()["cellular"]["status"], len(once.json()["towers"])) == (200, "ok", 2)
+        assert warned_once == []

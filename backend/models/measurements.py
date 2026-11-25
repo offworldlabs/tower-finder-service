@@ -6,6 +6,8 @@ The MeasurementPayload bundles those with the receiver's location and
 optional search parameters so a single POST body is self-contained.
 """
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -50,3 +52,10 @@ class MeasurementPayload(BaseModel):
     radius_km: int = Field(0, ge=0, le=300, description="Search radius (0 = use server default)")
     limit: int = Field(0, ge=0, le=200, description="Max towers to return (0 = use server default)")
     source: str = Field("auto", description="Data source: us, au, ca, or auto")
+    # Any, not a str or an enum: while cellular data is switched off a body
+    # carrying "kind" must be answered as it was before the field existed,
+    # whatever the value, so the route validates it, and only with the flag on.
+    kind: Any = Field(
+        None,
+        description="Tower kinds: broadcast, cellular or both (default broadcast). Read only while cellular is enabled.",
+    )

@@ -55,11 +55,12 @@ COPY --from=frontend-build /app/frontend/dist ./frontend/dist
 # must both be importable — mirrors the test config's pythonpath = [".", "backend"].
 ENV PYTHONPATH=/app:/app/backend
 
-# Runtime overlay dir (TOWER_FINDER_RUNTIME_DIR default is data/runtime under CWD).
-# Mounted as a named volume in compose; create + own it here so the volume
-# inherits the right owner.
+# Runtime overlay dir (TOWER_FINDER_RUNTIME_DIR default is data/runtime under CWD)
+# and the cell database dir (TOWER_FINDER_CELL_DB default is data/cells/cells.sqlite).
+# Each is mounted as a named volume in compose; create + own them here so the
+# volumes inherit the right owner.
 RUN useradd -r -s /usr/sbin/nologin appuser && \
-    mkdir -p /app/data/runtime && \
+    mkdir -p /app/data/runtime /app/data/cells && \
     chown -R appuser:appuser /app/data
 
 USER appuser
