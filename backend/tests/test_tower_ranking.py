@@ -1,17 +1,25 @@
 """Tests for tower ranking utilities — source detection, band classification, frequency parsing."""
 
 import json
+import math
 
+import numpy as np
 import pytest
 
 from routes.towers import _detect_source
+from services import cell_sites, tower_feedback, tower_ranking
 from services.tower_ranking import (
+    _DEFAULT_DIVERSITY,
     DEFAULT_LIMIT,
+    EARTH_RADIUS_KM,
     FM_ONLY,
     MEASUREMENT_TOLERANCE_MHZ,
     SENSITIVITY_DBM,
     _as_float,
+    _diversity_similarity,
     _match_measurement,
+    _pick_columns,
+    _similarity_ceiling,
     bearing_to_cardinal,
     classify_band,
     eirp_dbm_from_device,
@@ -26,6 +34,7 @@ from services.tower_ranking import (
 from tests._helpers import CONSUMER_FIELDS
 from tests._helpers import device as _device
 from tests._helpers import system as _system
+from tests.test_cell_sites import FCC, write_cell_db
 
 # ── Auto source detection ────────────────────────────────────────────────────
 
@@ -866,7 +875,7 @@ class TestMeasurementCalibration:
     _UHF_C = _device(freq_mhz=575.0, lat=33.749, lon=-84.15, callsign="UHFC", eirp=20_000.0)
     _FM = _device(freq_mhz=95.5, lat=33.93, lon=-84.388, callsign="FMX", eirp=100_000.0)
 
-    def _rank(self, devices, measurements):
+    def _rank(self, devices, measurements, cellular_rows=None):
         diagnostics: dict = {}
         towers = process_and_rank(
             [_system(devices)],
@@ -874,6 +883,7 @@ class TestMeasurementCalibration:
             _USER_LON,
             measurements=measurements,
             diagnostics=diagnostics,
+            cellular_rows=cellular_rows,
         )
         return {t["callsign"]: t for t in towers}, diagnostics
 
@@ -925,6 +935,13 @@ class TestMeasurementCalibration:
 
         tv_residuals = [by[c]["power_db"] - by[c]["received_power_dbm"] for c in ("UHFA", "UHFB")]
         assert diagnostics["calibration_offset_db"] == pytest.approx(sum(tv_residuals) / 2)
+
+    def test_a_measured_carrier_keeps_the_modelled_direct_power(self):
+        sweep = [_tv_measurement(515.0, -30.0), _tv_measurement(545.0, -55.0), _tv_measurement(2132.5, -40.0)]
+        by, diagnostics = self._rank([self._UHF_A, self._UHF_B], sweep, [_cell_row(freq_mhz=2132.5, lat=33.767)])
+        assert (by["LTE S1"]["direct_power_source"], by["LTE S1"]["direct_power_dbm_override"]) == ("model", None)
+        assert (by["UHFA"]["direct_power_source"], by["UHFA"]["direct_power_dbm_override"]) == ("measured", -45.5)
+        assert diagnostics["calibrated_towers"] == 2
 
     def test_a_measured_direct_path_changes_the_modelled_area(self):
         """The point of the override: what the node actually heard moves the
@@ -1164,3 +1181,140 @@ class TestUserFrequencyRanking:
             user_frequencies=[107.9],
         )
         assert [t["callsign"] for t in result] == ["WXYZ"]
+
+
+# ── Cellular carriers (cellular_rows) ────────────────────────────────────────
+
+
+def _cell_row(**overrides) -> dict:
+    """A cell DB row (schema v1 columns), fully specified unless overridden."""
+    row = {
+        "source": "fcc_uls",
+        "licence": "US-Gov-PD",
+        "site_id": "S1",
+        "cell_id": None,
+        "operator": "Example Mobile",
+        "radio": "LTE",
+        "lat": _USER_LAT,
+        "lon": _USER_LON,
+        "freq_mhz": 751.0,
+        "bandwidth_mhz": 10.0,
+        "eirp_dbm": 64.0,
+        "height_m": 30.0,
+        "azimuth_deg": None,
+        "beamwidth_deg": 65.0,
+        "tilt_deg": 3.0,
+        "modelled": "",
+        "confidence": 0.9,
+    }
+    row.update(overrides)
+    return row
+
+
+def _rank_cells(*rows) -> list:
+    return process_and_rank([], _USER_LAT, _USER_LON, cellular_rows=list(rows))
+
+
+class TestCellularRanking:
+    _NORTH_2KM = _USER_LAT + 0.018
+    _NORTH_3KM = _USER_LAT + 0.027
+    _NORTH_5KM = _USER_LAT + 0.045
+
+    def test_sectors_of_one_site_stay_apart_and_exact_duplicates_collapse(self):
+        # No cell id and one frequency: only the azimuth tells these sectors
+        # apart, and their display callsigns are identical.
+        first = _cell_row(azimuth_deg=0.0, lat=self._NORTH_2KM)
+        second = _cell_row(azimuth_deg=120.0, lat=self._NORTH_2KM)
+        result = _rank_cells(first, second, dict(first))
+        assert sorted(t["azimuth_deg"] for t in result) == [0.0, 120.0]
+
+    def test_cells_within_the_shared_transmitter_radius_are_not_merged(self):
+        a = _cell_row(site_id="A", cell_id="1", lat=self._NORTH_2KM)
+        b = _cell_row(site_id="B", cell_id="1", lat=self._NORTH_2KM + 0.0009)  # 100 m apart
+        result = _rank_cells(a, b)
+        assert sorted(t["cell_site_id"] for t in result) == ["A", "B"]
+        assert all(t["shared_callsigns"] == [] for t in result)
+
+    def test_a_mast_below_30_m_keeps_its_height(self):
+        short = _cell_row(cell_id="1", height_m=15.0, lat=self._NORTH_5KM)
+        tall = _cell_row(cell_id="2", height_m=30.0, lat=self._NORTH_5KM)
+        by_cell = {t["cell_id"]: t for t in _rank_cells(short, tall)}
+        assert by_cell["1"]["antenna_height_m"] == 15.0
+        assert by_cell["1"]["path_loss_db"] == 136.4
+        assert by_cell["2"]["path_loss_db"] == 130.9
+
+    def test_path_loss_above_1500_mhz_is_not_clamped(self):
+        # 25.7 dB is the excess the 1500 MHz clamp gives at this geometry.
+        [t] = _rank_cells(_cell_row(cell_id="1", freq_mhz=2132.5, lat=self._NORTH_5KM))
+        assert t["band"] == "CELL2100"
+        assert t["excess_path_loss_db"] == 27.5
+        assert t["excess_path_loss_db"] != 25.7
+
+    def test_sector_pattern_weights_the_received_power(self):
+        # The site is due north: azimuth 180 faces the receiver, 0 turns away.
+        front = _cell_row(cell_id="front", azimuth_deg=180.0, lat=self._NORTH_3KM)
+        back = _cell_row(cell_id="back", azimuth_deg=0.0, lat=self._NORTH_3KM)
+        omni = _cell_row(cell_id="omni", lat=self._NORTH_3KM)
+        power = {t["cell_id"]: t["received_power_dbm"] for t in _rank_cells(front, back, omni)}
+        assert power == {"front": -53.8, "back": -73.1, "omni": -53.8}
+
+    def test_the_search_over_the_database_dedupes_a_measured_carrier_as_the_full_ranking_does(
+        self, tmp_path, monkeypatch
+    ):
+        # Carrier N/1's stronger row is 5 MHz wide, 7 MHz off the measurement,
+        # so the full ranking keeps that row and drops the carrier. S/1's first
+        # row is unmeasured too, which places S/1 ahead of S/2 on their tie.
+        north, south = dict(FCC, lat=self._NORTH_2KM, lon=_USER_LON), dict(FCC, lat=_USER_LAT - 0.027, lon=_USER_LON)
+        rows = [
+            dict(north, site_id="N", cell_id="1", bandwidth_mhz=5.0, eirp_dbm=64.0),
+            dict(north, site_id="N", cell_id="1", bandwidth_mhz=20.0, eirp_dbm=60.0),
+            dict(south, site_id="S", cell_id="1", bandwidth_mhz=5.0, eirp_dbm=60.0),
+            dict(south, site_id="S", cell_id="2", bandwidth_mhz=20.0, eirp_dbm=64.0),
+            dict(south, site_id="S", cell_id="1", bandwidth_mhz=20.0, eirp_dbm=64.0),
+        ]
+        monkeypatch.setenv("TOWER_FINDER_CELL_DB", str(write_cell_db(tmp_path / "cells.sqlite", rows)))
+        monkeypatch.setattr(tower_feedback, "_DB_PATH", tmp_path / "feedback.db")
+        seen = [_make_measurement(2147.0, band="CELL2100")]
+        every_row = cell_sites.lookup_cells(_USER_LAT, _USER_LON, 80.0).rows
+        candidates = cell_sites.cell_candidates(_USER_LAT, _USER_LON, 80.0).rows
+        ranked = [
+            process_and_rank([], _USER_LAT, _USER_LON, radius_km=80, measurements=seen, cellular_rows=cells)
+            for cells in (every_row, candidates)
+        ]
+        assert [[t["callsign"] for t in towers] for towers in ranked] == [["CELL S/1", "CELL S/2"]] * 2
+
+    def test_a_setting_changed_mid_search_keeps_the_scored_carriers_records(self, tmp_path, monkeypatch):
+        north, south = dict(FCC, lat=self._NORTH_2KM, lon=_USER_LON), dict(FCC, lat=_USER_LAT - 0.027, lon=_USER_LON)
+        rows = [dict(north, site_id="N", cell_id="1"), dict(south, site_id="S", cell_id="1")]
+        monkeypatch.setenv("TOWER_FINDER_CELL_DB", str(write_cell_db(tmp_path / "cells.sqlite", rows)))
+        monkeypatch.setattr(tower_feedback, "_DB_PATH", tmp_path / "feedback.db")
+        score_towers = tower_ranking.score_towers
+
+        def score_then_raise_sensitivity(towers, *args, **kwargs):
+            score_towers(towers, *args, **kwargs)
+            if kwargs.get("records") is False:
+                monkeypatch.setattr(tower_ranking, "SENSITIVITY_DBM", -20.0)
+
+        monkeypatch.setattr(tower_ranking, "score_towers", score_then_raise_sensitivity)
+        candidates = cell_sites.cell_candidates(_USER_LAT, _USER_LON, 80.0).rows
+        try:
+            ranked = process_and_rank([], _USER_LAT, _USER_LON, radius_km=80, cellular_rows=candidates)
+        finally:
+            candidates.close()
+        assert tower_ranking.SENSITIVITY_DBM == -20.0
+        assert sorted(t["callsign"] for t in ranked) == ["CELL N/1", "CELL S/1"]
+        assert all(t["expected_detection_area"] is not None for t in ranked)
+
+
+def test_the_similarity_ceiling_is_never_below_the_exact_similarity():
+    cfg = _DEFAULT_DIVERSITY
+
+    def tower(lat, band, bearing, dist):
+        return {"latitude": lat, "longitude": -0.1276, "band": band, "bearing_deg": bearing, "distance_km": dist}
+
+    edge = math.degrees(cfg["site_radius_km"] / EARTH_RADIUS_KM)
+    item = tower(51.5072, "CELL700", 10.0, 5.0)
+    picks = [tower(51.5072, band, 10.0 + 70 * i, 5.0 + 6 * i) for i, band in enumerate(["CELL700", "CELL800"] * 4)]
+    picks += [tower(51.5072 + edge + d, "CELL700", 200.0, 40.0) for d in (-1e-9, 0.0, 1e-9)]
+    exact = [_diversity_similarity(item, p, cfg) for p in picks]
+    assert (_similarity_ceiling(_pick_columns([item]), _pick_columns(picks), 0, cfg)[0] >= np.array(exact)).all()

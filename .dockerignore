@@ -6,6 +6,7 @@ __pycache__
 .pytest_cache
 .ruff_cache
 data/runtime
+data/cells
 # frontend/ used to be excluded wholesale, when it held nothing but reference
 # snippets. It is the real UI now and the image builds it (see Dockerfile), so
 # only the generated + installed directories are kept out.

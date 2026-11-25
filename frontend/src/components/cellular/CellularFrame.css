@@ -1,0 +1,205 @@
+/**
+ * Cellular view frame: the mode badge, the notice box and the data source
+ * attribution block. Tokens only, so both themes come from surface.css.
+ */
+
+/* ── Mode badge ──────────────────────────────────────────────────────────
+   Sits after the h1 in the header bar. At phone width the header already
+   holds the mark, the name and the theme switch, so the pill tightens. */
+
+.cell-mode-badge {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 6px;
+  height: 24px;
+  margin-left: 2px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  background: var(--accent-light);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.cell-mode-badge svg {
+  flex-shrink: 0;
+  display: block;
+}
+
+@media (max-width: 480px) {
+  .cell-mode-badge {
+    height: 22px;
+    margin-left: 0;
+    padding: 0 8px;
+    gap: 4px;
+    font-size: 11px;
+  }
+}
+
+/* ── Notice ──────────────────────────────────────────────────────────────
+   A card with a tone stripe on its left edge. Title and text share a line
+   when they fit and wrap as two blocks when they do not. */
+
+.card.cell-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 24px;
+  padding: 12px 16px;
+}
+
+.card.cell-notice--warning {
+  border-left: 3px solid var(--warning);
+  background: var(--warning-light);
+}
+
+.card.cell-notice--info {
+  border-left: 3px solid var(--accent);
+  background: var(--accent-tint);
+}
+
+.cell-notice-icon {
+  flex-shrink: 0;
+  display: block;
+  margin-top: 1px;
+}
+
+.cell-notice--warning .cell-notice-icon {
+  color: var(--warning);
+}
+
+.cell-notice--info .cell-notice-icon {
+  color: var(--accent);
+}
+
+.cell-notice-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+}
+
+.cell-notice-title {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--text-primary);
+}
+
+.cell-notice-text {
+  min-width: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+/* ── Attribution ─────────────────────────────────────────────────────────
+   The licences require the credit to be on the page without a click, so it
+   is a plain block of panels, never a disclosure. The heading is the results
+   heading's shape. */
+
+.card.cell-attribution {
+  margin-bottom: 24px;
+}
+
+.cell-attribution h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.cell-attribution-lede {
+  padding: 14px 20px 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.cell-attribution-list {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  padding: 12px 20px 20px;
+  list-style: none;
+}
+
+@media (min-width: 720px) {
+  .cell-attribution-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.cell-attribution-item {
+  min-width: 0;
+  padding: 12px 14px;
+  background: var(--bg-sunk);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.cell-attribution-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+}
+
+.cell-attribution-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.cell-attribution-licence {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.cell-attribution-active {
+  margin-left: auto;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--success-light);
+  color: var(--success);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.cell-attribution-text {
+  margin-top: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.cell-attribution-links {
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.cell-attribution-links a {
+  color: var(--accent);
+}
+
+.cell-attribution-links a:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.cell-attribution-links a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

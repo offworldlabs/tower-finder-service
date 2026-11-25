@@ -12,6 +12,9 @@ import { stubBrowser } from "./browser";
 vi.mock("../components/TowerMap", () => ({
   default: () => <div data-testid="tower-map" />,
 }));
+vi.mock("../components/cellular/CellularMap", () => ({
+  default: () => <div data-testid="cellular-map" />,
+}));
 
 const WALTHAM_TOWER = {
   rank: 1,
@@ -521,6 +524,163 @@ describe("App share links", () => {
 
     expect(await screen.findByLabelText(/link to this search/i)).toHaveValue(
       window.location.href,
+    );
+  });
+});
+
+// The served licence texts; every other value here is made up.
+const CELL_ATTRIBUTION = [
+  {
+    source: "acma",
+    licence: "ACMA-RRL",
+    text: "Based on Australian Communications and Media Authority information",
+  },
+  {
+    source: "fcc_uls",
+    licence: "US-Gov-PD",
+    text: "Source: FCC Universal Licensing System (ULS), Cellular service records; US Government work, public domain",
+  },
+  {
+    source: "ised",
+    licence: "OGL-Canada-2.0",
+    text: "Contains information licensed under the Open Government Licence - Canada (ISED Spectrum Management System, Site Data Extract; the licence of this extract is not confirmed by ISED)",
+  },
+  {
+    source: "opencellid",
+    licence: "CC-BY-SA-4.0",
+    text: "OpenCelliD Project (https://opencellid.org), licensed under CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/). Changes: cells merged into sites, positions snapped to FCC ASR structures, radio parameters modelled",
+  },
+];
+
+const CELL_STATUS = {
+  enabled: true,
+  status: "ok",
+  detail: null,
+  built_at: "2026-01-01T00:00:00Z",
+  countries: { ca: 2 },
+  sources: {},
+  attribution: CELL_ATTRIBUTION,
+};
+
+const TORONTO = { latitude: 43.6532, longitude: -79.3832 };
+
+const TORONTO_CELL = {
+  ...WALTHAM_TOWER,
+  ...TORONTO,
+  kind: "cellular",
+  callsign: "CELL 900001/42",
+  name: "Example Mobile",
+  band: "CELL1900",
+  frequency_mhz: 1960,
+  site_id: "example-site-1",
+  cell_id: "42",
+  operator: "Example Mobile",
+  radio: "LTE",
+  azimuth_deg: 120,
+  beamwidth_deg: 65,
+  data_source: "ised",
+  modelled: ["eirp"],
+};
+
+describe("App cellular view", () => {
+  /** /api/cellular answers `cellular`; /api/towers answers `towers`. */
+  function mockCellularApi(
+    cellular: { status: number; body: unknown },
+    towers: unknown = { towers: [], query: null, count: 0 },
+  ) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        const answer = url.includes("/api/cellular")
+          ? cellular
+          : url.includes("/api/elevation")
+            ? { status: 200, body: { elevation_m: 43 } }
+            : { status: 200, body: towers };
+        return Promise.resolve({
+          ok: answer.status < 400,
+          status: answer.status,
+          json: () => Promise.resolve(answer.body),
+        });
+      }),
+    );
+  }
+
+  // StrictMode, as main.tsx renders it: its double mount must not double a request.
+  const renderStrict = () =>
+    render(
+      <StrictMode>
+        <ThemeProvider>
+          <App />
+        </ThemeProvider>
+      </StrictMode>,
+    );
+  const towersParams = () => new URL(towersRequestUrl()!, "https://towers.invalid").searchParams;
+  const cellularRequests = () => fetchedUrls().filter((u) => u.includes("/api/cellular"));
+
+  it("turns cellular on only for the URL flag and a server that enables it", async () => {
+    const user = userEvent.setup();
+
+    mockCellularApi({ status: 200, body: CELL_STATUS });
+    openAt("?cellular=1");
+    let view = renderStrict();
+    expect(await screen.findByLabelText("Cellular view")).toBeInTheDocument();
+    expect(cellularRequests()).toHaveLength(1);
+    view.unmount();
+
+    // A server with cellular switched off has no such route.
+    mockCellularApi({ status: 404, body: { detail: "Not Found" } });
+    openAt("?cellular=1");
+    view = renderStrict();
+    expect(await screen.findByText("Cellular view not available here")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Cellular view")).not.toBeInTheDocument();
+    await search(user);
+    await waitFor(() => expect(towersRequestUrl()).toBeDefined());
+    expect(towersParams().has("kind")).toBe(false);
+    expect(towersParams().get("limit")).toBe("20");
+    view.unmount();
+
+    mockCellularApi({ status: 200, body: CELL_STATUS });
+    openAt("");
+    renderStrict();
+    await search(user);
+    await waitFor(() => expect(towersRequestUrl()).toBeDefined());
+    expect(cellularRequests()).toHaveLength(0);
+    expect(screen.queryByLabelText("Cellular view")).not.toBeInTheDocument();
+    expect(screen.queryByText("Cellular view not available here")).not.toBeInTheDocument();
+  });
+
+  it("runs a shared cellular link after the server answers and shows only cell rows", async () => {
+    const broadcast = { ...WALTHAM_TOWER, ...TORONTO, rank: 2, kind: "broadcast", callsign: "XTEST-FM" };
+    mockCellularApi(
+      { status: 200, body: CELL_STATUS },
+      {
+        towers: [TORONTO_CELL, broadcast],
+        query: { ...TORONTO, altitude_m: 0, radius_km: 80, source: "ca", kind: "cellular" },
+        count: 2,
+        cellular: { status: "ok", detail: null, built_at: null, attribution: [] },
+      },
+    );
+    openAt("?cellular=1&lat=43.6532&lon=-79.3832&source=ca");
+    renderStrict();
+
+    expect((await screen.findAllByText("CELL 900001/42")).length).toBeGreaterThan(0);
+    const apiOrder = fetchedUrls().map((u) => /\/api\/(cellular|towers)/.exec(u)?.[1]);
+    expect(apiOrder.filter(Boolean)).toEqual(["cellular", "towers"]);
+    expect(towersParams().get("kind")).toBe("cellular");
+    expect(document.body.innerHTML).not.toContain("XTEST-FM");
+  });
+
+  it("credits every cell data source as soon as the cellular view is on", async () => {
+    mockCellularApi({ status: 200, body: CELL_STATUS });
+    openAt("?cellular=1");
+    renderStrict();
+
+    for (const { text } of CELL_ATTRIBUTION) {
+      expect(await screen.findByText(text)).toBeVisible();
+    }
+    expect(screen.getByRole("link", { name: "CC BY-SA 4.0" })).toHaveAttribute(
+      "href",
+      "https://creativecommons.org/licenses/by-sa/4.0/",
     );
   });
 });

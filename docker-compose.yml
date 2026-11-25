@@ -13,8 +13,14 @@ services:
         VITE_CARTO_API_KEY: ${CARTO_API_KEY:-}
     env_file:
       - backend/.env
+    environment:
+      # Set per environment by deploy/env.<env>.example, which every deploy
+      # rewrites into ./.env, so it cannot drift. Off unless set.
+      TOWER_FINDER_CELLULAR_ENABLED: ${TOWER_FINDER_CELLULAR_ENABLED:-false}
     volumes:
       - runtime-data:/app/data/runtime
+      # The cell database. Built outside the image and placed in the volume.
+      - cells-data:/app/data/cells
     networks:
       retina-edge:
         aliases:
@@ -86,3 +92,4 @@ networks:
 
 volumes:
   runtime-data:
+  cells-data:

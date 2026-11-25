@@ -1,0 +1,541 @@
+/**
+ * Cellular results: band chips, the modelled mark, the cell table, the site
+ * markers and their popups, and the summary strip's cards. Tokens only, so
+ * both themes come out of surface.css; the broadcast classes these sit on
+ * (.chip, .results-table, .map-legend, .stat-card) keep their own rules.
+ */
+
+/* ── Band chips ──────────────────────────────────────────────────────────
+   The broadcast chip, coloured by band group: the low bands take the VHF
+   hue, the mid bands the FM hue, 2300/2600 the UHF hue and the C-band the
+   warning amber. Amber alone is too light to read as 11px text on a light
+   card, so its ink is pulled a quarter of the way toward the primary text,
+   which darkens it on light and lightens it on dark. */
+
+/* Sized to its text, so "LTE 2100" never breaks at the space. */
+.chip.cell-band-chip {
+  width: max-content;
+  font-variant-numeric: tabular-nums;
+}
+
+.cell-band-low {
+  color: var(--band-vhf);
+  background: var(--band-vhf-wash);
+}
+
+.cell-band-mid {
+  color: var(--band-fm);
+  background: var(--band-fm-wash);
+}
+
+.cell-band-upper {
+  color: var(--band-uhf);
+  background: var(--band-uhf-wash);
+}
+
+.cell-band-cband {
+  color: color-mix(in srgb, var(--warning) 75%, var(--text-primary));
+  background: var(--warning-light);
+}
+
+.cell-band-unknown {
+  color: var(--band-other);
+  background: var(--band-other-wash);
+}
+
+/* NR (5G) is outlined in the band's own colour. An inset ring, so the chip
+   keeps the size of its LTE neighbours. */
+.chip.cell-band-chip.is-nr {
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+
+.chip.cell-band-chip-sm {
+  padding: 1px 6px;
+  font-size: 10.5px;
+}
+
+/* ── Modelled mark ───────────────────────────────────────────────────────
+   A superscript "≈" after any value the source did not supply. Amber, the
+   surface's caution, at the same darkened strength as the C-band ink so it
+   holds on both cards without shouting over the value it qualifies. */
+
+.cell-modelled {
+  margin-left: 2px;
+  font-family: var(--font-body);
+  font-size: 0.85em;
+  font-weight: 600;
+  line-height: 0;
+  color: color-mix(in srgb, var(--warning) 75%, var(--text-primary));
+  cursor: help;
+}
+
+.cell-modelled-legend {
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.cell-muted {
+  color: var(--text-muted);
+}
+
+/* ── Cell table ──────────────────────────────────────────────────────────
+   The results table, tightened to fit thirteen columns in a desktop card: a
+   column's second value sits on a muted line under its first, a header's
+   unit takes its second line, and the callsign and operator are cut to a set
+   width by CSS alone (the full text stays in the cell and in its title). The box has its own
+   height and scrolls both ways; the header row sticks to the top and the
+   rank and cell columns to the left edge. Sticky cells need an opaque ground,
+   which is why they repaint the card colour and lay the hover wash over it
+   rather than taking the translucent wash alone. */
+
+.cell-results {
+  margin-bottom: 24px;
+  /* The rank column's width, which is also where the cell column sticks. */
+  --cell-rank-w: 54px;
+}
+
+.cell-results h2 {
+  flex-wrap: wrap;
+}
+
+.cell-results-sites {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.table-scroll.cell-table-scroll {
+  max-height: 70vh;
+  overflow: auto;
+}
+
+/* Separate borders: collapsed ones are painted by the table, not the cell,
+   and would scroll away from a sticky cell. */
+.results-table.cell-table {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.results-table.cell-table th,
+.results-table.cell-table td {
+  padding: 8px;
+  line-height: 1.35;
+}
+
+.results-table.cell-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding-top: 10px;
+  padding-bottom: 9px;
+  vertical-align: bottom;
+  letter-spacing: 0.03em;
+  background: var(--bg-card);
+}
+
+/* A header's unit, or the name of the value on the line under, takes a
+   line of its own, so no header runs past two lines. */
+.results-table.cell-table .cell-th-sub {
+  display: block;
+  font-weight: 500;
+}
+
+.results-table.cell-table th:last-child,
+.results-table.cell-table td:last-child {
+  padding-right: 16px;
+}
+
+/* Figures right-aligned. Where a figure can be modelled, the extra right
+   padding holds the mark, hung outside the figure, so a marked and an
+   unmarked value line up. */
+.results-table.cell-table .cell-num {
+  text-align: right;
+}
+
+.results-table.cell-table .cell-num-marked {
+  padding-right: 18px;
+}
+
+.results-table.cell-table .cell-v {
+  position: relative;
+  display: block;
+}
+
+.results-table.cell-table .cell-num .cell-sub {
+  position: relative;
+}
+
+.results-table.cell-table .cell-num .cell-modelled {
+  position: absolute;
+  top: -0.2em;
+  left: 100%;
+  line-height: 1;
+}
+
+.results-table.cell-table .cell-col-rank {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  box-sizing: border-box;
+  width: var(--cell-rank-w);
+  min-width: var(--cell-rank-w);
+  max-width: var(--cell-rank-w);
+  padding-left: 16px;
+  padding-right: 4px;
+  background: var(--bg-card);
+}
+
+.results-table.cell-table .cell-col-cell {
+  position: sticky;
+  left: var(--cell-rank-w);
+  z-index: 1;
+  background: var(--bg-card);
+  box-shadow: inset -1px 0 0 var(--border);
+}
+
+.results-table.cell-table thead .cell-col-rank,
+.results-table.cell-table thead .cell-col-cell {
+  z-index: 3;
+}
+
+.results-table.cell-table tbody tr:hover td.cell-col-rank,
+.results-table.cell-table tbody tr:hover td.cell-col-cell {
+  background: linear-gradient(var(--accent-tint), var(--accent-tint)), var(--bg-card);
+}
+
+.results-table.cell-table .cell-col-cell .chip.cell-band-chip {
+  display: block;
+}
+
+.results-table.cell-table .cell-callsign {
+  display: block;
+  max-width: 112px;
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* Cut at a set width; the whole name is the title. */
+.results-table.cell-table .cell-operator-name {
+  display: block;
+  max-width: 144px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.results-table.cell-table .cell-sub {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.results-table.cell-table .cell-sub .cardinal {
+  font-size: 11px;
+}
+
+.cell-sector-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.cell-sector-arrow {
+  display: block;
+  flex-shrink: 0;
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.results-table.cell-table tbody tr.beyond-horizon .cell-operator-name {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+/* Phone: the rank, cell and operator columns fit the first screen, with the
+   next column showing at the edge as the cue that the box scrolls. */
+@media (max-width: 600px) {
+  .cell-results {
+    --cell-rank-w: 46px;
+  }
+
+  .results-table.cell-table .cell-col-rank {
+    padding-left: 12px;
+  }
+
+  .results-table.cell-table .cell-callsign {
+    max-width: 90px;
+  }
+
+  .results-table.cell-table .cell-operator-name {
+    max-width: 112px;
+  }
+}
+
+/* ── Site markers ────────────────────────────────────────────────────────
+   Inline SVG in a divIcon. The tier colour arrives as the SVG's `color` and
+   everything below paints with currentColor; the light casing under each
+   wedge and ring is the marker ring's job on the broadcast dot, keeping the
+   shape off a basemap that is a light tile set on both themes. */
+
+.cell-site-marker {
+  background: none;
+  border: none;
+}
+
+.cell-site-marker svg {
+  display: block;
+  overflow: visible;
+  filter: drop-shadow(var(--panel-shadow));
+}
+
+.cell-site-casing {
+  fill: none;
+  stroke: var(--marker-ring);
+  stroke-width: 3.5;
+  stroke-linejoin: round;
+}
+
+.cell-site-wedge {
+  fill: currentColor;
+  fill-opacity: 0.32;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+}
+
+.cell-site-omni-casing {
+  fill: none;
+  stroke: var(--marker-ring);
+  stroke-width: 4.5;
+}
+
+.cell-site-omni {
+  fill: currentColor;
+  fill-opacity: 0.16;
+  stroke: currentColor;
+  stroke-width: 2.25;
+  stroke-dasharray: 4.4 3.2;
+}
+
+.cell-site-glyph {
+  fill: currentColor;
+  stroke: var(--marker-ring);
+  stroke-width: 2.75;
+}
+
+.cell-site-halo {
+  fill: var(--accent-light);
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+
+.cell-site-marker.is-highlighted .cell-site-wedge {
+  fill-opacity: 0.5;
+}
+
+/* ── Site popup ──────────────────────────────────────────────────────────
+   The broadcast popup's type over a list of the site's cells, which scrolls
+   past about eight. Each row is a subgrid of the list, so chip, sector,
+   frequency and rank line up as columns down the whole list; the tracks are
+   max-content, so no value breaks across lines. */
+
+.cell-popup {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.5;
+}
+
+.cell-popup-operators {
+  line-height: 1.35;
+  margin-bottom: 4px;
+  overflow-wrap: anywhere;
+}
+
+.cell-popup-position {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.cell-popup-count {
+  margin-top: 10px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.cell-popup-cells {
+  display: grid;
+  grid-template-columns: max-content minmax(max-content, 1fr) max-content max-content;
+  column-gap: 10px;
+  list-style: none;
+  max-height: 236px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.cell-popup-cells li {
+  display: grid;
+  grid-column: 1 / -1;
+  /* Fixed tracks first, for an engine without subgrid. */
+  grid-template-columns: 64px 1fr auto 2.8em;
+  grid-template-columns: subgrid;
+  align-items: center;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.cell-popup-cells li:last-child {
+  border-bottom: none;
+}
+
+.cell-popup-sector {
+  color: var(--text-secondary);
+}
+
+.cell-popup-freq {
+  justify-self: end;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
+.cell-popup-rank {
+  justify-self: end;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Map legend ──────────────────────────────────────────────────────────
+   The broadcast legend's chip, allowed to wrap: at phone width its three
+   entries take two lines, lifted clear of the tile attribution. */
+
+.map-legend.cell-map-legend {
+  flex-wrap: wrap;
+  row-gap: 4px;
+  max-width: calc(100% - 24px);
+}
+
+.cell-legend-ramp {
+  display: inline-flex;
+  gap: 3px;
+  padding: 0 2px;
+}
+
+.cell-legend-diamond {
+  width: 7px;
+  height: 7px;
+  border-radius: 1.5px;
+  transform: rotate(45deg);
+  box-shadow: 0 0 0 1px var(--border-light);
+}
+
+.cell-legend-icon {
+  display: block;
+  width: 15px;
+  height: 15px;
+  color: var(--map-chip-ink);
+}
+
+@media (max-width: 600px) {
+  .map-legend.cell-map-legend {
+    bottom: 26px;
+  }
+}
+
+/* ── Summary strip ───────────────────────────────────────────────────────
+   The broadcast stat cards, sized to what each holds: the top pick takes
+   the room, the three counts share it, and at phone width the counts still
+   sit three to a row. Every card is a column with its label held to the
+   bottom, so the labels share one line across a row of cards of one height,
+   and no value is taller than two short lines: the top pick's operator is
+   cut at two lines (the full name is its title) and the band chips run at
+   table size, two rows for a long list. */
+
+.summary-strip .stat-card.cell-stat-wide {
+  flex: 2.2 1 344px;
+}
+
+.summary-strip .stat-card.cell-stat-compact {
+  flex: 1 1 116px;
+}
+
+.summary-strip .stat-card.cell-stat-bands {
+  flex: 1.4 1 224px;
+}
+
+.summary-strip .stat-card.cell-stat-region {
+  flex: 1 1 144px;
+}
+
+.summary-strip.cell-summary .stat-card {
+  display: flex;
+  flex-direction: column;
+}
+
+.summary-strip.cell-summary .stat-card .stat-label {
+  margin-top: auto;
+  padding-top: 8px;
+}
+
+.stat-card .stat-value.cell-stat-pick {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.cell-stat-pick .chip.cell-band-chip {
+  flex-shrink: 0;
+  margin-top: 1px;
+  padding: 2px 8px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.cell-stat-pick-name {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow-wrap: break-word;
+}
+
+.stat-card .stat-value.cell-stat-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  line-height: 1;
+}
+
+.cell-stat-chips .chip.cell-band-chip {
+  padding: 2px 6px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+@media (max-width: 480px) {
+  .summary-strip .stat-card.cell-stat-compact {
+    flex-basis: 96px;
+    padding: 16px 12px;
+  }
+
+  .summary-strip .stat-card.cell-stat-compact .stat-label {
+    font-size: 11px;
+  }
+}

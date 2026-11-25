@@ -47,6 +47,9 @@ export interface Tower {
   feedback_factor?: number;
   /** How many fleet observations that factor rests on. */
   feedback_n?: number;
+
+  /** "cellular" on a cell-site row; absent from a broadcast search. */
+  kind?: string;
 }
 
 /** The echo of what the server actually searched — note `source` is the
@@ -57,6 +60,8 @@ export interface TowerQuery {
   altitude_m: number;
   radius_km: number;
   source: string;
+  /** Echo of the `kind` asked for; absent when none was sent. */
+  kind?: string;
 }
 
 /** /api/towers response */
@@ -64,6 +69,36 @@ export interface TowerSearchResponse {
   towers: Tower[];
   query: TowerQuery;
   count: number;
+  /** Present only on a kind=cellular search. */
+  cellular?: CellularBlock;
+}
+
+/** One licence notice the cellular data must be shown with. */
+export interface CellularAttribution {
+  source: string;
+  licence: string;
+  text: string;
+}
+
+/** The `cellular` block of a kind=cellular /api/towers response. */
+export interface CellularBlock {
+  status: "ok" | "unavailable";
+  detail: string | null;
+  built_at: string | null;
+  attribution: CellularAttribution[];
+}
+
+/** /api/cellular response, which exists only while the server has cellular
+ *  switched on (otherwise that path is a 404). */
+export interface CellularStatusResponse {
+  enabled: true;
+  status: string;
+  detail: string | null;
+  built_at: string | null;
+  /** Cell rows per country code. */
+  countries: Record<string, number>;
+  sources: Record<string, { rows: number; licence: string; source_date: string }>;
+  attribution: CellularAttribution[];
 }
 
 /** /api/elevation response */

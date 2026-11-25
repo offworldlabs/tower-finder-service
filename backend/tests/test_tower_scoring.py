@@ -531,3 +531,177 @@ class TestTerrain:
         towers = _terrain_towers()
         score_towers(towers, _RX_LAT, _RX_LON, _TERRAIN_PARAMS)
         assert towers == without_tiles
+
+
+# ── Cellular carriers ────────────────────────────────────────────────────────
+
+
+class TestCellular:
+    def test_a_cell_site_beside_the_receiver_lights_up_a_small_area(self):
+        """A default LTE carrier (no EIRP, bandwidth or height on record) 50 m
+        from the node: its direct path sets the noise floor, so only cells
+        close to the receiver detect. Bound: under 4 km^2, one cell of the 2 km
+        broadcast grid, which can only report such a footprint as 0 or 4."""
+        from services.tower_ranking import process_and_rank
+        from tests._helpers import device, system
+
+        lat = _north_of_rx(0.05)
+        tv = system([device(freq_mhz=545.0, lat=lat, lon=_RX_LON, eirp=100_000.0, antenna_height=300)])
+        unknown = ("cell_id", "operator", "bandwidth_mhz", "eirp_dbm", "height_m", "azimuth_deg", "beamwidth_deg")
+        lte = dict.fromkeys(unknown) | {
+            "source": "opencellid",
+            "licence": "CC-BY-SA-4.0",
+            "site_id": "S1",
+            "radio": "LTE",
+            "lat": lat,
+            "lon": _RX_LON,
+            "freq_mhz": 751.0,
+            "tilt_deg": None,
+            "modelled": "",
+            "confidence": 0.5,
+        }
+        by_kind = {t["kind"]: t for t in process_and_rank([tv], _RX_LAT, _RX_LON, cellular_rows=[lte])}
+        area = by_kind["cellular"]["expected_area_km2"]
+        assert 0.0 < area < 4.0
+        assert area < by_kind["broadcast"]["expected_area_km2"] / 10
+
+    def test_a_no_radio_row_wider_than_lte_can_be_is_scored_with_the_nr_share(self):
+        """The 3.5 GHz rows have no radio and are 80 MHz wide: nothing that wide
+        is LTE, so they take NR's share, not the unknown-radio (LTE) one."""
+        from services.tower_ranking import process_and_rank
+
+        lat = _north_of_rx(5.0)
+        unknown = ("cell_id", "operator", "eirp_dbm", "height_m", "azimuth_deg", "beamwidth_deg")
+        row = dict.fromkeys(unknown) | {
+            "source": "acma",
+            "licence": "CC-BY-4.0",
+            "site_id": "S1",
+            "lat": lat,
+            "lon": _RX_LON,
+            "freq_mhz": 3500.0,
+            "tilt_deg": None,
+            "modelled": "",
+            "confidence": 0.5,
+        }
+
+        def area(radio, bandwidth_mhz):
+            scored = process_and_rank(
+                [], _RX_LAT, _RX_LON, cellular_rows=[row | {"radio": radio, "bandwidth_mhz": bandwidth_mhz}]
+            )
+            return scored[0]["expected_area_km2"]
+
+        assert area(None, 80.0) == area("NR", 80.0) == 54.75
+        assert area(None, 20.0) == area("LTE", 20.0) == 155.0
+
+    def test_a_carrier_never_takes_the_fleet_calibration(self):
+        """The fleet's system constants, threshold and class offsets were fitted
+        on broadcast towers. With a calibration installed the TV tower's record
+        is the fleet's, and the carrier's is the one it has without it."""
+        from services.tower_ranking import CELLULAR_SCORING
+
+        calibration = {
+            "intercept_db": 85.0,
+            "terms": [],
+            "covariance_db2": [[0.0]],
+            "tau_db": 3.0,
+            "threshold_db": 12.0,
+            "processing_gain_db": 61.8,
+            "class_offsets_db": _CLASS_OFFSETS_DB,
+        }
+        carrier = {"band": "CELL700", "freq_mhz": 751.0, "eirp_dbm": 64.0, "antenna_height_m": 30.0}
+        carrier |= {"kind": "cellular", "radio": "LTE", "bandwidth_mhz": 10.0, "lat": _north_of_rx(3.0)}
+
+        def records(calibration):
+            towers = [_tower(lat=_north_of_rx(-20.0)), _tower(callsign="LTE S1", **carrier)]
+            score_towers(towers, _RX_LAT, _RX_LON, _PARAMS, calibration=calibration, cellular=CELLULAR_SCORING)
+            return [t["expected_detection_area"] for t in towers]
+
+        (tv, cell), (_, cell_without) = records(calibration), records(None)
+        assert (tv["calibration"], cell["calibration"]) == ("fleet", "default")
+        assert cell == cell_without
+
+
+# Real ISED, ACMA and FCC rows (the schema v1 columns the ranking reads), each
+# the one whose area bound came closest to its scored area among a few thousand
+# of its kind around Toronto, Sydney and New York: GSM, LTE and NR, under a km
+# to 35 km out, sectors facing the receiver, side-on and facing away, omni, high
+# and low EIRP.
+_BOUND_COLUMNS = ("source", "site_id", "cell_id", "radio", "lat", "lon", "freq_mhz", "bandwidth_mhz", "eirp_dbm")
+_BOUND_COLUMNS += ("height_m", "azimuth_deg", "beamwidth_deg", "tilt_deg")
+_BOUND_ROWS = {
+    (43.6532, -79.3832): [
+        ("ised", "007091901349:43.69450,-79.42330", "302720-06700-28469", "GSM", 43.6945, -79.4233, 874.9, 0.2)
+        + (61.0, 23.8, 350.0, 60.0, 8.0),
+        ("ised", "007090900899:43.64774,-79.37050", "302720-30013-00009631866", "LTE", 43.64774, -79.3705, 736.5)
+        + (5.0, 63.2, 23.9, 180.0, 66.0, 12.0),
+        ("ised", "007090900899:43.69436,-79.55640", "302720-30515-00009952683", "LTE", 43.69436, -79.5564, 737.5)
+        + (5.0, 66.2, 36.5, 50.0, 66.0, 12.0),
+        ("ised", "007090900899:43.80261,-79.39390", "302720-30080-00009998253", "LTE", 43.80261, -79.3939, 737.5)
+        + (5.0, 63.3, 48.0, 270.0, 69.0, 8.0),
+        ("ised", "007090900899:43.65188,-79.40860", "302720-30013-00009634170", "LTE", 43.65188, -79.4086, 736.5)
+        + (5.0, 60.1, 16.8, 170.0, 67.0, 8.0),
+        ("ised", "007091901349:43.68853,-79.31360", "302720-17500-30019", "GSM", 43.68853, -79.3136, 874.9, 0.2)
+        + (54.2, 26.0, 350.0, 65.0, 9.0),
+        ("ised", "007091901565:43.66170,-79.33970", "610-55010-140546920", "LTE", 43.6617, -79.3397, 882.5, 5.0)
+        + (63.02, 28.3, 30.0, 61.0, 0.0),
+        ("ised", "007091901565:43.67076,-79.38661", "610-55000-140538218", "LTE", 43.670759, -79.386606, 882.5)
+        + (5.0, 63.02, 10.6, 192.0, 61.0, 0.0),
+        ("ised", "007091901349:43.72544,-79.45280", "302720-06700-20143", "GSM", 43.72544, -79.4528, 874.9, 0.2)
+        + (54.2, 3.0, None, None, 0.0),
+    ],
+    (-33.8688, 151.2093): [
+        ("acma", "205544", "12500918", None, -33.875199, 151.197661, 947.5, 20.0, 74.4, 32.5, 160.0, 62.0, 0.0),
+        ("acma", "201574", "13077802", None, -33.793877, 151.196861, 763.0, 10.0, 69.67, 13.3, 280.0, 70.0, 0.0),
+        ("acma", "9022623", "13031065", None, -33.827664, 151.201695, 875.0, 10.0, 69.41, 21.1, 0.0, 67.0, 0.0),
+        ("acma", "101455", "12626538", None, -33.764063, 151.090632, 947.5, 20.0, 73.7, 22.0, 60.0, 63.0, 0.0),
+        ("acma", "205544", "11418708", None, -33.875199, 151.197661, 875.0, 10.0, 71.54, 32.5, 290.0, 65.0, 0.0),
+        ("acma", "51040", "12493573", None, -33.845174, 151.04302, 947.5, 20.0, 74.4, 26.0, 225.0, 65.0, 0.0),
+        ("acma", "101603", "12492595", None, -33.87117, 151.254207, 947.5, 20.0, 74.4, 19.7, 260.0, 62.0, 0.0),
+        ("acma", "131125", "12472614", None, -33.87817, 151.204182, 947.5, 20.0, 74.4, 38.19, 20.0, 63.0, 0.0),
+        ("acma", "203860", "11719046", None, -33.909822, 151.235269, 3525.0, 100.0, 80.05, 35.3, 245.0, 112.0, 0.0),
+        ("acma", "10037952", "12763765", None, -33.867821, 151.211692, 875.0, 10.0, 33.16, 30.0, 0.0, 30.0, 0.0),
+        ("acma", "135132", "10491760", None, -33.867639, 151.217277, 2140.0, 20.0, 37.38, 5.0, 140.0, 65.0, 0.0),
+        ("acma", "134814", "10280766", None, -33.867722, 151.211655, 1857.5, 15.0, 35.29, 3.0, 315.0, 30.0, 0.0),
+    ],
+    (40.7128, -74.0060): [
+        ("fcc_uls", "KNKA206:46", "1:3", None, 40.735944, -73.988472, 892.74, 2.46, 53.64, 36.6, None, None, None),
+        ("fcc_uls", "KNKA310:10", "2:3", None, 40.601389, -74.108417, 890.745, 1.47, 53.64, 41.2, None, None, None),
+    ],
+}
+
+
+def test_area_bounds_are_never_below_the_scored_area_of_real_carriers():
+    from services import tower_ranking
+
+    params, cellular = tower_ranking._scoring_params(), tower_ranking.CELLULAR_SCORING
+    for (rx_lat, rx_lon), rows in _BOUND_ROWS.items():
+        towers = [
+            tower_ranking._cellular_tower(dict(zip(_BOUND_COLUMNS, row)), rx_lat, rx_lon, 80.0, None, None)
+            for row in rows
+        ]
+        score_towers(towers, rx_lat, rx_lon, params, cellular=cellular)
+        areas = np.array([t["expected_area_km2"] for t in towers])
+        # The ranking scores carriers without records: on fewer cells, to the same area.
+        alone = [dict(t) for t in towers]
+        score_towers(alone, rx_lat, rx_lon, params, cellular=cellular, records=False)
+        assert [t["expected_area_km2"] for t in alone] == areas.tolist()
+        for block in (0, 4, 2):
+            bounds = tower_scoring.tower_area_bounds(towers, rx_lat, rx_lon, params, cellular, block=block)
+            assert (areas > 0).all() and (bounds >= areas).all(), (rx_lat, block, bounds / areas)
+
+
+def test_block_bounds_leave_out_the_cells_past_the_bistatic_cut():
+    """An omni carrier 19 km out has its best area around a lens of baseline
+    cells too flat to resolve. The blocks inside that lens count for nothing,
+    so its block bounds stay close above the area it scores."""
+    from services import tower_ranking
+
+    params, cellular = tower_ranking._scoring_params(), tower_ranking.CELLULAR_SCORING
+    row = dict(zip(_BOUND_COLUMNS, ("opencellid", "S1", "C1", "LTE", _north_of_rx(19.0), _RX_LON, 2132.5, 10.0)))
+    row |= {"eirp_dbm": 64.0, "height_m": 30.0, "azimuth_deg": None, "beamwidth_deg": None, "tilt_deg": None}
+    towers = [tower_ranking._cellular_tower(row, _RX_LAT, _RX_LON, 80.0, None, None)]
+    score_towers(towers, _RX_LAT, _RX_LON, params, cellular=cellular)
+    area = towers[0]["expected_area_km2"]
+    for block, within in ((4, 1.5), (2, 1.25)):
+        bound = tower_scoring.tower_area_bounds(towers, _RX_LAT, _RX_LON, params, cellular, block=block)[0]
+        assert area <= bound <= within * area, (block, bound / area)

@@ -401,11 +401,36 @@ def _aggregate(rows: Sequence[sqlite3.Row]) -> dict[str, tuple[float, float]]:
     return {key: (weight, weighted_sum / weight) for key, (weight, weighted_sum) in sums.items() if weight > 0}
 
 
-def apply_feedback(towers: list[dict], rx_lat: float, rx_lon: float, *, k: float = 5.0) -> None:
+def nearby_groups(rx_lat: float, rx_lon: float) -> dict[str, tuple[float, float]] | None:
+    """The feedback groups apply_feedback reads for a receiver, by tower_key; None when the store cannot be read."""
+    try:
+        # One query per request, not one per tower: the row count in a 30 km
+        # radius is small, and grouping in Python costs less than N round trips
+        # inside a request handler.
+        return _aggregate(_nearby_rows(rx_lat, rx_lon, FEEDBACK_RADIUS_KM))
+    except Exception:
+        logger.warning("Feedback lookup failed; ranking towers without it", exc_info=True)
+        return None
+
+
+def group_factor(weight: float, mean_log: float, k: float = 5.0) -> float:
+    """The factor apply_feedback multiplies a tower's area by, from its group's weight and mean log."""
+    return math.exp(weight / (weight + k) * mean_log) if weight > 0 else 1.0
+
+
+def apply_feedback(
+    towers: list[dict],
+    rx_lat: float,
+    rx_lon: float,
+    *,
+    k: float = 5.0,
+    groups: dict[str, tuple[float, float]] | None = None,
+) -> None:
     """Stamp `feedback_n` / `feedback_factor` on each tower and correct its area.
 
     Mutates `towers` in place. `expected_area_km2`, when the ranking put one on
-    the tower, is multiplied by the factor.
+    the tower, is multiplied by the factor. ``groups``, when given, is what
+    nearby_groups returned for this receiver, and the store is not read again.
 
     Never raises into the request path: feedback is a correction, so a corrupt
     or unreadable database must cost the caller the correction, not the tower
@@ -415,14 +440,10 @@ def apply_feedback(towers: list[dict], rx_lat: float, rx_lon: float, *, k: float
     if not towers:
         return
 
-    try:
-        # One query per request, not one per tower: the row count in a 30 km
-        # radius is small, and grouping in Python costs less than N round trips
-        # inside a request handler.
-        groups = _aggregate(_nearby_rows(rx_lat, rx_lon, FEEDBACK_RADIUS_KM))
-    except Exception:
-        logger.warning("Feedback lookup failed; ranking towers without it", exc_info=True)
-        return
+    if groups is None:
+        groups = nearby_groups(rx_lat, rx_lon)
+        if groups is None:
+            return
 
     for tower in towers:
         try:
@@ -433,7 +454,7 @@ def apply_feedback(towers: list[dict], rx_lat: float, rx_lon: float, *, k: float
             # with every other unplaceable tower.
             continue
         weight, mean_log = groups.get(key, (0.0, 0.0))
-        factor = math.exp(weight / (weight + k) * mean_log) if weight > 0 else 1.0
+        factor = group_factor(weight, mean_log, k)
         tower["feedback_n"] = float(weight)
         tower["feedback_factor"] = factor
         area = tower.get("expected_area_km2")
